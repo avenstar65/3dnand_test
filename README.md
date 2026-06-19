@@ -3,6 +3,7 @@
 这个仓库用于搭建一个可复现的 Linux 内核态开发环境，支持编译最新稳定版 Linux 内核、开发树外内核模块、调试 MTD 相关驱动，并通过 QEMU 启动验证。
 
 默认流程使用 Docker 封装 Linux 构建工具链，因此 macOS 和 Linux 上的操作基本一致。
+在 Apple Silicon macOS 上，容器会使用 x86_64 交叉编译工具链构建 QEMU 默认内核。
 
 ## 前置条件
 
@@ -14,6 +15,12 @@
 
 ```sh
 ./scripts/build-image.sh
+```
+
+如果访问 Docker Hub 超时，可以指定可访问的 Ubuntu 基础镜像，例如公司内网镜像或自建代理：
+
+```sh
+BASE_IMAGE=your-registry.example.com/library/ubuntu:24.04 ./scripts/build-image.sh
 ```
 
 进入容器：

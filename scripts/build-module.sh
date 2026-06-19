@@ -10,14 +10,16 @@ linux_dir=$(selected_linux_dir)
 version=$(kernel_version_from_dir "$linux_dir")
 out_dir="$build_dir/linux-$version"
 module_dir="$repo_root/drivers/mtd_demo"
+kernel_arch=${KERNEL_ARCH:-x86_64}
+cross_compile=${CROSS_COMPILE:-x86_64-linux-gnu-}
 
 [ -d "$out_dir" ] || die "缺少内核构建目录: $out_dir"
 
-kernel_release=$(make -s -C "$linux_dir" O="$out_dir" kernelrelease)
+kernel_release=$(make -s -C "$linux_dir" O="$out_dir" ARCH="$kernel_arch" CROSS_COMPILE="$cross_compile" kernelrelease)
 module_install_dir="$out_dir/modules/lib/modules/$kernel_release/extra"
 
 info "编译样例 MTD 模块"
-make -C "$linux_dir" O="$out_dir" M="$module_dir" modules
+make -C "$linux_dir" O="$out_dir" ARCH="$kernel_arch" CROSS_COMPILE="$cross_compile" M="$module_dir" modules
 
 [ -f "$module_dir/mtd_demo.ko" ] || die "未生成 mtd_demo.ko"
 

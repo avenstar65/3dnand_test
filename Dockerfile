@@ -1,4 +1,5 @@
-FROM ubuntu:24.04
+ARG BASE_IMAGE=ubuntu:24.04
+FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -17,6 +18,8 @@ RUN apt-get update \
         flex \
         gdb \
         gdb-multiarch \
+        gcc-x86-64-linux-gnu \
+        g++-x86-64-linux-gnu \
         git \
         kmod \
         libelf-dev \

@@ -6,12 +6,15 @@ set -eu
 channel=stable
 version=
 force=0
+redownload=0
 
 usage() {
   cat <<'USAGE'
-用法: scripts/fetch-linux.sh [--stable|--mainline|--longterm] [--version X.Y.Z] [--force]
+用法: scripts/fetch-linux.sh [--stable|--mainline|--longterm] [--version X.Y.Z] [--force] [--redownload]
 
 默认从 kernel.org releases.json 解析 stable 版本，并下载对应 tarball。
+--force      重新解压源码目录，但复用已有 tarball。
+--redownload 重新下载 tarball。
 USAGE
 }
 
@@ -26,6 +29,7 @@ while [ "$#" -gt 0 ]; do
       version=$1
       ;;
     --force) force=1 ;;
+    --redownload) redownload=1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "未知参数: $1" ;;
   esac
@@ -78,11 +82,20 @@ if [ "$force" -eq 1 ]; then
   rm -rf "$dest"
 fi
 
-info "下载 Linux $version: $url"
-curl -fL "$url" -o "$tar_path"
+if [ -f "$tar_path" ] && [ "$redownload" -ne 1 ] && tar -tf "$tar_path" >/dev/null 2>&1; then
+  info "复用已有下载包: $tar_path"
+else
+  tmp_tar="$tar_path.part"
+  if [ -f "$tar_path" ] && [ ! -f "$tmp_tar" ]; then
+    mv "$tar_path" "$tmp_tar"
+  fi
+  info "下载 Linux $version: $url"
+  curl --continue-at - -fL "$url" -o "$tmp_tar"
+  mv "$tmp_tar" "$tar_path"
+fi
 
 info "解压到 $dest"
 mkdir -p "$linux_work_dir"
-tar -C "$linux_work_dir" -xf "$tar_path"
+tar -C "$linux_work_dir" --delay-directory-restore -xf "$tar_path"
 
 info "完成: $dest"
