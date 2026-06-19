@@ -58,9 +58,20 @@ RUN dpkg --add-architecture amd64 \
         zstd \
     && mkdir -p /opt/rootfs-amd64 \
     && cd /tmp \
-    && apt-get download busybox-static:amd64 \
-    && dpkg-deb -x busybox-static_*_amd64.deb /opt/rootfs-amd64 \
-    && rm -f /tmp/busybox-static_*_amd64.deb \
+    && apt-get download \
+        busybox-static:amd64 \
+        mtd-utils:amd64 \
+        libc6:amd64 \
+        libiniparser1:amd64 \
+        liblzo2-2:amd64 \
+        libpcre2-8-0:amd64 \
+        libselinux1:amd64 \
+        libssl3t64:amd64 \
+        libuuid1:amd64 \
+        libzstd1:amd64 \
+        zlib1g:amd64 \
+    && for deb in ./*.deb; do dpkg-deb -x "$deb" /opt/rootfs-amd64; done \
+    && rm -f /tmp/*.deb \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace

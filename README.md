@@ -72,10 +72,18 @@ BASE_IMAGE=your-registry.example.com/library/ubuntu:24.04 ./scripts/build-image.
 ./scripts/run-qemu.sh --append "MTD_SMOKE=1"
 ```
 
+自动执行 nandsim + UBI/UBIFS 挂载测试，并在成功后关闭虚拟机：
+
+```sh
+./scripts/run-qemu.sh --append "MTD_SMOKE=ubifs"
+```
+
 进入 guest 后可以运行：
 
 ```sh
 /etc/profile.d/mtd.sh smoke
+/etc/profile.d/mtd.sh nandsim
+/etc/profile.d/mtd.sh ubifs
 modprobe mtd_demo
 dmesg
 ```
@@ -105,6 +113,14 @@ dmesg
 - `mtd-utils`：配合 UBI/UBIFS 做读写、擦除和挂载测试。
 
 这条路径不依赖特定 QEMU machine 暴露 Flash，因此最容易跑通。
+
+在 QEMU guest 内执行：
+
+```sh
+/etc/profile.d/mtd.sh ubifs
+```
+
+脚本会自动加载 `nandsim`、`ubi`、`ubifs`，找到 NAND simulator 对应的 `/dev/mtdX`，执行 `flash_erase`、`ubiformat`、`ubiattach`、`ubimkvol`，最后将 `ubi0:rootfs` 挂载到 `/mnt/ubifs` 并写入测试文件。
 
 第二阶段可以新增 QEMU 板级 Flash profile，例如 NOR 或 NAND 仿真。相关参数应放到 `configs/qemu/`，不要混入默认 x86_64 流程。
 
@@ -138,6 +154,7 @@ dmesg
 ./scripts/shell.sh ./scripts/build-module.sh
 ./scripts/shell.sh ./scripts/build-rootfs.sh
 ./scripts/shell.sh ./scripts/run-qemu.sh --append "MTD_SMOKE=1"
+./scripts/shell.sh ./scripts/run-qemu.sh --append "MTD_SMOKE=ubifs"
 ```
 
 ## 常见问题

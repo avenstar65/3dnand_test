@@ -28,6 +28,9 @@ mkdir -p \
   "$stage/tmp" \
   "$stage/run" \
   "$stage/mnt" \
+  "$stage/mnt/ubifs" \
+  "$stage/lib64" \
+  "$stage/usr/sbin" \
   "$stage/lib/modules"
 
 busybox_path=${ROOTFS_BUSYBOX:-}
@@ -42,8 +45,28 @@ fi
 file "$busybox_path" | grep -Eq 'x86-64|x86_64' || die "busybox 不是 x86_64 ELF: $busybox_path"
 
 cp "$busybox_path" "$stage/bin/busybox"
-for applet in sh mount modprobe cat echo grep ls mkdir dmesg insmod rmmod poweroff; do
+for applet in sh mount umount modprobe cat echo grep ls mkdir dmesg insmod rmmod sleep true false poweroff; do
   ln -sf busybox "$stage/bin/$applet"
+done
+
+if [ -d /opt/rootfs-amd64/lib ]; then
+  cp -R /opt/rootfs-amd64/lib/. "$stage/lib/"
+fi
+if [ -d /opt/rootfs-amd64/lib64 ]; then
+  cp -R /opt/rootfs-amd64/lib64/. "$stage/lib64/"
+fi
+if [ -d /opt/rootfs-amd64/usr/lib ]; then
+  mkdir -p "$stage/usr/lib"
+  cp -R /opt/rootfs-amd64/usr/lib/. "$stage/usr/lib/"
+fi
+if [ -e "$stage/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2" ]; then
+  ln -sf /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 "$stage/lib64/ld-linux-x86-64.so.2"
+fi
+
+for tool in flash_erase ubiformat ubiattach ubidetach ubimkvol ubinfo; do
+  tool_path="/opt/rootfs-amd64/usr/sbin/$tool"
+  [ -x "$tool_path" ] || die "缺少 amd64 mtd-utils 工具: $tool_path"
+  cp "$tool_path" "$stage/usr/sbin/$tool"
 done
 
 cp "$repo_root/rootfs/init" "$stage/init"
