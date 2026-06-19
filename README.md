@@ -3,7 +3,7 @@
 这个仓库用于搭建一个可复现的 Linux 内核态开发环境，支持编译最新稳定版 Linux 内核、开发树外内核模块、调试 MTD 相关驱动，并通过 QEMU 启动验证。
 
 默认流程使用 Docker 封装 Linux 构建工具链，因此 macOS 和 Linux 上的操作基本一致。
-在 Apple Silicon macOS 上，容器会使用 x86_64 交叉编译工具链构建 QEMU 默认内核。
+在 Apple Silicon macOS 上，容器会使用 x86_64 交叉编译工具链构建 QEMU 默认内核，并把 amd64 版 BusyBox 放入 initramfs，避免 x86_64 guest 执行 arm64 用户态程序。
 
 ## 前置条件
 
@@ -66,6 +66,12 @@ BASE_IMAGE=your-registry.example.com/library/ubuntu:24.04 ./scripts/build-image.
 ./scripts/run-qemu.sh
 ```
 
+自动执行 MTD smoke 并在成功后关闭虚拟机：
+
+```sh
+./scripts/run-qemu.sh --append "MTD_SMOKE=1"
+```
+
 进入 guest 后可以运行：
 
 ```sh
@@ -105,8 +111,10 @@ dmesg
 ## 目录说明
 
 - `Dockerfile`：构建 Linux 内核、QEMU、GDB 和 MTD 工具环境。
+- `Dockerfile` 也会提取 `/opt/rootfs-amd64/usr/bin/busybox`，用于 x86_64 initramfs。
 - `scripts/`：获取源码、编译、构建 rootfs、运行 QEMU 和连接 GDB。
 - `configs/linux/`：内核配置片段。
+- `configs/linux/qemu-x86_64-lean.fragment`：关闭图形、声音、无线、NFS 等无关大子系统，避免 Docker Desktop 上 debug 内核链接时内存不足。
 - `configs/qemu/`：QEMU profile。
 - `rootfs/`：initramfs 模板。
 - `drivers/mtd_demo/`：树外 MTD 示例模块。
@@ -129,7 +137,7 @@ dmesg
 ./scripts/shell.sh ./scripts/build-kernel.sh
 ./scripts/shell.sh ./scripts/build-module.sh
 ./scripts/shell.sh ./scripts/build-rootfs.sh
-./scripts/shell.sh ./scripts/run-qemu.sh
+./scripts/shell.sh ./scripts/run-qemu.sh --append "MTD_SMOKE=1"
 ```
 
 ## 常见问题
@@ -140,6 +148,12 @@ dmesg
 
 ```sh
 LINUX_DIR=/workspace/work/linux/linux-7.0.12 ./scripts/configure-kernel.sh
+```
+
+如果 kernel.org 下载速度很慢，可以指定内核镜像源：
+
+```sh
+KERNEL_BASE_URL=https://mirrors.tuna.tsinghua.edu.cn/kernel ./scripts/shell.sh ./scripts/fetch-linux.sh --redownload
 ```
 
 如果 QEMU 调试端口被占用，请关闭已有 QEMU 进程，或修改脚本中的 GDB 端口参数。

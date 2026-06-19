@@ -1,0 +1,30 @@
+# Keep the default QEMU kernel focused on serial console, modules, MTD, and initramfs.
+# This avoids huge unrelated subsystems that make debug builds link slowly or OOM
+# under Docker Desktop on macOS.
+# CONFIG_DRM is not set
+# CONFIG_DRM_I915 is not set
+# CONFIG_DRM_VIRTIO_GPU is not set
+# CONFIG_FB is not set
+# CONFIG_SOUND is not set
+# CONFIG_SND is not set
+# CONFIG_MEDIA_SUPPORT is not set
+# CONFIG_WLAN is not set
+# CONFIG_WIRELESS is not set
+# CONFIG_CFG80211 is not set
+# CONFIG_MAC80211 is not set
+# CONFIG_USB_SUPPORT is not set
+# CONFIG_USB is not set
+# CONFIG_HID_SUPPORT is not set
+# CONFIG_INPUT_LEDS is not set
+# CONFIG_NETWORK_FILESYSTEMS is not set
+# CONFIG_NFS_FS is not set
+# CONFIG_NFSD is not set
+# CONFIG_9P_FS is not set
+# CONFIG_FIREWIRE is not set
+# CONFIG_BLUETOOTH is not set
+# CONFIG_ATA is not set
+# CONFIG_MD is not set
+# CONFIG_IOMMU_SUPPORT is not set
+# CONFIG_VIRTUALIZATION is not set
+CONFIG_DEBUG_INFO_REDUCED=y
+

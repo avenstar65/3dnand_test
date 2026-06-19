@@ -20,9 +20,10 @@ make -C "$linux_dir" O="$out_dir" ARCH="$kernel_arch" CROSS_COMPILE="$cross_comp
 merge="$linux_dir/scripts/kconfig/merge_config.sh"
 [ -x "$merge" ] || die "找不到 merge_config.sh: $merge"
 
-"$merge" -O "$out_dir" \
+"$merge" -m -O "$out_dir" \
   "$out_dir/.config" \
   "$repo_root/configs/linux/qemu-x86_64-debug.fragment" \
+  "$repo_root/configs/linux/qemu-x86_64-lean.fragment" \
   "$repo_root/configs/linux/mtd.fragment"
 
 make -C "$linux_dir" O="$out_dir" ARCH="$kernel_arch" CROSS_COMPILE="$cross_compile" olddefconfig

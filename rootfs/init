@@ -17,8 +17,12 @@ if [ -r /etc/profile.d/mtd.sh ]; then
 fi
 
 if [ "${MTD_SMOKE:-0}" = "1" ]; then
-  mtd_smoke || echo "MTD smoke 测试失败，进入 shell"
+  if mtd_smoke; then
+    echo "MTD smoke 测试通过，关闭虚拟机"
+    poweroff -f
+  fi
+
+  echo "MTD smoke 测试失败，进入 shell"
 fi
 
 exec /bin/sh
-

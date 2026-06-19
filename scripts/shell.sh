@@ -16,10 +16,17 @@ if [ -t 0 ] && [ -t 1 ]; then
   tty_args="-it"
 fi
 
+container_name=${CONTAINER_NAME:-linux-mtd-qemu-dev-$$}
+
 docker run --rm $tty_args \
-  --name linux-mtd-qemu-dev \
+  --name "$container_name" \
   -v "$repo_root:/workspace" \
   -w /workspace \
   -e WORK_DIR=/workspace/work \
+  -e KERNEL_BASE_URL \
+  -e LINUX_DIR \
+  -e JOBS \
+  -e KERNEL_ARCH \
+  -e CROSS_COMPILE \
   "$image_name" \
   "$@"

@@ -4,6 +4,7 @@ set -eu
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/common.sh"
 
 need_cmd cpio
+need_cmd file
 need_cmd find
 mkdirs
 
@@ -29,15 +30,21 @@ mkdir -p \
   "$stage/mnt" \
   "$stage/lib/modules"
 
-if command -v busybox >/dev/null 2>&1; then
-  busybox_path=$(command -v busybox)
-  cp "$busybox_path" "$stage/bin/busybox"
-  for applet in sh mount modprobe cat echo grep ls mkdir dmesg insmod rmmod; do
-    ln -sf busybox "$stage/bin/$applet"
-  done
-else
-  die "容器内缺少 busybox，请在 Dockerfile 中安装或提供 busybox"
+busybox_path=${ROOTFS_BUSYBOX:-}
+if [ -z "$busybox_path" ] && [ -x /opt/rootfs-amd64/usr/bin/busybox ]; then
+  busybox_path=/opt/rootfs-amd64/usr/bin/busybox
 fi
+if [ -z "$busybox_path" ] && command -v busybox >/dev/null 2>&1; then
+  busybox_path=$(command -v busybox)
+fi
+
+[ -n "$busybox_path" ] && [ -x "$busybox_path" ] || die "容器内缺少 busybox，请在 Dockerfile 中安装或设置 ROOTFS_BUSYBOX"
+file "$busybox_path" | grep -Eq 'x86-64|x86_64' || die "busybox 不是 x86_64 ELF: $busybox_path"
+
+cp "$busybox_path" "$stage/bin/busybox"
+for applet in sh mount modprobe cat echo grep ls mkdir dmesg insmod rmmod poweroff; do
+  ln -sf busybox "$stage/bin/$applet"
+done
 
 cp "$repo_root/rootfs/init" "$stage/init"
 cp "$repo_root/rootfs/profile.d/mtd.sh" "$stage/etc/profile.d/mtd.sh"

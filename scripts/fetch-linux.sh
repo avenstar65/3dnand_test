@@ -38,6 +38,7 @@ done
 
 need_cmd curl
 need_cmd python3
+need_cmd rsync
 need_cmd tar
 mkdirs
 
@@ -69,7 +70,8 @@ fi
 
 major=${version%%.*}
 tar_name="linux-$version.tar.xz"
-url="https://cdn.kernel.org/pub/linux/kernel/v$major.x/$tar_name"
+kernel_base_url=${KERNEL_BASE_URL:-https://cdn.kernel.org/pub/linux/kernel}
+url="$kernel_base_url/v$major.x/$tar_name"
 tar_path="$downloads_dir/$tar_name"
 dest="$linux_work_dir/linux-$version"
 
@@ -96,6 +98,12 @@ fi
 
 info "解压到 $dest"
 mkdir -p "$linux_work_dir"
-tar -C "$linux_work_dir" --delay-directory-restore -xf "$tar_path"
+extract_tmp=${TMPDIR:-/tmp}/linux-extract-$$
+rm -rf "$extract_tmp"
+mkdir -p "$extract_tmp"
+tar -C "$extract_tmp" --delay-directory-restore -xf "$tar_path"
+rm -rf "$dest"
+rsync -a --delete "$extract_tmp/linux-$version/" "$dest/"
+rm -rf "$extract_tmp"
 
 info "完成: $dest"

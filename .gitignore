@@ -2,4 +2,11 @@ work/
 *.log
 *.tmp
 .DS_Store
-
+*.ko
+*.mod
+*.mod.c
+*.o
+*.cmd
+.module-common.o
+Module.symvers
+modules.order
