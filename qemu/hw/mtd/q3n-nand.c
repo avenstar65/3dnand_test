@@ -717,6 +717,16 @@ static const MemoryRegionOps q3n_mmio_ops = {
     },
 };
 
+MemoryRegion *q3n_nand_get_mmio(Q3NNandState *s)
+{
+    return &s->mmio;
+}
+
+void q3n_nand_set_irq(Q3NNandState *s, qemu_irq irq)
+{
+    s->irq = irq;
+}
+
 static void q3n_realize(DeviceState *dev, Error **errp)
 {
     Q3NNandState *s = Q3N_NAND(dev);

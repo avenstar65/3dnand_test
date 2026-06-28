@@ -1,0 +1,1 @@
+obj-$(CONFIG_MTD_NAND_QEMU_3DNAND)	+= qemu_3dnand.o

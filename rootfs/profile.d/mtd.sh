@@ -5,8 +5,15 @@ UBIFS_MOUNT=/mnt/ubifs
 UBIFS_VOL_NAME=rootfs
 
 mtd_load_simulators() {
+  modprobe qemu_3dnand 2>/dev/null || true
   modprobe mtdram total_size=32768 erase_size=128 2>/dev/null || true
   modprobe nandsim first_id_byte=0x20 second_id_byte=0xaa third_id_byte=0x00 fourth_id_byte=0x15 2>/dev/null || true
+}
+
+mtd_load_q3n() {
+  modprobe qemu_3dnand || return 1
+  cat /proc/mtd
+  grep -q '"qemu-3dnand"' /proc/mtd
 }
 
 mtd_find_nandsim() {
@@ -101,6 +108,7 @@ mtd_clean() {
 
 case "${1:-}" in
   smoke) mtd_smoke ;;
+  q3n) mtd_load_q3n ;;
   nandsim) mtd_load_simulators; cat /proc/mtd ;;
   ubifs) mtd_ubifs ;;
   clean) mtd_clean ;;

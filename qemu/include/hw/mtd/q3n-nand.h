@@ -15,6 +15,12 @@
 #define TYPE_Q3N_NAND "q3n-nand"
 OBJECT_DECLARE_SIMPLE_TYPE(Q3NNandState, Q3N_NAND)
 
+#define TYPE_Q3N_NAND_PCI "q3n-nand-pci"
+
+#define Q3N_PCI_VENDOR_ID              0x1b36
+#define Q3N_PCI_DEVICE_ID              0x003d
+#define Q3N_PCI_REVISION               0x01
+
 #define Q3N_MMIO_SIZE                 0x10000
 
 #define Q3N_DIES                      2
@@ -76,5 +82,8 @@ enum q3n_irq {
     Q3N_IRQ_DONE  = 1U << 0,
     Q3N_IRQ_ERROR = 1U << 1,
 };
+
+MemoryRegion *q3n_nand_get_mmio(Q3NNandState *s);
+void q3n_nand_set_irq(Q3NNandState *s, qemu_irq irq);
 
 #endif

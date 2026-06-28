@@ -50,6 +50,8 @@ BASE_IMAGE=your-registry.example.com/library/ubuntu:24.04 ./scripts/build-image.
 
 默认下载 QEMU 11.0.2，源码放在 `work/qemu/qemu-11.0.2`，构建输出在 `work/build/qemu-11.0.2/qemu-system-x86_64`。
 可以用 `QEMU_VERSION` 或 `QEMU_DIR` 覆盖默认源码版本/目录。
+当前 QEMU overlay 会注册 `q3n-nand-pci`，`scripts/run-qemu.sh` 默认把它挂到 q35 PCI 总线上。
+Linux overlay 会注册 `qemu_3dnand` PCI 驱动，并通过直接 MTD 回调暴露名为 `qemu-3dnand` 的 MTD 设备。
 
 配置并编译内核：
 
@@ -143,6 +145,7 @@ dmesg
 - `configs/linux/qemu-x86_64-lean.fragment`：关闭图形、声音、无线、NFS 等无关大子系统，避免 Docker Desktop 上 debug 内核链接时内存不足。
 - `configs/qemu/`：QEMU profile。
 - `qemu/`：q3n-nand QEMU 源码 overlay，可通过 `scripts/apply-qemu-overlay.sh` 合入 `work/qemu/qemu-*`。
+- `linux/`：qemu_3dnand Linux 驱动 overlay，可通过 `scripts/apply-linux-overlay.sh` 合入 `work/linux/linux-*`。
 - `rootfs/`：initramfs 模板。
 - `drivers/mtd_demo/`：树外 MTD 示例模块。
 - `work/`：下载和构建产物目录，已被 Git 忽略。
