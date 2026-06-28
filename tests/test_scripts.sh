@@ -30,8 +30,11 @@ for file in \
   scripts/build-image.sh \
   scripts/shell.sh \
   scripts/fetch-linux.sh \
+  scripts/fetch-qemu.sh \
   scripts/configure-kernel.sh \
   scripts/build-kernel.sh \
+  scripts/apply-qemu-overlay.sh \
+  scripts/build-qemu.sh \
   scripts/build-rootfs.sh \
   scripts/build-module.sh \
   scripts/run-qemu.sh \
@@ -44,7 +47,12 @@ for file in \
   rootfs/init \
   rootfs/profile.d/mtd.sh \
   drivers/mtd_demo/Makefile \
-  drivers/mtd_demo/mtd_demo.c; do
+  drivers/mtd_demo/mtd_demo.c \
+  qemu/README.md \
+  qemu/include/hw/mtd/q3n-nand.h \
+  qemu/hw/mtd/q3n-nand.c \
+  qemu/hw/mtd/meson.build \
+  qemu/hw/mtd/Kconfig; do
   assert_file "$file"
 done
 
@@ -52,8 +60,11 @@ for file in \
   scripts/build-image.sh \
   scripts/shell.sh \
   scripts/fetch-linux.sh \
+  scripts/fetch-qemu.sh \
   scripts/configure-kernel.sh \
   scripts/build-kernel.sh \
+  scripts/apply-qemu-overlay.sh \
+  scripts/build-qemu.sh \
   scripts/build-rootfs.sh \
   scripts/build-module.sh \
   scripts/run-qemu.sh \
@@ -68,6 +79,10 @@ assert_contains Dockerfile 'qemu-system-x86'
 assert_contains Dockerfile 'mtd-utils'
 assert_contains Dockerfile 'ARG BASE_IMAGE'
 assert_contains Dockerfile 'gcc-x86-64-linux-gnu'
+assert_contains Dockerfile 'meson'
+assert_contains Dockerfile 'ninja-build'
+assert_contains Dockerfile 'libglib2.0-dev'
+assert_contains Dockerfile 'libpixman-1-dev'
 assert_contains Dockerfile 'busybox-static:amd64'
 assert_contains Dockerfile 'mtd-utils:amd64'
 assert_contains .dockerignore '^work/'
@@ -77,7 +92,10 @@ assert_contains scripts/configure-kernel.sh 'merge_config.sh'
 assert_contains scripts/configure-kernel.sh '"\$merge" -m'
 assert_contains scripts/build-kernel.sh 'CROSS_COMPILE'
 assert_contains scripts/fetch-linux.sh 'kernel.org'
+assert_contains scripts/fetch-qemu.sh 'download.qemu.org'
 assert_contains scripts/fetch-linux.sh 'KERNEL_BASE_URL'
+assert_contains scripts/build-qemu.sh 'apply-qemu-overlay.sh'
+assert_contains scripts/build-qemu.sh 'x86_64-softmmu'
 assert_contains scripts/fetch-linux.sh 'delay-directory-restore'
 assert_contains scripts/fetch-linux.sh 'redownload'
 assert_contains scripts/fetch-linux.sh 'continue-at'
@@ -106,5 +124,12 @@ assert_contains rootfs/profile.d/mtd.sh 'ubiformat -q'
 assert_contains README.md 'QEMU'
 assert_contains README.md 'MTD'
 assert_contains README.md 'MTD_SMOKE=ubifs'
+assert_contains qemu/include/hw/mtd/q3n-nand.h 'TYPE_Q3N_NAND'
+assert_contains qemu/include/hw/mtd/q3n-nand.h 'Q3N_DEFAULT_DATA_BLOCKS_PER_PLANE[[:space:]]+208'
+assert_contains qemu/include/hw/mtd/q3n-nand.h 'Q3N_DEFAULT_PARITY_BLOCKS_PER_PLANE[[:space:]]+32'
+assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_append_parity_record'
+assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_erase_data_block'
+assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_recover_data_page'
+assert_contains qemu/hw/mtd/meson.build 'CONFIG_Q3N_NAND'
 
 printf 'ok: script structure verified\n'

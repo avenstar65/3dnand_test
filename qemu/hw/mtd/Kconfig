@@ -1,0 +1,3 @@
+config Q3N_NAND
+    bool
+    default y

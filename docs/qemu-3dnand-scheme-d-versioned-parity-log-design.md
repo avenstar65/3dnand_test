@@ -1,5 +1,7 @@
 # QEMU 3D NAND 方案 D 详细设计：8-plane data + versioned parity log block
 
+配套开发计划见 `qemu-3dnand-scheme-d-development-plan.md`。
+
 ## 1. 设计目标
 
 方案 D 的目标是在不修改 Linux 原生 MTD/raw NAND/UBI 基础代码的前提下，在 QEMU 控制器内部验证一种更接近真实控制器/轻量 FTL 的 page-raid 方案：

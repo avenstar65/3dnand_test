@@ -10,6 +10,7 @@ esac
 
 work_dir=${WORK_DIR:-"$repo_root/work"}
 linux_work_dir=${LINUX_WORK_DIR:-"$work_dir/linux"}
+qemu_work_dir=${QEMU_WORK_DIR:-"$work_dir/qemu"}
 build_dir=${BUILD_DIR:-"$work_dir/build"}
 downloads_dir=${DOWNLOADS_DIR:-"$work_dir/downloads"}
 rootfs_build_dir=${ROOTFS_BUILD_DIR:-"$work_dir/rootfs"}
@@ -29,7 +30,7 @@ need_cmd() {
 }
 
 mkdirs() {
-  mkdir -p "$work_dir" "$linux_work_dir" "$build_dir" "$downloads_dir" "$rootfs_build_dir"
+  mkdir -p "$work_dir" "$linux_work_dir" "$qemu_work_dir" "$build_dir" "$downloads_dir" "$rootfs_build_dir"
 }
 
 latest_linux_dir() {
@@ -51,3 +52,21 @@ kernel_version_from_dir() {
   basename "$1" | sed 's/^linux-//'
 }
 
+latest_qemu_dir() {
+  find "$qemu_work_dir" -maxdepth 1 -type d -name 'qemu-*' 2>/dev/null | sort -V | tail -n 1
+}
+
+selected_qemu_dir() {
+  if [ "${QEMU_DIR:-}" ]; then
+    printf '%s\n' "$QEMU_DIR"
+    return 0
+  fi
+
+  latest=$(latest_qemu_dir)
+  [ -n "$latest" ] || die "未找到 QEMU 源码，请先运行 ./scripts/fetch-qemu.sh"
+  printf '%s\n' "$latest"
+}
+
+qemu_version_from_dir() {
+  basename "$1" | sed 's/^qemu-//'
+}

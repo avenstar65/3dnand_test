@@ -41,6 +41,16 @@ BASE_IMAGE=your-registry.example.com/library/ubuntu:24.04 ./scripts/build-image.
 ./scripts/fetch-linux.sh --version 7.0.12
 ```
 
+获取 QEMU 源码并编译带 q3n-nand overlay 的 QEMU：
+
+```sh
+./scripts/fetch-qemu.sh
+./scripts/build-qemu.sh
+```
+
+默认下载 QEMU 11.0.2，源码放在 `work/qemu/qemu-11.0.2`，构建输出在 `work/build/qemu-11.0.2/qemu-system-x86_64`。
+可以用 `QEMU_VERSION` 或 `QEMU_DIR` 覆盖默认源码版本/目录。
+
 配置并编译内核：
 
 ```sh
@@ -132,6 +142,7 @@ dmesg
 - `configs/linux/`：内核配置片段。
 - `configs/linux/qemu-x86_64-lean.fragment`：关闭图形、声音、无线、NFS 等无关大子系统，避免 Docker Desktop 上 debug 内核链接时内存不足。
 - `configs/qemu/`：QEMU profile。
+- `qemu/`：q3n-nand QEMU 源码 overlay，可通过 `scripts/apply-qemu-overlay.sh` 合入 `work/qemu/qemu-*`。
 - `rootfs/`：initramfs 模板。
 - `drivers/mtd_demo/`：树外 MTD 示例模块。
 - `work/`：下载和构建产物目录，已被 Git 忽略。
@@ -149,6 +160,8 @@ dmesg
 ```sh
 ./scripts/build-image.sh
 ./scripts/shell.sh ./scripts/fetch-linux.sh
+./scripts/shell.sh ./scripts/fetch-qemu.sh
+./scripts/shell.sh ./scripts/build-qemu.sh
 ./scripts/shell.sh ./scripts/configure-kernel.sh
 ./scripts/shell.sh ./scripts/build-kernel.sh
 ./scripts/shell.sh ./scripts/build-module.sh
