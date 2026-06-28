@@ -821,6 +821,8 @@ flowchart TB
 
 #### 13.3.4 方案 D：8-plane data + versioned parity log block
 
+完整设计见 `qemu-3dnand-scheme-d-versioned-parity-log-design.md`。本节只保留概要、关键映射和约束。
+
 这个方案保留 8 个 plane 的 data 并行能力，不再把某一条 lane 或某一个 page 位置固定用作 parity。247 个 block 中划分出一部分作为 data block pool，一部分作为 parity log block pool。parity block 中存放的是带版本号的 parity record，旧 parity 不原地更新，而是通过版本号失效，新 parity 追加写入新的 page。
 
 ```mermaid
