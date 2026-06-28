@@ -770,3 +770,65 @@ sync
 | 未满 stripe 无 RAID 保护 | parity 只在 data pages 写满后生成 | 测试覆盖 open stripe 场景 |
 | parity 写失败 | data 已落盘但 RAID 无效 | 标记 parity invalid，必要时返回错误 |
 | 不验证并行性能 | 本方案先简化语义 | 后续单独设计跨 die/plane 并行方案 |
+
+## 19. 与方案 D：versioned parity log block 的关系
+
+方案 A 是第一阶段实现目标：parity page 位于同一个 physical block 内，data page 和 hidden parity page 共同决定 MTD 可见容量。它的优点是映射简单、坏块边界清楚、MTD/UBI 兼容路径容易验证。
+
+方案 D 是后续高级 profile：8 个 plane 都存放 data，parity 不放在同一个 data block 内，而是写入额外的 parity log block pool。parity record 通过 `data_block_generation[]` 和 `parity_version` 管理有效性。data block erase 时不要求实时 erase parity block，只需要递增对应 data block generation，使旧 parity record 自动变成 stale；后续写入新 data 后，再追加写入新的 parity record。
+
+两者差异如下：
+
+| 项 | 方案 A | 方案 D |
+| --- | --- | --- |
+| parity 位置 | 同 physical block 内 hidden page | 独立 parity log block pool |
+| data plane 利用 | 部分 page 用于 parity | 8 个 plane 都可存 data |
+| data erase 行为 | erase physical block 后 data/parity 同时空闲 | erase data block 后 generation 递增，旧 parity stale |
+| parity 更新 | stripe 写满后写固定 hidden parity page | append-only 写新 parity record |
+| 元数据 | stripe valid bitmap、parity_valid | generation、version、parity index、checkpoint |
+| GC | 不需要 parity GC | 需要 parity log GC |
+| 实现复杂度 | 低 | 中到高，接近轻量 FTL |
+| 第一阶段采用 | 是 | 否 |
+
+方案 D 需要新增的数据结构方向：
+
+```c
+struct q3n_data_block_meta {
+    uint32_t generation;
+    bool bad;
+};
+
+struct q3n_parity_record_meta {
+    uint64_t group_id;
+    uint32_t stripe_index;
+    uint32_t parity_version;
+    uint32_t data_block_generation[8];
+    struct q3n_physical_addr parity_addr;
+    bool valid;
+};
+
+struct q3n_parity_log {
+    struct q3n_physical_addr active_block;
+    uint16_t next_page;
+    uint32_t gc_watermark;
+};
+```
+
+方案 D 的实现前置条件：
+
+| 前置条件 | 原因 |
+| --- | --- |
+| 已完成标准 MTD/UBI 路径 | D 不能先于基础驱动语义验证 |
+| 已有 QEMU fault injection | 需要验证 stale parity、lost parity、GC 中断等异常 |
+| 已有 debug/statistics | 必须能观察 parity record、generation、GC 状态 |
+| 已定义 checkpoint 策略 | 否则 QEMU 重启后无法恢复 parity index |
+
+因此，代码实现上建议保留统一 RAID profile 抽象：
+
+```text
+raid_profile=block-local-7p1
+raid_profile=block-local-3p1
+raid_profile=versioned-parity-log
+```
+
+第一版只实现 `block-local-*`。`versioned-parity-log` 作为后续 profile 增加，不改变 Linux MTD/UBI 基础接口。

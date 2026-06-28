@@ -670,13 +670,14 @@ UBI min_io_size = 16KiB
 
 ### 13.3 可选方案矩阵
 
-在“不修改 MTD/raw NAND/UBI 原生代码”的前提下，可以把设计目标分成三类。它们的主要差异不是 QEMU 内部能不能并行，而是 **MTD/UBI 每次最小写入能否天然提供足够多的 page 给控制器并行调度**。
+在“不修改 MTD/raw NAND/UBI 原生代码”的前提下，可以把设计目标分成四类。它们的主要差异不是 QEMU 内部能不能并行，而是 **MTD/UBI 每次最小写入能否天然提供足够多的 page 给控制器并行调度，以及 parity 是跟随 data stripe 同步写入，还是写入独立的版本化 parity log block**。
 
 ```mermaid
 flowchart TB
     A["方案 A<br/>16KiB page-visible"]
     B["方案 B<br/>64KiB logical-page-visible"]
     C["方案 C<br/>128KiB logical-page-visible"]
+    D["方案 D<br/>8-plane data + versioned parity log block"]
 
     A --> A1["标准 raw NAND 语义最好"]
     A --> A2["小写并行能力弱"]
@@ -689,6 +690,10 @@ flowchart TB
     C --> C1["每次最小写可覆盖 8 data page"]
     C --> C2["需要额外 parity 空间"]
     C --> C3["更接近 FTL/translation layer"]
+
+    D --> D1["8 个 plane 都存 data"]
+    D --> D2["parity 写到额外 block 池"]
+    D --> D3["用 generation/version 管理旧 parity 失效"]
 ```
 
 #### 13.3.1 方案 A：兼容优先，16KiB page-visible
@@ -814,24 +819,170 @@ flowchart TB
 | 映射层复杂 | 需要 logical page 到 data/parity region 的转换 |
 | 不适合第一版 | 已接近 translation layer/FTL 设计 |
 
-#### 13.3.4 方案选择建议
+#### 13.3.4 方案 D：8-plane data + versioned parity log block
+
+这个方案保留 8 个 plane 的 data 并行能力，不再把某一条 lane 或某一个 page 位置固定用作 parity。247 个 block 中划分出一部分作为 data block pool，一部分作为 parity log block pool。parity block 中存放的是带版本号的 parity record，旧 parity 不原地更新，而是通过版本号失效，新 parity 追加写入新的 page。
+
+```mermaid
+flowchart TB
+    subgraph DataGroup["RAID data block group"]
+        D0["lane0 data block"]
+        D1["lane1 data block"]
+        D2["lane2 data block"]
+        D3["lane3 data block"]
+        D4["lane4 data block"]
+        D5["lane5 data block"]
+        D6["lane6 data block"]
+        D7["lane7 data block"]
+    end
+
+    subgraph ParityPool["Parity log block pool"]
+        PB0["parity block A<br/>append records"]
+        PB1["parity block B<br/>next active block"]
+        PGC["old parity blocks<br/>GC / erase"]
+    end
+
+    D0 -->|"stripe data"| PB0
+    D1 -->|"stripe data"| PB0
+    D2 -->|"stripe data"| PB0
+    D3 -->|"stripe data"| PB0
+    D4 -->|"stripe data"| PB0
+    D5 -->|"stripe data"| PB0
+    D6 -->|"stripe data"| PB0
+    D7 -->|"stripe data"| PB0
+    PB0 -->|"full"| PB1
+    PB0 -->|"obsolete records"| PGC
+```
+
+核心变化：
+
+| 项 | 设计 |
+| --- | --- |
+| MTD 可见 page | 可保持 16KiB，或作为后续 profile 暴露 128KiB logical page |
+| data lane | 8 条 lane 全部存 data |
+| parity 位置 | 额外 parity log block pool |
+| parity 写入方式 | append-only，新版本写到新 page |
+| parity 失效方式 | 通过 data block generation 和 parity version 判断 |
+| data block erase | 不要求同步 erase parity block |
+| parity block erase | 由 QEMU 内部 GC 回收 |
+| 内核基础层修改 | 不需要 |
+
+版本化 parity record 建议格式：
+
+```c
+struct q3n_parity_record {
+    uint64_t group_id;
+    uint32_t stripe_index;
+    uint32_t parity_version;
+    uint32_t data_block_generation[8];
+    uint32_t record_crc;
+    uint8_t  valid_marker;
+    uint8_t  parity_payload[16384];
+};
+```
+
+其中 `data_block_generation[]` 是关键字段。每个 data block 被 erase 后，对应 generation 递增。旧 parity record 即使还留在 parity block 中，也会因为 generation 不匹配而自动失效。
+
+```mermaid
+sequenceDiagram
+    participant MTD as MTD erase/write
+    participant CTRL as QEMU controller
+    participant DATA as data block
+    participant PMETA as parity index
+    participant PB as parity log block
+
+    MTD->>CTRL: erase data block lane3/blockX
+    CTRL->>DATA: erase physical data block
+    CTRL->>PMETA: data_generation[3]++
+    CTRL->>PMETA: mark old parity records stale
+    Note over CTRL,PB: 不立即擦除 parity block
+    MTD->>CTRL: later program data page
+    CTRL->>DATA: program new data page
+    CTRL->>CTRL: compute new parity with current generations
+    CTRL->>PB: append new parity record
+    CTRL->>PMETA: update latest parity pointer
+```
+
+这种设计下，擦除 data block 后 parity 可能短暂处于 `STALE` 状态：
+
+| parity 状态 | 含义 | 读恢复能力 |
+| --- | --- | --- |
+| `VALID` | parity record 的 generation 与当前 data blocks 匹配 | 可恢复同 stripe 单 page 失败 |
+| `STALE` | 某个 data block 已 erase 或重写，旧 parity generation 不匹配 | 不能用于恢复当前数据 |
+| `REBUILDING` | 控制器正在计算并追加新 parity record | 取决于是否已有旧 valid record |
+| `LOST` | parity block 损坏或找不到有效版本 | 只能依赖 ECC |
+
+要求：
+
+| 要求 | 说明 |
+| --- | --- |
+| parity index | QEMU 需要维护 `(group_id, stripe_index) -> latest parity record` |
+| generation 持久化 | 若要支持 QEMU 重启/掉电恢复，需要 checkpoint metadata |
+| parity log GC | parity block 写满后，需要迁移仍有效 record 并 erase 旧 block |
+| parity block reserve | 247 个 block 中必须预留 parity log、metadata/checkpoint、坏块替换空间 |
+| recovery 状态上报 | RAID 恢复、stale parity、lost parity 需要独立统计和 debug 输出 |
+
+优点：
+
+| 优点 | 说明 |
+| --- | --- |
+| 8 个 plane 都能存 data | 不浪费固定 parity plane |
+| parity 不原地更新 | 符合 NAND page append/program 约束 |
+| data erase 不阻塞 parity erase | 擦除 data block 只递增 generation，旧 parity 后台 GC |
+| parity 热点可轮转 | parity log block 可在 8 个 plane 的 block 池中轮转 |
+| 适合验证并行性能 | data phase 可以覆盖 8 lane |
+
+限制：
+
+| 限制 | 影响 |
+| --- | --- |
+| 已接近轻量 FTL | 需要 version、index、GC、checkpoint |
+| parity stale 窗口 | data generation 更新后，新 parity 追加前不能 RAID 恢复 |
+| 元数据一致性复杂 | QEMU 崩溃/重启后需要重放 parity log 或读取 checkpoint |
+| 写放大增加 | data write 之外还要追加 parity record，GC 也会产生额外写 |
+| 坏块处理复杂 | data block、parity block、metadata block 坏块策略都要定义 |
+
+容量规划示例：
+
+| block 类型 | 示例数量/plane | 总 block 数 | 说明 |
+| --- | ---: | ---: | --- |
+| data block pool | 224 | 1792 | 主数据容量 |
+| parity log block pool | 16 | 128 | 版本化 parity record |
+| metadata/checkpoint block | 3 | 24 | generation、parity index checkpoint |
+| bad block reserve | 4 | 32 | 模拟坏块和替换余量 |
+| 合计 | 247 | 1976 | 当前几何总量 |
+
+这个划分只是一个可调示例。QEMU 可以通过设备参数暴露：
+
+```text
+raid_profile=versioned-parity-log
+data_blocks_per_plane=224
+parity_log_blocks_per_plane=16
+metadata_blocks_per_plane=3
+reserve_blocks_per_plane=4
+```
+
+#### 13.3.5 方案选择建议
 
 | 目标 | 建议方案 |
 | --- | --- |
 | 标准 MTD/raw NAND 兼容优先 | 方案 A：16KiB page-visible |
 | 验证多 die/plane 对小写性能的提升 | 方案 B：64KiB logical-page-visible |
 | 验证最大并行宽度和 super-page 模型 | 方案 C：128KiB logical-page-visible，仅作研究 |
+| 验证 8 plane 全 data、parity 异步追加、版本化恢复 | 方案 D：versioned parity log block |
 | 当前第一版实现 | 方案 A |
 | 后续性能 profile | 方案 B |
+| 后续高级可靠性/性能 profile | 方案 D |
 
 建议第一版先实现方案 A，并在 QEMU/驱动能力稳定后增加方案 B 作为可切换 profile：
 
 ```text
 raid_profile=compat-16k-7p1
 raid_profile=perf-64k-4p1
+raid_profile=versioned-parity-log
 ```
 
-#### 13.3.5 各方案示例映射表
+#### 13.3.6 各方案示例映射表
 
 以下示例均使用当前 lane 编号：
 
@@ -918,6 +1069,38 @@ group1 lanes = 4,5,6,7,0
 | erase 一致性复杂 | parity 可能和 data 分布在不同 row，坏块/擦除语义更难维护 |
 | 不适合第一版 | 更接近控制器内部 translation layer |
 
+##### 方案 D：8-plane data + versioned parity log block
+
+每个 stripe 使用 8 条 lane 存 data。parity 不占用同一 row 的 lane，而是追加写入 parity log block。下面示例中，data group 使用每条 lane 的 `block0`，parity log 使用 lane0 的 `block240` 和 lane1 的 `block240` 轮转；实际实现中 parity log block 应在所有 lane 上轮转，避免热点。
+
+| Stripe | Data physical pages | Parity log record |
+| ---: | --- | --- |
+| 0 | lane0 d0/p0/b0/page0; lane1 d0/p1/b0/page0; lane2 d0/p2/b0/page0; lane3 d0/p3/b0/page0; lane4 d1/p0/b0/page0; lane5 d1/p1/b0/page0; lane6 d1/p2/b0/page0; lane7 d1/p3/b0/page0 | lane0 d0/p0/b240/page0, version 1 |
+| 1 | lane0 d0/p0/b0/page1; lane1 d0/p1/b0/page1; lane2 d0/p2/b0/page1; lane3 d0/p3/b0/page1; lane4 d1/p0/b0/page1; lane5 d1/p1/b0/page1; lane6 d1/p2/b0/page1; lane7 d1/p3/b0/page1 | lane0 d0/p0/b240/page1, version 1 |
+| 2 | lane0 d0/p0/b0/page2; lane1 d0/p1/b0/page2; lane2 d0/p2/b0/page2; lane3 d0/p3/b0/page2; lane4 d1/p0/b0/page2; lane5 d1/p1/b0/page2; lane6 d1/p2/b0/page2; lane7 d1/p3/b0/page2 | lane0 d0/p0/b240/page2, version 1 |
+| 1600 | lane0 d0/p0/b1/page0; lane1 d0/p1/b1/page0; lane2 d0/p2/b1/page0; lane3 d0/p3/b1/page0; lane4 d1/p0/b1/page0; lane5 d1/p1/b1/page0; lane6 d1/p2/b1/page0; lane7 d1/p3/b1/page0 | lane1 d0/p1/b240/page0, version 1 |
+
+data block erase 后的版本变化示例：
+
+| 操作 | data generation | parity record 结果 |
+| --- | --- | --- |
+| 初始写 stripe0 | `[1,1,1,1,1,1,1,1]` | `b240/page0 version1 VALID` |
+| erase lane3/block0 | `[1,1,1,2,1,1,1,1]` | `b240/page0 version1 STALE` |
+| 重写 stripe0 | `[1,1,1,2,1,1,1,1]` | append `b240/page3 version2 VALID` |
+| parity GC | 保留 version2 | version1 所在 page 不复制 |
+
+```mermaid
+flowchart LR
+    W0["write stripe0<br/>generation all 1"] --> P0["append parity<br/>version1 VALID"]
+    E3["erase lane3/block0<br/>generation[3]++"] --> S0["version1 STALE"]
+    W1["rewrite stripe0"] --> P1["append parity<br/>version2 VALID"]
+    GC["parity log GC"] --> KEEP["copy latest valid records only"]
+
+    P0 --> S0
+    S0 --> W1
+    P1 --> GC
+```
+
 ### 13.4 Eraseblock/PEB 约束
 
 UBI 把 `mtd->erasesize` 当作 physical eraseblock，也就是 PEB 大小：
@@ -927,7 +1110,7 @@ ubi->peb_size = mtd->erasesize
 ubi->peb_count = mtd->size / mtd->erasesize
 ```
 
-本方案必须保证一个 MTD logical eraseblock 对应一个完整 QEMU physical block group。
+方案 A/B/C 必须保证一个 MTD logical eraseblock 对应一个完整 QEMU physical block group。方案 D 不要求 parity block 与 data block 同步擦除，但必须保证 MTD 可见 eraseblock 的 data generation 更新与 QEMU 内部 parity index 一致。
 
 ```mermaid
 flowchart LR
@@ -947,8 +1130,8 @@ flowchart LR
 | --- | --- |
 | `mtd->size` 应为 `mtd->erasesize` 的整数倍 | 逻辑容量计算必须丢掉 parity 容量 |
 | stripe 不跨 PEB | 已在方案中要求，不需要改动 |
-| erase PEB 时必须擦除 block group 内全部 8 条 lane | QEMU erase 路径必须同步处理 data/parity |
-| erase 成功返回前，physical block group 必须处于一致状态 | QEMU 不能只擦 data 不擦 parity |
+| erase PEB 时必须擦除 block group 内全部 data lane | QEMU erase 路径必须同步更新 data block generation |
+| erase 成功返回前，physical block group 必须处于一致状态 | A/B/C 需要同步处理 data/parity；D 需要把旧 parity 标记为 stale |
 
 影响结论：现有“logical eraseblock -> physical block group”的设计是正确的，但实现时必须把 8 条 lane 中的 rotating parity 视为同一个 PEB 的隐藏成员。按指定几何，7+1 映射下可见 eraseblock 大小为：
 
@@ -1160,6 +1343,7 @@ sequenceDiagram
 | stripe buffer 未满返回成功 | 受影响 | 改为 data page 立即持久化 |
 | RAID 恢复成功返回 0 | 受影响 | 建议上报 bitflip/`-EUCLEAN` 语义 |
 | 坏块粒度 | 受影响 | 第一版按 physical block group 标坏 |
+| versioned parity log block | 第一版不采用 | 可作为后续方案 D profile；需要 generation、version、parity index、checkpoint 和 GC |
 
 最终约束图：
 
@@ -1177,9 +1361,10 @@ flowchart TB
     QEMU -->|"data persisted before success"| OK
     QEMU -->|"rotating parity valid only after full stripe"| OK
     QEMU -->|"block group erase/badblock"| OK
+    QEMU -->|"optional versioned parity log profile"| OK
 ```
 
-结论：现有总体分层可行，但写路径需要收紧。第一版应把 page-raid 定义为“完整 stripe 后生效的增强恢复能力”，而不是每个单页写入后立刻具有 RAID 保护。这样既符合 MTD/UBI 的同步写入和对齐约束，也避免把 QEMU 控制器过早做成复杂 FTL。
+结论：现有总体分层可行，但写路径需要收紧。第一版应把 page-raid 定义为“完整 stripe 后生效的增强恢复能力”，而不是每个单页写入后立刻具有 RAID 保护。这样既符合 MTD/UBI 的同步写入和对齐约束，也避免第一阶段把 QEMU 控制器过早做成复杂 FTL。方案 D 可以作为后续 profile 引入，它有意接受更高的 QEMU 内部元数据复杂度，以换取 8 plane 全 data 和异步 parity log 能力。
 
 ## 14. 修改内核原生限制的代价
 

@@ -679,6 +679,7 @@ flowchart TB
 | 单 parity 只能恢复一个 page | 通过 3:1 profile 提高可靠性 | 可扩展双 parity，但复杂度明显上升 |
 | PIO 数据窗口性能有限 | 第一阶段便于调试 | 增加 DMA descriptor ring |
 | QEMU 不隐藏坏块 remap | 保持 NAND 语义 | 可增加可选 FTL/remap 模式，但不应默认启用 |
+| 8 plane 全 data + parity log | 第一阶段不采用 | 后续作为 `versioned-parity-log` profile，在 QEMU 内部增加 generation、version、parity index 和 GC |
 
 ## 12. 本文设计结论
 
