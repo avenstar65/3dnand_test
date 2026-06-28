@@ -79,26 +79,38 @@ flowchart TB
 
 | block 类型 | 每 plane block 数 | 总 block 数 | 说明 |
 | --- | ---: | ---: | --- |
-| data block pool | 224 | 1792 | MTD 可见主数据 |
-| parity log block pool | 16 | 128 | 版本化 parity record |
+| data block pool | 208 | 1664 | MTD 可见主数据 |
+| parity log block pool | 32 | 256 | 版本化 parity record |
 | metadata/checkpoint block | 3 | 24 | generation、parity index、active log checkpoint |
 | bad block reserve | 4 | 32 | 坏块替换和测试余量 |
 | 合计 | 247 | 1976 | 当前几何全部 block |
+
+这个划分满足 `data:parity = 8:1` 的完整覆盖要求，并给 versioned parity log 和 GC 留出空间：
+
+```text
+base_parity_blocks = data_blocks_total / 8
+                   = 1664 / 8
+                   = 208 blocks
+
+extra_parity_log_blocks = parity_log_blocks_total - base_parity_blocks
+                        = 256 - 208
+                        = 48 blocks
+```
 
 可见容量按 data block pool 计算：
 
 ```text
 visible_size = data_blocks_total * pages_per_block * page_size
-             = 1792 * 1600 * 16KiB
-             = 43.75GiB
+             = 1664 * 1600 * 16KiB
+             = 40.625GiB
 ```
 
 这个容量规划是可调参数，不是硬编码。QEMU device property 可以提供：
 
 ```text
 raid_profile=versioned-parity-log
-data_blocks_per_plane=224
-parity_log_blocks_per_plane=16
+data_blocks_per_plane=208
+parity_log_blocks_per_plane=32
 metadata_blocks_per_plane=3
 reserve_blocks_per_plane=4
 ```
@@ -515,8 +527,8 @@ sequenceDiagram
 | property | 示例 | 说明 |
 | --- | --- | --- |
 | `raid-profile` | `versioned-parity-log` | 启用方案 D |
-| `data-blocks-per-plane` | `224` | 每 plane data block 数 |
-| `parity-log-blocks-per-plane` | `16` | 每 plane parity log block 数 |
+| `data-blocks-per-plane` | `208` | 每 plane data block 数 |
+| `parity-log-blocks-per-plane` | `32` | 每 plane parity log block 数 |
 | `metadata-blocks-per-plane` | `3` | checkpoint block 数 |
 | `reserve-blocks-per-plane` | `4` | reserve block 数 |
 | `checkpoint-enable` | `on` | 是否持久化 checkpoint |

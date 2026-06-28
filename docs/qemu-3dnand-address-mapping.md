@@ -948,18 +948,20 @@ sequenceDiagram
 
 | block 类型 | 示例数量/plane | 总 block 数 | 说明 |
 | --- | ---: | ---: | --- |
-| data block pool | 224 | 1792 | 主数据容量 |
-| parity log block pool | 16 | 128 | 版本化 parity record |
+| data block pool | 208 | 1664 | 主数据容量 |
+| parity log block pool | 32 | 256 | 版本化 parity record |
 | metadata/checkpoint block | 3 | 24 | generation、parity index checkpoint |
 | bad block reserve | 4 | 32 | 模拟坏块和替换余量 |
 | 合计 | 247 | 1976 | 当前几何总量 |
+
+这个示例中，`1664` 个 data blocks 的基础 parity 覆盖需要 `1664 / 8 = 208` 个 parity blocks；实际预留 `256` 个 parity log blocks，额外 `48` 个 block 用于 active log、GC copy 和短期多版本 parity record。早期示例中的 `128` 个 parity blocks 只能覆盖 `1024` 个 data blocks，不足以保护全部 data pool。
 
 这个划分只是一个可调示例。QEMU 可以通过设备参数暴露：
 
 ```text
 raid_profile=versioned-parity-log
-data_blocks_per_plane=224
-parity_log_blocks_per_plane=16
+data_blocks_per_plane=208
+parity_log_blocks_per_plane=32
 metadata_blocks_per_plane=3
 reserve_blocks_per_plane=4
 ```
