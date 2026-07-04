@@ -6,6 +6,8 @@ mount -t sysfs none /sys
 mount -t devtmpfs none /dev 2>/dev/null || mount -t tmpfs none /dev
 mkdir -p /dev/pts /tmp /run /mnt /lib/modules
 mount -t devpts none /dev/pts 2>/dev/null || true
+mkdir -p /sys/kernel/debug
+mount -t debugfs none /sys/kernel/debug 2>/dev/null || true
 
 echo
 echo "Linux MTD QEMU 开发环境已启动"

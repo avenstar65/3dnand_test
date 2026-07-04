@@ -49,15 +49,15 @@ enum q3n_reg {
     Q3N_REG_GEOM1              = 0x0024,
     Q3N_REG_POOL0              = 0x0028,
     Q3N_REG_POOL1              = 0x002c,
-    Q3N_REG_RAID_PROFILE       = 0x0030,
-    Q3N_REG_RAID_STATUS        = 0x0034,
     Q3N_REG_IRQ_STATUS         = 0x0038,
     Q3N_REG_IRQ_MASK           = 0x003c,
-    Q3N_REG_STAT_DATA_PROGRAMS = 0x0040,
-    Q3N_REG_STAT_DATA_ERASES   = 0x0044,
-    Q3N_REG_STAT_PARITY_APPENDS = 0x0048,
-    Q3N_REG_STAT_RAID_RECOVERED = 0x004c,
-    Q3N_REG_STAT_RAID_FAILED   = 0x0050,
+    Q3N_REG_STAT_PAGE_PROGRAMS = 0x0040,
+    Q3N_REG_STAT_BLOCK_ERASES  = 0x0044,
+    Q3N_REG_STAT_PAGE_READ_ERRORS = 0x0048,
+    Q3N_REG_STAT_FAULTS_INJECTED = 0x005c,
+    Q3N_REG_FAULT_ADDR_LO      = 0x0060,
+    Q3N_REG_FAULT_ADDR_HI      = 0x0064,
+    Q3N_REG_FAULT_CTRL         = 0x0068,
     Q3N_REG_DATA               = 0x1000,
 };
 
@@ -73,14 +73,15 @@ enum q3n_cmd {
 enum q3n_status {
     Q3N_STATUS_READY          = 1U << 0,
     Q3N_STATUS_ERROR          = 1U << 1,
-    Q3N_STATUS_RECOVERED      = 1U << 2,
-    Q3N_STATUS_PARITY_VALID   = 1U << 3,
-    Q3N_STATUS_PARITY_STALE   = 1U << 4,
 };
 
 enum q3n_irq {
     Q3N_IRQ_DONE  = 1U << 0,
     Q3N_IRQ_ERROR = 1U << 1,
+};
+
+enum q3n_fault {
+    Q3N_FAULT_INJECT_DATA_LOSS = 1U << 0,
 };
 
 MemoryRegion *q3n_nand_get_mmio(Q3NNandState *s);

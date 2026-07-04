@@ -48,7 +48,7 @@ BASE_IMAGE=your-registry.example.com/library/ubuntu:24.04 ./scripts/build-image.
 ./scripts/build-qemu.sh
 ```
 
-默认下载 QEMU 11.0.2，源码放在 `work/qemu/qemu-11.0.2`，构建输出在 `work/build/qemu-11.0.2/qemu-system-x86_64`。
+默认下载 QEMU 11.0.2，源码放在 `work/qemu/qemu-11.0.2`，构建输出在 `work/build/qemu-11.0.2/qemu-system-x86_64-unsigned`。
 可以用 `QEMU_VERSION` 或 `QEMU_DIR` 覆盖默认源码版本/目录。
 当前 QEMU overlay 会注册 `q3n-nand-pci`，`scripts/run-qemu.sh` 默认把它挂到 q35 PCI 总线上。
 Linux overlay 会注册 `qemu_3dnand` PCI 驱动，并通过直接 MTD 回调暴露名为 `qemu-3dnand` 的 MTD 设备。

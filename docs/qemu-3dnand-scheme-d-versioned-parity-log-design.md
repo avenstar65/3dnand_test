@@ -1,10 +1,10 @@
-# QEMU 3D NAND 方案 D 详细设计：8-plane data + versioned parity log block
+# 3D NAND 方案 D 详细设计：驱动侧 8-plane data + versioned parity log block
 
 配套开发计划见 `qemu-3dnand-scheme-d-development-plan.md`。
 
 ## 1. 设计目标
 
-方案 D 的目标是在不修改 Linux 原生 MTD/raw NAND/UBI 基础代码的前提下，在 QEMU 控制器内部验证一种更接近真实控制器/轻量 FTL 的 page-raid 方案：
+方案 D 的目标是在不修改 Linux 原生 MTD/raw NAND/UBI 基础代码的前提下，在 Linux `qemu_3dnand` MTD 驱动内部验证一种更接近真实控制器/轻量 FTL 的 page-raid 方案。QEMU 只提供基础 3D NAND flash 介质和控制器仿真，包括物理 page read/program、block erase、几何寄存器、统计寄存器和故障注入。
 
 - 8 个 plane 全部用于 data page 写入。
 - parity 不占用固定 plane，也不放在 data block 内固定 page。
@@ -14,6 +14,7 @@
 - 旧 parity 通过 generation 不匹配自动失效。
 - 新 parity 使用 append-only 方式写入新的 parity log page。
 - Linux MTD/UBI 仍只看到标准 NAND 设备，不感知 parity log、generation、GC。
+- QEMU 不感知 RAID group、parity record、generation 或恢复策略。
 
 方案 D 不是第一阶段最简实现。它适合在方案 A 已经跑通 MTD/UBI 基础路径后，用于验证：
 
@@ -23,7 +24,30 @@
 | parity 不浪费固定 plane | parity block 在 block pool 中轮转 |
 | NAND append-only parity | parity 不原地覆盖，符合 NAND program 约束 |
 | erase/parity 解耦 | data erase 只更新 generation，不强制擦 parity block |
-| 更真实的控制器行为 | 引入 parity index、checkpoint、GC、故障恢复 |
+| 更真实的驱动侧控制器策略 | 引入 parity index、checkpoint、GC、故障恢复 |
+
+### 1.1 分层边界
+
+```mermaid
+flowchart TB
+    UBI["UBI / UBIFS"]
+    MTD["MTD core"]
+    DRV["Linux qemu_3dnand driver<br/>scheme D mapper + page-raid"]
+    QEMU["QEMU q3n-nand controller<br/>basic physical flash commands"]
+    MEDIA["Sparse 3D NAND media"]
+
+    UBI --> MTD
+    MTD --> DRV
+    DRV -->|"physical page read/program<br/>physical block erase<br/>fault injection"| QEMU
+    QEMU --> MEDIA
+```
+
+| 层级 | 职责 |
+| --- | --- |
+| UBI/MTD core | 使用标准 `writesize=16KiB`、`erasesize=25MiB` 的 MTD 设备，不理解 stripe/parity |
+| Linux `qemu_3dnand` 驱动 | 维护 data/parity/meta/reserve pool、RAID group、parity index、恢复和 debugfs 统计 |
+| QEMU `q3n-nand` | 模拟基础 flash 介质和 MMIO 命令，不实现 page-raid |
+| QEMU media | 按物理 block/page 存储 main data，支持注入 page data loss |
 
 ## 2. 目标几何
 
@@ -107,7 +131,7 @@ visible_size = data_blocks_total * pages_per_block * page_size
              = 40.625GiB
 ```
 
-这个容量规划是可调参数，不是硬编码。QEMU device property 可以提供：
+这个容量规划是可调参数，不是硬编码。QEMU 当前通过几何/池大小寄存器暴露默认划分；真正的 RAID profile 由 Linux 驱动解释：
 
 ```text
 raid_profile=versioned-parity-log
@@ -136,7 +160,7 @@ logical eraseblock N -> 一个 data physical block
 logical page P       -> 一个 16KiB data physical page
 ```
 
-QEMU 内部把多个 data block 组织成 RAID group，并在后台维护 parity log：
+Linux `qemu_3dnand` 驱动把多个 data block 组织成 RAID group，并在驱动侧维护 parity log：
 
 ```text
 RAID group = 同一 group_id 下的 8 个 data blocks
@@ -202,7 +226,7 @@ data pages:
 
 ### 6.1 Parity record
 
-parity log block 中每个 page 存一个 parity record：
+parity log block 中每个 page 存一个 parity record。record 由 Linux 驱动组织，并通过 QEMU 的普通 physical page program 命令写入 parity block pool：
 
 ```c
 #define Q3N_LANE_COUNT 8
@@ -236,7 +260,7 @@ struct q3n_parity_record {
 | `EMPTY` | page 未写入 |
 | `VALID` | header/payload 完整，generation 匹配当前 data blocks |
 | `STALE` | generation 已落后，不能用于当前数据恢复 |
-| `REBUILDING` | QEMU 内部正在计算并追加新 record |
+| `REBUILDING` | Linux 驱动正在计算并追加新 record |
 | `LOST` | parity block 或 record 损坏 |
 
 ### 6.2 Data block generation
@@ -265,7 +289,7 @@ generation 是判断 parity 是否过期的核心。只要 parity record 中记�
 
 ### 6.3 最新 parity index
 
-QEMU 内存中维护：
+Linux 驱动内存中维护：
 
 ```c
 struct q3n_parity_index_key {
@@ -305,26 +329,28 @@ MTD 写一个 16KiB page 时：
 sequenceDiagram
     participant MTD as MTD/UBI
     participant DRV as Linux driver
-    participant CTRL as QEMU controller
+    participant QEMU as QEMU physical flash
     participant DATA as data media
     participant PLOG as parity log
     participant IDX as parity index
 
     MTD->>DRV: write 16KiB logical page
-    DRV->>CTRL: PROGRAM PAGE
-    CTRL->>DATA: program data page
-    DATA-->>CTRL: success
-    CTRL->>IDX: mark stripe dirty/open
+    DRV->>QEMU: PROGRAM physical data page
+    QEMU->>DATA: program data page
+    DATA-->>QEMU: success
+    QEMU-->>DRV: status
+    DRV->>IDX: mark stripe dirty/open
     alt stripe has all 8 current data pages
-        CTRL->>DATA: read other 7 pages
-        CTRL->>CTRL: compute XOR parity
-        CTRL->>PLOG: append parity record
-        PLOG-->>CTRL: success
-        CTRL->>IDX: update latest valid record
+        DRV->>QEMU: read 8 data pages
+        DRV->>DRV: compute XOR parity
+        DRV->>QEMU: PROGRAM parity log page
+        QEMU->>PLOG: append parity record
+        PLOG-->>QEMU: success
+        QEMU-->>DRV: status
+        DRV->>IDX: update latest valid record
     else stripe not complete
-        CTRL->>IDX: parity stale or missing
+        DRV->>IDX: parity stale or missing
     end
-    CTRL-->>DRV: status
     DRV-->>MTD: success/error
 ```
 
@@ -368,17 +394,20 @@ data block erase 不同步擦 parity block：
 ```mermaid
 sequenceDiagram
     participant MTD as MTD erase
-    participant CTRL as QEMU controller
+    participant DRV as Linux driver
+    participant QEMU as QEMU physical flash
     participant DATA as data block
     participant META as metadata
     participant IDX as parity index
 
-    MTD->>CTRL: erase logical eraseblock
-    CTRL->>DATA: erase mapped data block
-    DATA-->>CTRL: success
-    CTRL->>META: generation[lane/block]++
-    CTRL->>IDX: mark related stripes stale
-    CTRL-->>MTD: erase success
+    MTD->>DRV: erase logical eraseblock
+    DRV->>QEMU: ERASE physical data block
+    QEMU->>DATA: erase mapped data block
+    DATA-->>QEMU: success
+    QEMU-->>DRV: status
+    DRV->>META: generation[lane/block]++
+    DRV->>IDX: mark related stripes stale
+    DRV-->>MTD: erase success
 ```
 
 erase 后的状态：
@@ -462,7 +491,7 @@ GC 风险：
 
 ## 11. Checkpoint 与重建
 
-如果只在内存中维护 parity index，QEMU 重启后无法知道最新 parity record。因此方案 D 至少需要 checkpoint 或启动扫描。
+如果只在内存中维护 parity index，驱动卸载、guest 重启或 QEMU 进程重启后无法知道最新 parity record。因此方案 D 至少需要 checkpoint 或启动扫描。
 
 推荐两级机制：
 
@@ -490,20 +519,20 @@ struct q3n_checkpoint_header {
 
 ```mermaid
 sequenceDiagram
-    participant QEMU as QEMU reset
+    participant DRV as Linux driver init
     participant META as checkpoint blocks
     participant PLOG as parity log blocks
     participant IDX as in-memory index
 
-    QEMU->>META: find latest valid checkpoint
-    META-->>QEMU: generation table + index snapshot
-    QEMU->>PLOG: scan records after checkpoint sequence
-    PLOG-->>QEMU: valid parity records
-    QEMU->>IDX: rebuild latest parity index
-    QEMU->>QEMU: mark stale records by generation mismatch
+    DRV->>META: find latest valid checkpoint
+    META-->>DRV: generation table + index snapshot
+    DRV->>PLOG: scan records after checkpoint sequence
+    PLOG-->>DRV: valid parity records
+    DRV->>IDX: rebuild latest parity index
+    DRV->>DRV: mark stale records by generation mismatch
 ```
 
-第一版如果不需要 QEMU 进程重启后保持 RAID 状态，可以把 checkpoint 标为非目标；但完整方案 D 必须把 checkpoint 纳入设计。
+第一版如果不需要驱动卸载或 QEMU 进程重启后保持 RAID 状态，可以把 checkpoint 标为非目标；但完整方案 D 必须把 checkpoint 纳入设计。
 
 ## 12. 坏块策略
 
@@ -518,42 +547,41 @@ sequenceDiagram
 第一版建议：
 
 - data block bad 直接暴露为 MTD bad block。
-- parity/meta block bad 由 QEMU 内部隐藏。
+- parity/meta block bad 由 Linux 驱动隐藏，QEMU 只按被访问的物理地址返回成功或错误。
 - 不做 data block 内部 remap，避免过早变成完整 FTL。
 - debugfs 暴露 data/parity/meta bad block 数量。
 
-## 13. QEMU 接口设计
+## 13. QEMU 与驱动接口设计
 
-### 13.1 Device properties
+### 13.1 QEMU device properties
+
+QEMU 仅提供基础几何和池大小，作为驱动侧策略的输入：
 
 | property | 示例 | 说明 |
 | --- | --- | --- |
-| `raid-profile` | `versioned-parity-log` | 启用方案 D |
 | `data-blocks-per-plane` | `208` | 每 plane data block 数 |
 | `parity-log-blocks-per-plane` | `32` | 每 plane parity log block 数 |
 | `metadata-blocks-per-plane` | `3` | checkpoint block 数 |
 | `reserve-blocks-per-plane` | `4` | reserve block 数 |
-| `checkpoint-enable` | `on` | 是否持久化 checkpoint |
-| `gc-low-watermark` | `4` | parity free block 低水位 |
+| `page-size` | `16KiB` | main area page size |
+| `pages-per-block` | `1600` | physical pages per block |
 
-### 13.2 Registers
+### 13.2 QEMU MMIO registers
 
-在已有 NAND 控制器寄存器基础上增加：
+当前 QEMU MMIO 保持基础 flash 控制器语义，不增加 RAID 专用寄存器：
 
 | register | 说明 |
 | --- | --- |
-| `RAID_PROFILE` | 当前 RAID profile ID |
-| `RAID_STATUS` | parity valid/stale/lost/recovered 状态 |
-| `PLOG_ACTIVE_BLOCK` | 当前 active parity log block |
-| `PLOG_FREE_BLOCKS` | 剩余 parity log block |
-| `PLOG_GC_STATUS` | GC 状态 |
-| `RAID_RECOVERED_COUNT` | RAID 恢复成功次数 |
-| `RAID_STALE_COUNT` | stale parity 次数 |
-| `RAID_GC_COUNT` | GC 次数 |
+| `ID/GEOM/POOL` | 基础设备识别、几何和 block pool 划分 |
+| `CMD/ADDR/LEN/DATA` | page read/program、block erase、PIO 数据窗口 |
+| `STAT_PAGE_PROGRAMS` | QEMU 看到的物理 page program 次数 |
+| `STAT_BLOCK_ERASES` | QEMU 看到的物理 block erase 次数 |
+| `STAT_PAGE_READ_ERRORS` | QEMU 物理 page read error 次数 |
+| `FAULT_*` | 物理 page data-loss 注入 |
 
-Linux MTD 驱动不需要理解这些寄存器才能正常工作。它们主要用于调试和验证。
+RAID profile、parity index、stale/recovered/failed 统计通过 Linux 驱动 debugfs 暴露。
 
-## 14. 数据结构设计
+## 14. Linux 驱动数据结构设计
 
 ```c
 struct q3n_scheme_d {
@@ -607,7 +635,7 @@ phase 2: read/collect data if needed
 phase 3: append 1 parity record
 ```
 
-如果 QEMU 内部能在 write buffer 中同时看到 8 个 data pages，可以避免再次读取 data pages：
+如果 Linux 驱动在一次 `mtd_write()` 中同时看到 8 个 data pages，可以避免再次读取 data pages：
 
 | 模式 | 行为 | 延迟模型 |
 | --- | --- | --- |
@@ -658,8 +686,8 @@ parity append/checkpoint third
 | 单 page 恢复 | 注入一个 data page uncorrectable | RAID recovered |
 | stale parity | erase 一个 data block 后读取旧 stripe | 不使用旧 parity |
 | parity log GC | 写满 parity log block | GC 迁移 latest record |
-| parity block bad | 注入 parity block bad | QEMU 内部替换或移除 |
-| checkpoint replay | 重启 QEMU 后扫描恢复 index | latest parity index 正确 |
+| parity block bad | 注入 parity block bad | Linux 驱动替换或移除 |
+| checkpoint replay | 驱动重新加载或 QEMU 重启后扫描恢复 index | latest parity index 正确 |
 
 ## 18. 实现顺序
 
@@ -667,16 +695,16 @@ parity append/checkpoint third
 
 | 阶段 | 内容 |
 | --- | --- |
-| 1 | 在 QEMU 中增加 block pool 划分 |
-| 2 | 实现 data block generation |
-| 3 | 实现 parity record append |
-| 4 | 实现内存 parity index |
-| 5 | 实现 read fail RAID recovery |
-| 6 | 实现 erase 后 stale parity 判断 |
-| 7 | 实现 parity log block 轮转 |
-| 8 | 实现 GC |
-| 9 | 实现 checkpoint/log replay |
-| 10 | 增加 fault injection 和 debugfs/statistics |
+| 1 | 在 QEMU 中保留基础 block pool 几何暴露 |
+| 2 | 在 Linux 驱动中实现 data block generation |
+| 3 | 在 Linux 驱动中实现 parity record append |
+| 4 | 在 Linux 驱动中实现内存 parity index |
+| 5 | 在 Linux 驱动中实现 read fail RAID recovery |
+| 6 | 在 Linux 驱动中实现 erase 后 stale parity 判断 |
+| 7 | 在 Linux 驱动中实现 parity log block 轮转 |
+| 8 | 在 Linux 驱动中实现 GC |
+| 9 | 在 Linux 驱动中实现 checkpoint/log replay |
+| 10 | 增加 driver debugfs/trace 观测 |
 
 第一阶段最小可验证闭环：
 
@@ -698,7 +726,7 @@ parity log full -> GC -> checkpoint -> QEMU restart -> replay
 
 ## 19. 结论
 
-方案 D 是可行的，但它不是简单 page-raid，而是 QEMU 控制器内部的版本化 parity 日志方案。它的核心价值是：
+方案 D 是可行的，但它不是简单 page-raid，而是 Linux MTD 驱动内部的版本化 parity 日志方案。它的核心价值是：
 
 - 让 8 个 plane 全部承担 data 写入。
 - parity 不固定占用某个 plane。
@@ -708,7 +736,7 @@ parity log full -> GC -> checkpoint -> QEMU restart -> replay
 
 它的代价也明确：
 
-- QEMU 内部需要 parity index、generation、checkpoint、GC。
+- Linux 驱动内部需要 parity index、generation、checkpoint、GC。
 - stale parity 窗口需要被明确建模。
 - 坏块和掉电恢复比方案 A 复杂。
 - 实现边界已经接近轻量 FTL。

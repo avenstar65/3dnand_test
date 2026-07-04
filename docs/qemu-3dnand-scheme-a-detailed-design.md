@@ -1,5 +1,7 @@
 # QEMU 3D NAND 方案 A 详细设计
 
+> 当前实现说明：本文是早期“QEMU 控制器内部实现 page-raid”的方案 A 设计记录。后续架构已经调整为 QEMU 只模拟基础 flash 器件和控制器，page-raid、parity 映射与恢复逻辑放在 Linux `qemu_3dnand` MTD 驱动中。需要看当前代码路径时，以方案 D 文档和 Linux 驱动实现为准。
+
 本文档定义方案 A 的简化版：`16KiB page-visible + 单 physical block 内可配置 page-raid`。该方案优先保证 MTD/UBI 语义清楚，暂不考虑多 die/multi-plane 并行性能。
 
 ## 1. 设计前提

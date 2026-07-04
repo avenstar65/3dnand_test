@@ -1,9 +1,13 @@
 # QEMU q3n-nand Overlay
 
-This directory contains a QEMU source overlay for the 3D NAND scheme D base
-model. The repository currently runs the host-installed `qemu-system-x86_64`;
-it does not vendor a full QEMU source tree. To build this model, copy the
-overlay files into a QEMU source tree:
+This directory contains the QEMU source overlay for a basic 3D NAND flash
+device and controller model. QEMU intentionally does not implement page-raid,
+parity-log layout, parity recovery, or MTD-visible policy. Those belong to the
+Linux `qemu_3dnand` driver so the same simulated flash can be used to validate
+different kernel-side mapping schemes.
+
+The repository can fetch and build QEMU 11.x automatically. To apply this
+overlay manually, copy the files into a QEMU source tree:
 
 ```text
 qemu/include/hw/mtd/q3n-nand.h -> include/hw/mtd/q3n-nand.h
@@ -22,14 +26,15 @@ Implemented base functions:
 | 208/32/3/4 scheme D block-pool defaults | Implemented |
 | Sparse 16KiB page media | Implemented |
 | 25MiB data block erase | Implemented |
-| Data block generation | Implemented |
-| 8-lane XOR parity append | Implemented |
-| In-memory latest parity index | Implemented |
-| Basic single-page recovery hook | Implemented |
-| Parity log GC | Not implemented |
-| Checkpoint/replay | Not implemented |
+| Basic page read/program/block erase commands | Implemented |
+| MMIO data-loss fault injection | Implemented |
+| Basic media statistics | Implemented |
+| Page-raid/parity append/recovery | Not implemented in QEMU |
+| Parity log GC | Not implemented in QEMU |
+| Checkpoint/replay | Not implemented in QEMU |
 | Linux PCI probe driver | Implemented |
-| Linux MTD registration | Implemented through direct MTD callbacks |
+| Linux MTD registration | Implemented in the Linux overlay |
+| Linux driver-owned scheme D page-raid | Implemented in the Linux overlay |
 | Linux raw NAND `exec_op()` integration | Not implemented |
 | Machine/DT wiring | PCI path used first; DT path not implemented |
 
@@ -38,27 +43,38 @@ The MMIO interface is intentionally simple for the first bring-up:
 | Register | Offset | Description |
 | --- | ---: | --- |
 | `Q3N_REG_ID` | `0x0000` | Returns `Q3N1` |
-| `Q3N_REG_STATUS` | `0x000c` | Ready/error/recovered/parity status |
+| `Q3N_REG_STATUS` | `0x000c` | Ready/error status |
 | `Q3N_REG_CMD` | `0x0010` | Execute `READ_ID`, `READ_PAGE`, `PROGRAM_PAGE`, `ERASE_BLOCK`, `RESET` |
-| `Q3N_REG_ADDR_LO/HI` | `0x0014/0x0018` | Logical byte address |
+| `Q3N_REG_ADDR_LO/HI` | `0x0014/0x0018` | Physical byte address in the simulated media |
 | `Q3N_REG_LEN` | `0x001c` | Resets PIO buffer for a transfer |
+| `Q3N_REG_GEOM0/1` | `0x0020/0x0024` | Page/OOB and pages/block geometry |
 | `Q3N_REG_POOL0/1` | `0x0028/0x002c` | Data/parity/meta/reserve pool sizes |
+| `Q3N_REG_STAT_*` | `0x0040..0x005c` | Page program/block erase/read-error/fault counters |
+| `Q3N_REG_FAULT_ADDR_LO/HI` | `0x0060/0x0064` | Physical byte address for fault injection |
+| `Q3N_REG_FAULT_CTRL` | `0x0068` | Write `Q3N_FAULT_INJECT_DATA_LOSS` to drop one stored data page |
 | `Q3N_REG_DATA` | `0x1000` | PIO data window |
 
-The model exposes a controller-private logical address space:
+The model exposes a flat physical flash address space:
 
 ```text
-logical byte address -> data block -> lane/block/page
+physical byte address -> physical block -> page
 ```
 
 For x86_64 bring-up, use the PCI wrapper:
 
 ```sh
-work/build/qemu-11.0.2/qemu-system-x86_64 -machine q35 -device q3n-nand-pci ...
+work/build/qemu-11.0.2/qemu-system-x86_64-unsigned -machine q35 -device q3n-nand-pci ...
 ```
 
 The Linux overlay currently registers an MTD device named `qemu-3dnand`. Its
 first read/write/erase path talks to the QEMU model through the controller MMIO
-commands. A raw NAND `exec_op()` controller integration remains a later phase if
-we want the Linux raw NAND core to perform NAND scan and command sequencing
-itself.
+commands. The Linux driver maps MTD logical pages to the QEMU physical media and
+owns the current scheme D page-raid/parity-log policy. A raw NAND `exec_op()`
+controller integration remains a later phase if we want the Linux raw NAND core
+to perform NAND scan and command sequencing itself.
+
+In the guest, `mtd.sh q3n-stats` reads debugfs counters and
+`mtd.sh q3n-inject-loss <logical-byte-address>` injects a single data page loss
+through the QEMU fault registers. QEMU only reports the physical read failure;
+the Linux driver decides whether the missing page can be rebuilt from its
+driver-owned page-raid metadata.

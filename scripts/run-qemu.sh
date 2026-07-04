@@ -30,7 +30,7 @@ done
 
 . "$repo_root/configs/qemu/x86_64.env"
 
-repo_qemu="$build_dir/qemu-11.0.2/qemu-system-x86_64"
+repo_qemu="$build_dir/qemu-11.0.2/qemu-system-x86_64-unsigned"
 if [ "${QEMU_BIN:-}" = "qemu-system-x86_64" ] && [ -x "$repo_qemu" ]; then
   QEMU_BIN="$repo_qemu"
 fi

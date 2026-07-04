@@ -80,13 +80,8 @@ else
   ninja -C "$out_dir"
 fi
 
-qemu_bin="$out_dir/qemu-system-x86_64"
 unsigned_bin="$out_dir/qemu-system-x86_64-unsigned"
-if [ -x "$unsigned_bin" ] &&
-   { [ ! -x "$qemu_bin" ] || [ "$unsigned_bin" -nt "$qemu_bin" ]; }; then
-  cp "$unsigned_bin" "$qemu_bin"
-  chmod +x "$qemu_bin"
-fi
+qemu_bin="$unsigned_bin"
 
 [ -x "$qemu_bin" ] || die "未生成 $qemu_bin"
 

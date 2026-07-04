@@ -16,6 +16,25 @@ mtd_load_q3n() {
   grep -q '"qemu-3dnand"' /proc/mtd
 }
 
+mtd_q3n_stats() {
+  modprobe qemu_3dnand 2>/dev/null || true
+  for f in raid_recovered raid_failed parity_stale parity_written generation_updates faults_injected; do
+    if [ -r "/sys/kernel/debug/qemu_3dnand/$f" ]; then
+      printf '%s=' "$f"
+      cat "/sys/kernel/debug/qemu_3dnand/$f"
+    fi
+  done
+}
+
+mtd_q3n_inject_loss() {
+  addr=${1:-}
+  [ -n "$addr" ] || {
+    echo "用法: mtd.sh q3n-inject-loss <logical-byte-address>"
+    return 1
+  }
+  echo "$addr" > /sys/kernel/debug/qemu_3dnand/inject_data_loss
+}
+
 mtd_find_nandsim() {
   while IFS= read -r line; do
     case "$line" in
@@ -109,6 +128,8 @@ mtd_clean() {
 case "${1:-}" in
   smoke) mtd_smoke ;;
   q3n) mtd_load_q3n ;;
+  q3n-stats) mtd_q3n_stats ;;
+  q3n-inject-loss) mtd_q3n_inject_loss "${2:-}" ;;
   nandsim) mtd_load_simulators; cat /proc/mtd ;;
   ubifs) mtd_ubifs ;;
   clean) mtd_clean ;;
