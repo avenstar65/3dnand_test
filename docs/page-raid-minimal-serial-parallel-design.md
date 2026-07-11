@@ -228,7 +228,7 @@ include/linux/mtd/mtd.h 已提供非 2 次幂的除法/取模回退：
 
 drivers/mtd/mtdcore.c:add_mtd_device() 只在 writesize 或 erasesize 为 2 的幂时设置 shift/mask，否则 shift 为 0并使用上述普通除法路径。
 
-结论：对于 direct MTD driver，MTD core 不需要为 112KiB writesize 或 175MiB erasesize 做结构性修改。
+结论：对于 direct MTD driver，无论串行方案上报 16KiB 或 N×page_size，还是并行方案上报 112KiB，MTD core 都不需要结构性修改。非 2 次幂 erasesize 也已经被 MTD helper 支持。
 
 ### 7.2 必须避开的通用路径
 
@@ -245,30 +245,99 @@ Linux 7.0.12 仍有路径直接使用 offset & (writesize - 1)：
 3. 首版不开放通用 OOB 字符设备写接口；驱动通过控制器私有命令在首次 program parity page 时同时写入 main 和 OOB manifest。
 4. 不启用 NFTL、INFTL、mtdswap 等未审计消费者。
 
-### 7.3 驱动修改点
+### 7.3 串行方案的两种 MTD 接口
 
-| 修改 | 串行严格模式 | 并行原生模式 |
-| --- | --- | --- |
-| mtd.writesize | N × page_size | 7 × page_size |
-| mtd.writebufsize | 等于 writesize | 等于 writesize |
-| mtd.erasesize | floor(pages_per_block/(N+1)) × N × page_size | 7 × pages_per_block × page_size |
-| mtd.size | 可用逻辑 eraseblock 数 × erasesize | 可用 block-group 数 × erasesize |
-| _write | 完整 stripe 校验并串行写 N+1 | 112KiB 对齐并发起 8-page multi-plane |
-| _read | 逻辑 stripe 拆成 N 个 page | 逻辑 stripe 拆成 7 个 data page |
-| _erase | 擦除相应物理 block/元数据区 | 同步擦除 8 个成员 block |
-| 坏块 | 任一成员坏则屏蔽逻辑 eraseblock | 8 个 block 任一坏则屏蔽整组 |
+串行 N+1 是否遇到 2 的幂限制，取决于 MTD 接口如何暴露，而不是取决于物理 stripe 中存在 N+1 个 page。
 
-### 7.4 MTD 代价评估
+#### 7.3.1 串行兼容模式：保持物理 page 粒度
 
-| 路径 | MTD core | 驱动 | 风险 |
+```text
+mtd.writesize     = physical_page_size = 16KiB
+mtd.writebufsize  = 16KiB
+mtd.erasesize     = floor(pages_per_block/(N+1)) * N * page_size
+```
+
+16KiB 是 2 的幂，因此 UBI 的 min_io_size/max_write_size 检查不会触发。mtd.erasesize 通常不是 2 的幂，但 Linux 7.0.12 的 MTD 和 UBI 均不要求 PEB 大小是 2 的幂。
+
+所以该模式没有需要解除的 2 次幂硬限制，也不需要修改 UBI/UBIFS 的对齐代码。真正的问题是提交语义：
+
+- 前 N-1 个单页 _write() 已向上层返回成功，但 parity 尚未生成。
+- 此时掉电会留下没有 parity manifest 的未提交 stripe。
+- 如果按本文规则隐藏未提交 stripe，上层已经成功写入的数据会在重启后消失。
+- 如果允许读取这些 data page，它们又处于没有 RAID 保护的状态。
+- UBI 不保证每个业务写请求都恰好填满驱动定义的 N-page stripe。
+
+因此该模式可以用于功能原型或明确接受“暂时无 RAID 保护”的专用 MTD 用户，但不能在不增加持久化 staging/log 的情况下提供严格的透明 UBI 语义。
+
+#### 7.3.2 串行严格模式：把完整数据组作为最小 I/O
+
+```text
+mtd.writesize    = N * physical_page_size
+mtd.writebufsize = mtd.writesize
+```
+
+如果 physical_page_size 是 2 的幂，则 N×page_size 只有在 N 也是 2 的幂时才是 2 的幂：
+
+| N | 16KiB × N | UBI 2 次幂检查 |
+| ---: | ---: | --- |
+| 2 | 32KiB | 通过 |
+| 3 | 48KiB | 失败 |
+| 4 | 64KiB | 通过 |
+| 7 | 112KiB | 失败 |
+| 8 | 128KiB | 通过 |
+
+严格模式解决了“写成功但 parity 尚未提交”的问题，因为一次 MTD 写调用覆盖完整 N-page 数据组；驱动完成 data、parity 和 manifest 后才返回成功。但当 N 不是 2 的幂时，它会与并行 112KiB 模式一样触发 UBI/UBIFS 的非 2 次幂改造。
+
+### 7.4 并行方案的 MTD 接口
+
+并行方案固定 7D+1P，若向 MTD 暴露完整数据 stripe：
+
+```text
+mtd.writesize    = 7 * 16KiB = 112KiB
+mtd.writebufsize = 112KiB
+mtd.erasesize    = 7 * 1600 * 16KiB = 175MiB
+```
+
+112KiB 不是 2 的幂，所以必然触发原生 UBI/UBIFS 限制。并行方案不能简单改成 16KiB 同步写而仍保持“8 页一次并行提交”：驱动必须等待 7 个独立请求，这会产生与串行兼容模式相同的确认/掉电语义问题。
+
+### 7.5 驱动修改点对比
+
+| 修改 | 串行兼容模式 | 串行严格模式 | 并行原生模式 |
+| --- | --- | --- | --- |
+| mtd.writesize | page_size | N × page_size | 7 × page_size |
+| 2 次幂条件 | page_size 为 2 的幂即可 | N 也必须为 2 的幂 | N=7，固定非 2 次幂 |
+| mtd.erasesize | block 内 data page 容量 | 同左 | 7 × pages_per_block × page_size |
+| _write | 缓存/跟踪 N 个独立 page | 完整组串行写 N+1 | 112KiB 对齐并发起 8-page multi-plane |
+| 返回成功点 | 每个 data page 写完 | parity manifest 写完 | 8-page 命令全部成功 |
+| 掉电语义 | 高风险 | 清晰 | 清晰，但重启需成员验证 |
+| UBI 修改 | 2 次幂方面无需修改 | N 非 2 次幂时需要 | 必须修改 |
+| _erase | 擦除对应物理 block | 同左 | 同步擦除 8 个成员 block |
+| 坏块 | 物理 block 标坏 | 同左 | 8 个 block 任一坏则屏蔽整组 |
+
+### 7.6 MTD 代价评估
+
+| 路径 | MTD core | 驱动 | 主要风险 |
 | --- | ---: | ---: | --- |
-| 16KiB 可见 page + 驱动聚合 | 无 | 中 | 同步写语义风险高 |
-| direct MTD + N×page 或 112KiB writesize | 无 | 中 | MTD 可行，UBI/UBIFS 需改造 |
+| 串行兼容 16KiB | 无 | 中 | 无 2 次幂问题，但同步提交语义不完整 |
+| 串行严格且 N 为 2 的幂 | 无 | 中 | UBI 无需解除 2 次幂限制，但写粒度大 |
+| 串行严格且 N 非 2 次幂 | 无 | 中 | UBI/UBIFS 需要非 2 次幂改造 |
+| 并行原生 112KiB | 无 | 中 | UBI/UBIFS 需要非 2 次幂改造 |
 | raw NAND framework + 非 2 次幂虚拟 page | 高 | 高 | 位运算假设分散，不推荐 |
 
 ## 8. Linux 7.0.12 UBI 修改与代价
 
-### 8.1 当前硬限制
+### 8.1 串行与并行方案是否需要修改 UBI
+
+| 方案 | min_io_size | 是否触发 UBI 2 次幂限制 | UBI 修改结论 |
+| --- | ---: | --- | --- |
+| 串行兼容模式 | 16KiB | 否 | 对齐代码无需修改，但提交语义不满足严格要求 |
+| 串行严格，N=2/4/8 等 | 32/64/128KiB 等 | 否 | 对齐代码无需修改 |
+| 串行严格，N=3/5/6/7 等 | 48/80/96/112KiB 等 | 是 | 需要本节后续改造 |
+| 并行原生 7+1 | 112KiB | 是 | 必须进行本节后续改造 |
+
+因此，“串行方案有无 2 次幂限制”的答案是：串行算法本身没有；保持 16KiB MTD page 时不会触发，严格模式下则由 N 是否为 2 的幂决定。
+
+### 8.2 当前 UBI 硬限制
 
 drivers/mtd/ubi/build.c:io_init() 明确拒绝：
 
@@ -277,7 +346,7 @@ drivers/mtd/ubi/build.c:io_init() 明确拒绝：
 
 源码注释说明这不是算法的根本限制，而是为了用位运算避免除法。但不能只删除 is_power_of_2() 校验，因为 UBI 中 ALIGN(x, min_io_size) 和 offset & (min_io_size - 1) 对 112KiB 都会产生错误结果。
 
-### 8.2 必须修改的类别
+### 8.3 非 2 次幂模式必须修改的类别
 
 1. 初始化校验
    - drivers/mtd/ubi/build.c 移除 min_io_size/max_write_size 的 2 次幂检查。
@@ -293,16 +362,25 @@ drivers/mtd/ubi/build.c:io_init() 明确拒绝：
    - 全局审计 UBI 对设备几何使用 & (unit - 1) 的路径。
 
 4. subpage 策略
-   - 首版固定 mtd->subpage_sft = 0，不支持 112KiB 虚拟 page 的子页写。
+   - 首版固定 mtd->subpage_sft = 0，不支持 N×page_size 虚拟 page 的子页写。
    - hdrs_min_io_size = min_io_size，EC 和 VID header 各占一个最小 I/O 单元。
 
 5. 用户空间工具
    - mtd-utils 中 ubiformat、ubinize、ubiattach 必须做同样的普通整数对齐审计。
    - 镜像记录真实 112KiB min I/O 和 175MiB PEB，不与未修改工具混用。
 
-### 8.3 容量影响
+### 8.4 非 2 次幂严格模式的容量影响
 
-112KiB min I/O 且无 subpage 时，每个 PEB 的 EC header 和 VID header 各占一个 I/O unit：
+无 subpage 时，每个 PEB 的 EC header 和 VID header 各占一个 min I/O unit。
+
+串行严格方案：
+
+```text
+metadata reservation per PEB = 2 * N * page_size
+PEB size = floor(pages_per_block/(N+1)) * N * page_size
+```
+
+并行 112KiB 方案：
 
 ```text
 metadata reservation per PEB = 224KiB
@@ -312,7 +390,7 @@ relative overhead            ≈ 0.125%
 
 容量百分比很小，但小节点 padding 和运行时缓冲会明显增大。
 
-### 8.4 UBI 代价评估
+### 8.5 UBI 代价评估
 
 | 项目 | 预估 |
 | --- | --- |
@@ -320,11 +398,15 @@ relative overhead            ≈ 0.125%
 | 核心改动 | 删除硬检查，替换动态 ALIGN 和位掩码 |
 | 运行时开销 | 少量整数除法/取模，相对 NAND I/O 可忽略 |
 | 回归范围 | attach、header、volume update、atomic LEB change、recovery |
-| 总风险 | 中高 |
+| 串行兼容/N 为 2 次幂 | 无对齐改造成本；另行承担写粒度或提交语义代价 |
+| 串行严格且 N 非 2 次幂 | 中高，与并行方案同类，但具体 min I/O 随 N 变化 |
+| 并行原生 112KiB | 中高，且为固定必选改造 |
 
 ## 9. UBIFS 影响：不能只修改 UBI
 
-如果只使用 UBI raw/static volume，完成第 8 节可停在 UBI 层。如果还要挂载 UBIFS，Linux 7.0.12 的 fs/ubifs 也必须修改。
+本节只适用于“串行严格且 N 非 2 次幂”和“并行原生 112KiB”两类模式。串行兼容 16KiB 或串行严格且 N 为 2 的幂时，不需要解除 UBIFS 的 2 次幂限制。
+
+如果非 2 次幂模式只使用 UBI raw/static volume，完成第 8 节可停在 UBI 层。如果还要挂载 UBIFS，Linux 7.0.12 的 fs/ubifs 也必须修改。
 
 fs/ubifs/super.c 当前会：
 
@@ -348,7 +430,7 @@ fs/ubifs/super.c 当前会：
 | 测试成本 | 高，需要掉电点注入和长期压力测试 |
 | 总风险 | 高 |
 
-## 10. 三条落地路径
+## 10. 四条落地路径
 
 ### 10.1 路径 A：专用 direct MTD 原型，推荐首选
 
@@ -360,30 +442,42 @@ fs/ubifs/super.c 当前会：
 
 代价低，但不能直接挂载 UBI/UBIFS。
 
-### 10.2 路径 B：保持 16KiB MTD 兼容面
+### 10.2 路径 B：串行保持 16KiB MTD 兼容面
 
 - mtd.writesize = mtd.writebufsize = physical_page_size。
-- 驱动等待 N 个或 7 个独立 page 后生成 parity。
+- 串行驱动等待 N 个独立 page 后生成 parity。
 - UBI/UBIFS 不修改。
 
 表面代价中等，但单页 _write() 返回成功时 stripe 可能尚未提交。要严格解决只能增加持久化 staging log，这会重新引入类似日志/FTL 的复杂度。因此不建议作为产品方案。
 
-### 10.3 路径 C：原生非 2 次幂 UBI/UBIFS
+并行方案不采用本路径，因为等待 7 个单页请求会削弱一次 7D+1P 提交的接口语义和性能确定性。
 
-- MTD 暴露 N × page_size 或 112KiB writesize。
+### 10.3 路径 C：串行选择 2 次幂 N
+
+- 采用串行严格模式。
+- 选择 N=2、4、8 等，使 N×page_size 仍是 2 的幂。
+- MTD 一次请求覆盖完整数据组，parity manifest 成功后才返回。
+- 不需要修改 UBI/UBIFS 的 2 次幂对齐逻辑。
+
+这是需要严格提交语义且必须兼容原生 UBI/UBIFS 时，串行方案代价最低的选择。代价是 RAID 比例由内核兼容性反向约束，不能任意选择 N；它也不适用于固定 7D+1P 的并行几何。
+
+### 10.4 路径 D：原生非 2 次幂 UBI/UBIFS
+
+- 串行严格方案使用非 2 次幂 N，或并行方案暴露 112KiB writesize。
 - 按第 8 节改造 UBI 和 mtd-utils。
 - 需要文件系统时按第 9 节改造 UBIFS。
 
 代价高，但上层 I/O 原子边界与 page-RAID stripe 一致，语义最干净，也最能利用 multi-plane 并行。
 
-### 10.4 推荐结论
+### 10.5 推荐结论
 
 从“不实现 FTL/GC、最小代价实现 page-RAID”的目标出发：
 
 1. 先做路径 A，完成串行和并行功能及可靠性验证。
-2. UBI raw volume 成为硬需求后，再改造 UBI 和 mtd-utils。
-3. UBIFS 成为硬需求后，才扩展到 UBIFS 对齐和恢复路径。
-4. 不推荐路径 B 产品化；它将持久化问题隐藏在驱动缓存中，最终容易演变成更复杂的日志系统。
+2. 串行方案若必须兼容原生 UBI/UBIFS，优先评估路径 C，选择 2 次幂 N。
+3. 并行 7+1 若必须进入 UBI，或串行必须使用非 2 次幂 N，再采用路径 D 改造 UBI/mtd-utils。
+4. UBIFS 成为硬需求后，才扩展到 UBIFS 对齐和恢复路径。
+5. 不推荐路径 B 产品化；它没有 2 次幂问题，但把持久化问题隐藏在驱动缓存中，最终容易演变成更复杂的日志系统。
 
 ## 11. 异常处理
 
