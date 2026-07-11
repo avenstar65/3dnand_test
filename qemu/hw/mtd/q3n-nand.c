@@ -20,6 +20,7 @@
 
 typedef struct Q3NPage {
     uint8_t data[Q3N_PAGE_SIZE];
+    uint8_t oob_storage[Q3N_OOB_SIZE];
 } Q3NPage;
 
 typedef struct Q3NPhysAddr {
@@ -38,6 +39,10 @@ typedef struct Q3NStats {
     uint64_t block_erases;
     uint64_t page_read_errors;
     uint64_t faults_injected;
+    uint64_t fg_ops;
+    uint64_t parity_reads;
+    uint64_t parity_writes;
+    uint64_t stat_order_errors;
 } Q3NStats;
 
 struct Q3NNandState {
@@ -56,11 +61,12 @@ struct Q3NNandState {
     uint32_t irq_mask;
     uint32_t cmd;
     uint32_t len;
+    uint32_t oob_len;
     uint64_t addr;
     uint64_t fault_addr;
     uint32_t fault_ctrl;
 
-    uint8_t data_buf[Q3N_PAGE_SIZE];
+    uint8_t data_buf[Q3N_PAGE_SIZE + Q3N_OOB_SIZE];
     uint32_t data_pos;
     uint32_t data_count;
 
@@ -70,6 +76,7 @@ struct Q3NNandState {
 
     Q3NBlockMeta *block_meta;
     uint8_t *page_valid;
+    uint32_t *next_prog_page;
 
     GHashTable *pages; /* uint64 page key -> Q3NPage */
 
@@ -109,6 +116,7 @@ static Q3NPage *q3n_get_or_create_page(Q3NNandState *s, Q3NPhysAddr addr)
 
     page = g_new0(Q3NPage, 1);
     memset(page->data, 0xff, sizeof(page->data));
+    memset(page->oob_storage, 0xff, sizeof(page->oob_storage));
     g_hash_table_insert(s->pages, q3n_u64_key_new(raw_key), page);
     return page;
 }
@@ -151,13 +159,16 @@ static void q3n_phys_addr(uint32_t physical_block, uint32_t page,
 }
 
 static int q3n_read_page(Q3NNandState *s, uint32_t block, uint32_t page,
-                         uint8_t *buf)
+                         uint8_t *buf, uint8_t *oob)
 {
     Q3NPhysAddr addr;
     Q3NPage *stored;
 
     if (!q3n_page_is_valid(s, block, page)) {
         memset(buf, 0xff, Q3N_PAGE_SIZE);
+        if (oob) {
+            memset(oob, 0xff, Q3N_OOB_SIZE);
+        }
         return 0;
     }
 
@@ -169,11 +180,26 @@ static int q3n_read_page(Q3NNandState *s, uint32_t block, uint32_t page,
     }
 
     memcpy(buf, stored->data, Q3N_PAGE_SIZE);
+    if (oob) {
+        memcpy(oob, stored->oob_storage, Q3N_OOB_SIZE);
+    }
     return 0;
 }
 
+static bool q3n_check_program_order(Q3NNandState *s, uint32_t block,
+                                    uint32_t page)
+{
+    if (page != s->next_prog_page[block]) {
+        s->stats.stat_order_errors++;
+        return false;
+    }
+
+    return true;
+}
+
 static bool q3n_program_page(Q3NNandState *s, uint32_t block,
-                             uint32_t page, const uint8_t *buf)
+                             uint32_t page, const uint8_t *buf,
+                             const uint8_t *oob)
 {
     Q3NPhysAddr addr;
     Q3NPage *stored;
@@ -181,16 +207,21 @@ static bool q3n_program_page(Q3NNandState *s, uint32_t block,
     if (block >= s->physical_block_count || page >= Q3N_PAGES_PER_BLOCK) {
         return false;
     }
-    if (s->block_meta[block].bad || q3n_page_is_valid(s, block, page)) {
+    if (s->block_meta[block].bad || q3n_page_is_valid(s, block, page) ||
+        !q3n_check_program_order(s, block, page)) {
         return false;
     }
 
     q3n_phys_addr(block, page, &addr);
     stored = q3n_get_or_create_page(s, addr);
     memcpy(stored->data, buf, Q3N_PAGE_SIZE);
+    if (oob) {
+        memcpy(stored->oob_storage, oob, Q3N_OOB_SIZE);
+    }
     q3n_set_page_valid(s, block, page, true);
     s->block_meta[block].erased = false;
     s->stats.page_programs++;
+    s->next_prog_page[block]++;
     return true;
 }
 
@@ -237,6 +268,7 @@ static bool q3n_erase_block(Q3NNandState *s, uint32_t block)
     }
 
     s->block_meta[block].erased = true;
+    s->next_prog_page[block] = 0;
     s->stats.block_erases++;
     return true;
 }
@@ -288,7 +320,7 @@ static void q3n_cmd_read_page(Q3NNandState *s)
         return;
     }
 
-    if (q3n_read_page(s, block, page, s->data_buf)) {
+    if (q3n_read_page(s, block, page, s->data_buf, NULL)) {
         q3n_finish_error(s);
         return;
     }
@@ -307,7 +339,44 @@ static void q3n_cmd_program_page(Q3NNandState *s)
     if (s->data_count < Q3N_PAGE_SIZE ||
         !q3n_decode_addr(s, s->addr, &block, &page, &column) ||
         column != 0 ||
-        !q3n_program_page(s, block, page, s->data_buf)) {
+        !q3n_program_page(s, block, page, s->data_buf, NULL)) {
+        q3n_finish_error(s);
+        return;
+    }
+
+    q3n_finish_ok(s);
+}
+
+static void q3n_cmd_read_page_oob(Q3NNandState *s)
+{
+    uint32_t block;
+    uint32_t page;
+    uint32_t column;
+
+    if (!q3n_decode_addr(s, s->addr, &block, &page, &column) || column != 0 ||
+        s->oob_len != Q3N_OOB_SIZE ||
+        q3n_read_page(s, block, page, s->data_buf,
+                      s->data_buf + Q3N_PAGE_SIZE)) {
+        q3n_finish_error(s);
+        return;
+    }
+
+    s->data_count = Q3N_PAGE_SIZE + Q3N_OOB_SIZE;
+    s->data_pos = 0;
+    q3n_finish_ok(s);
+}
+
+static void q3n_cmd_program_page_oob(Q3NNandState *s)
+{
+    uint32_t block;
+    uint32_t page;
+    uint32_t column;
+
+    if (s->data_count < Q3N_PAGE_SIZE + Q3N_OOB_SIZE ||
+        s->oob_len != Q3N_OOB_SIZE ||
+        !q3n_decode_addr(s, s->addr, &block, &page, &column) || column != 0 ||
+        !q3n_program_page(s, block, page, s->data_buf,
+                          s->data_buf + Q3N_PAGE_SIZE)) {
         q3n_finish_error(s);
         return;
     }
@@ -359,6 +428,12 @@ static void q3n_execute_cmd(Q3NNandState *s, uint32_t cmd)
         break;
     case Q3N_CMD_PROGRAM_PAGE:
         q3n_cmd_program_page(s);
+        break;
+    case Q3N_CMD_READ_PAGE_OOB:
+        q3n_cmd_read_page_oob(s);
+        break;
+    case Q3N_CMD_PROGRAM_PAGE_OOB:
+        q3n_cmd_program_page_oob(s);
         break;
     case Q3N_CMD_ERASE_BLOCK:
         q3n_cmd_erase_block(s);
@@ -416,7 +491,8 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
 {
     Q3NNandState *s = opaque;
 
-    if (offset >= Q3N_REG_DATA && offset < Q3N_REG_DATA + Q3N_PAGE_SIZE) {
+    if (offset >= Q3N_REG_DATA &&
+        offset < Q3N_REG_DATA + Q3N_PAGE_SIZE + Q3N_OOB_SIZE) {
         return q3n_read_data_window(s, size);
     }
 
@@ -435,6 +511,8 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
         return (uint32_t)(s->addr >> 32);
     case Q3N_REG_LEN:
         return s->len;
+    case Q3N_REG_OOB_LEN:
+        return s->oob_len;
     case Q3N_REG_GEOM0:
         return (Q3N_PAGE_SIZE & 0xffffU) | (Q3N_OOB_SIZE << 16);
     case Q3N_REG_GEOM1:
@@ -458,6 +536,14 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
         return (uint32_t)s->stats.page_read_errors;
     case Q3N_REG_STAT_FAULTS_INJECTED:
         return (uint32_t)s->stats.faults_injected;
+    case Q3N_REG_STAT_FG_OPS:
+        return (uint32_t)s->stats.fg_ops;
+    case Q3N_REG_STAT_PARITY_READS:
+        return (uint32_t)s->stats.parity_reads;
+    case Q3N_REG_STAT_PARITY_WRITES:
+        return (uint32_t)s->stats.parity_writes;
+    case Q3N_REG_STAT_ORDER_ERRORS:
+        return (uint32_t)s->stats.stat_order_errors;
     case Q3N_REG_FAULT_ADDR_LO:
         return (uint32_t)s->fault_addr;
     case Q3N_REG_FAULT_ADDR_HI:
@@ -474,7 +560,8 @@ static void q3n_mmio_write(void *opaque, hwaddr offset, uint64_t value,
 {
     Q3NNandState *s = opaque;
 
-    if (offset >= Q3N_REG_DATA && offset < Q3N_REG_DATA + Q3N_PAGE_SIZE) {
+    if (offset >= Q3N_REG_DATA &&
+        offset < Q3N_REG_DATA + Q3N_PAGE_SIZE + Q3N_OOB_SIZE) {
         q3n_write_data_window(s, value, size);
         return;
     }
@@ -498,6 +585,9 @@ static void q3n_mmio_write(void *opaque, hwaddr offset, uint64_t value,
         s->len = value;
         s->data_pos = 0;
         s->data_count = 0;
+        break;
+    case Q3N_REG_OOB_LEN:
+        s->oob_len = value;
         break;
     case Q3N_REG_FAULT_ADDR_LO:
         s->fault_addr = (s->fault_addr & 0xffffffff00000000ULL) |
@@ -580,6 +670,7 @@ static void q3n_realize(DeviceState *dev, Error **errp)
     s->block_meta = g_new0(Q3NBlockMeta, s->physical_block_count);
     s->page_valid = g_new0(uint8_t, s->physical_block_count *
                                     Q3N_PAGES_PER_BLOCK);
+    s->next_prog_page = g_new0(uint32_t, s->physical_block_count);
     for (i = 0; i < s->physical_block_count; i++) {
         s->block_meta[i].erased = true;
     }
@@ -596,6 +687,7 @@ static void q3n_unrealize(DeviceState *dev)
     g_clear_pointer(&s->pages, g_hash_table_destroy);
     g_clear_pointer(&s->block_meta, g_free);
     g_clear_pointer(&s->page_valid, g_free);
+    g_clear_pointer(&s->next_prog_page, g_free);
 }
 
 static void q3n_instance_init(Object *obj)

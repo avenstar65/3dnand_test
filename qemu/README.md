@@ -27,6 +27,8 @@ Implemented base functions:
 | Sparse 16KiB page media | Implemented |
 | 25MiB data block erase | Implemented |
 | Basic page read/program/block erase commands | Implemented |
+| Combined main+OOB page read/program commands | Implemented |
+| Strict ascending page program order per block | Implemented |
 | MMIO data-loss fault injection | Implemented |
 | Basic media statistics | Implemented |
 | Page-raid/parity append/recovery | Not implemented in QEMU |
@@ -44,14 +46,16 @@ The MMIO interface is intentionally simple for the first bring-up:
 | --- | ---: | --- |
 | `Q3N_REG_ID` | `0x0000` | Returns `Q3N1` |
 | `Q3N_REG_STATUS` | `0x000c` | Ready/error status |
-| `Q3N_REG_CMD` | `0x0010` | Execute `READ_ID`, `READ_PAGE`, `PROGRAM_PAGE`, `ERASE_BLOCK`, `RESET` |
+| `Q3N_REG_CMD` | `0x0010` | Execute base commands and combined main+OOB page commands |
 | `Q3N_REG_ADDR_LO/HI` | `0x0014/0x0018` | Physical byte address in the simulated media |
 | `Q3N_REG_LEN` | `0x001c` | Resets PIO buffer for a transfer |
 | `Q3N_REG_GEOM0/1` | `0x0020/0x0024` | Page/OOB and pages/block geometry |
 | `Q3N_REG_POOL0/1` | `0x0028/0x002c` | Data/parity/meta/reserve pool sizes |
+| `Q3N_REG_OOB_LEN` | `0x0030` | OOB bytes transferred by a combined page command |
 | `Q3N_REG_STAT_*` | `0x0040..0x005c` | Page program/block erase/read-error/fault counters |
 | `Q3N_REG_FAULT_ADDR_LO/HI` | `0x0060/0x0064` | Physical byte address for fault injection |
 | `Q3N_REG_FAULT_CTRL` | `0x0068` | Write `Q3N_FAULT_INJECT_DATA_LOSS` to drop one stored data page |
+| `Q3N_REG_STAT_ORDER_ERRORS` | `0x007c` | Rejected out-of-order page programs |
 | `Q3N_REG_DATA` | `0x1000` | PIO data window |
 
 The model exposes a flat physical flash address space:
@@ -59,6 +63,10 @@ The model exposes a flat physical flash address space:
 ```text
 physical byte address -> physical block -> page
 ```
+
+After erase, each block accepts page 0 first and advances `next_prog_page` only
+after a successful program. Programs that skip or move backward fail without
+advancing the block state.
 
 For x86_64 bring-up, use the PCI wrapper:
 
