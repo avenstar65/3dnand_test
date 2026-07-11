@@ -585,23 +585,27 @@ mark stripe PROTECTED or PARITY_FAILED
 
 ### 11.5 简单优先级调度
 
-使用一个调度 kthread 和两个请求队列：
+使用一个调度 kthread 和四个请求队列：
 
 ```text
-HIGH: data_queue
-LOW:  parity_queue
+P0: foreground_read_queue
+P1: foreground_write_queue
+P2: parity_read_queue
+P3: parity_write_queue
 ```
 
 基础规则：
 
 ```text
-有可执行 Data  -> 执行 Data
-无可执行 Data  -> 执行一个 Parity
+有可执行前台 Read  -> 执行 Read
+否则有可执行 Data  -> 执行 Data
+否则执行一个 Parity rebuild Read
+最后执行一个 Parity Write
 每个 NAND 操作完成后重新调度
-已启动的 Parity 不抢占
+已启动的 NAND 操作不抢占
 ```
 
-Linux workqueue nice 或 `WQ_HIGHPRI` 只能影响 CPU 调度，不能保证 NAND 命令优先级。Data 和 parity 都必须经过同一个驱动调度器，不能由两个 worker 分别直接访问 MMIO。
+Linux workqueue nice 或 `WQ_HIGHPRI` 只能影响 CPU 调度，不能保证 NAND 命令优先级。前台读写和 parity 后台操作都必须经过同一个驱动调度器，不能由多个 worker 分别直接访问 MMIO。
 
 为了防止 parity 永久饥饿，只保留一个简单硬水位：
 
@@ -641,18 +645,26 @@ DMA 完成、数据装入 page register 或命令已提交都不能提前推进�
 
 ### 11.7 Ready Data 优先
 
-优先级定义为“所有 ready 请求中的 Data 优先”，而不是无条件 Data 优先：
+优先级定义为“所有 ready 请求中的前台读优先、其次 Data 写优先”，而不是无条件选择某一类请求：
 
 ```c
 static struct q3n_io_req *q3n_pick_next(struct q3n *q3n)
 {
     struct q3n_io_req *req;
 
-    list_for_each_entry(req, &q3n->data_queue, node)
+    list_for_each_entry(req, &q3n->foreground_read_queue, node)
         if (q3n_req_ready(q3n, req))
             return req;
 
-    list_for_each_entry(req, &q3n->parity_queue, node)
+    list_for_each_entry(req, &q3n->foreground_write_queue, node)
+        if (q3n_req_ready(q3n, req))
+            return req;
+
+    list_for_each_entry(req, &q3n->parity_read_queue, node)
+        if (q3n_req_ready(q3n, req))
+            return req;
+
+    list_for_each_entry(req, &q3n->parity_write_queue, node)
         if (q3n_req_ready(q3n, req))
             return req;
 
@@ -660,7 +672,7 @@ static struct q3n_io_req *q3n_pick_next(struct q3n *q3n)
 }
 ```
 
-不同 block/LUN 的 ready data 可以绕过被阻塞的 block。Multi-plane 请求只有在全部成员 block 都满足 page-order 时才能提交。
+不同 block/LUN 的 ready 前台请求可以绕过被阻塞的 block。Multi-plane program 请求只有在全部成员 block 都满足 page-order 时才能提交；普通 read 不受 `next_prog_page` 限制，只需要目标 LUN/plane 当前可用。
 
 ### 11.8 同 Block 交错布局的 Parity 屏障
 
@@ -707,9 +719,56 @@ parity_block.next_prog_page++
 - erase 和坏块状态需要以 block-group 为单位协调。
 - parity block 耗尽或失败时 stripe 保持 UNPROTECTED；不做 FTL 重映射。
 
-### 11.10 同步与异常边界
+### 11.10 Parity 重建读不阻塞前台读
 
-- `_sync()`：等待已经 program 的 data，并排空 parity 队列；MTD `_sync()` 为 `void`，异步 parity 错误需用 sticky error/统计暴露。
+正常路径通过增量 XOR 直接生成 parity，不读取前面的 data page。只有 accumulator 被淘汰、驱动重启或一致性恢复时，才进入后台 parity rebuild read。
+
+后台重建不能一次提交 N 个 page 的不可分割批量读。每次只读一个物理 page，更新 accumulator 后重新进入最低优先级队列：
+
+```text
+read D0 -> update XOR -> reschedule
+read D1 -> update XOR -> reschedule
+...
+read D(N-1) -> parity ready
+```
+
+```c
+struct q3n_parity_rebuild {
+    u64 stripe_id;
+    u16 member_bitmap;
+    u8 next_slot;
+    u8 *parity_accumulator;
+    u32 data_crc[Q3N_MAX_DATA_PAGES];
+};
+```
+
+每个单页 rebuild read 完成后：
+
+1. XOR 到 accumulator。
+2. 更新对应 data CRC。
+3. 增加 `next_slot`。
+4. 若尚未完成，则重新放入 `parity_read_queue` 尾部。
+5. 重新运行统一调度器，让已经等待的前台读先执行。
+
+首版限制：
+
+```text
+Q3N_MAX_PARITY_READ_INFLIGHT = 1
+```
+
+不使用 multi-plane/cache read 批量重建 parity，避免一次占用多个 plane/LUN 并把前台读延迟扩大到 `N × tR`。
+
+如果前台读和 parity rebuild 位于不同空闲 LUN，可以并行执行；不能因为某个 LUN 有前台请求，就让其他完全空闲的 LUN 停止后台工作。
+
+NAND read 一旦发出通常不能安全抢占。因此同一 LUN 上不能保证绝对零等待，只能保证新到前台读最多等待一个已经启动的后台 page read，额外延迟上限约为单页 `tR + completion latency`，而不是整个 stripe 的重建时间。
+
+持续前台读可能使 parity rebuild 饥饿。简单策略是不对前台读施加背压，只在 parity/rebuild 积压达到硬上限时暂停新的 data 写。已有数据读取始终允许继续。
+
+Page 升序约束只作用于 program，不作用于 read。Parity rebuild read 不修改 `block->next_prog_page`。但如果 parity page 是同 block 下一条必须 program 的 page，重建尚未完成仍会间接阻塞该 block 后续 data program，这也是独立 parity block 更优的原因。
+
+### 11.11 同步与异常边界
+
+- `_sync()`：等待已经 program 的 data，排空 parity rebuild read 和 parity write 队列；MTD `_sync()` 为 `void`，异步 parity 错误需用 sticky error/统计暴露。
 - `_erase()`：取消尚未执行且属于目标 block-group 的 parity，等待正在执行的 parity，并用 generation 防止旧 worker 在 erase 后写回。
 - suspend/remove/reboot：停止新请求，排空或明确取消 parity，再关闭 IRQ/DMA。
 - parity program fail：data 保持有效，stripe 标记 PARITY_FAILED/UNPROTECTED。
@@ -762,6 +821,12 @@ parity_block.next_prog_page++
 - parity fail 不回滚已成功 data，只更新状态和错误统计。
 - erase/suspend/remove 不发生旧 parity worker 越代写回。
 - 对每个物理 block 断言实际 program page index 单调递增。
+- 前台普通读、Data 写、parity rebuild read、parity write 同时排队时，按 P0/P1/P2/P3 选择 ready 请求。
+- parity rebuild 每次只读取一个 page，完成后重新调度，不连续占用 N 个 `tR`。
+- 同 LUN 中前台读最多等待一个已经启动的 parity page read。
+- 不同 LUN 中前台读与 parity rebuild read 可以同时执行。
+- 持续前台读压力下不因 parity 积压阻塞 read，只对新 data 写施加背压。
+- parity rebuild read 不修改任何 block 的 `next_prog_page`。
 
 ### 13.4 UBI/UBIFS 回归，仅路径 C/D
 
