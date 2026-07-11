@@ -93,8 +93,8 @@ parity OOB  = stripe manifest + commit evidence
 
 有效性规则：
 
-1. parity page 不存在或其 ECC、parity_crc、header_crc 无效：INCOMPLETE。
-2. 串行方案中，parity manifest 有效即表示前面的 data page 写流程已完成；读取时仍可用 data_crc 验证成员。
+1. parity page 不存在或其 ECC、parity_crc、header_crc 无效：严格提交模式下为 INCOMPLETE；UBI 16KiB 异步模式下为 UNPROTECTED，已成功编程的 data 仍然有效。
+2. 串行严格模式中，parity manifest 有效即表示前面的 data page 写流程已完成；串行 UBI 异步模式中则表示该 stripe 已获得 RAID 保护。
 3. 并行方案中，parity manifest 只表示候选提交；必须确认 D0..D6 均可读且 data_crc 全部匹配后才是 COMMITTED。
 4. parity manifest 有效但任一成员缺失或 CRC 不匹配：CORRUPT，返回 -EBADMSG。
 5. data 和 parity 均为全 0xff：EMPTY。
@@ -129,9 +129,9 @@ parity_page        = stripe * (N + 1) + N
 4. 最后一次性写入 parity main data 和 parity OOB manifest。
 5. parity page ECC、parity CRC 和 manifest CRC 有效后整组生效。
 
-推荐严格模式：一次请求必须包含 N × page_size 数据，驱动不保留跨请求脏缓存。
+严格模式下，一次请求必须包含 N × page_size 数据，驱动不保留跨请求脏缓存。
 
-兼容模式可让 mtd.writesize 保持物理 page_size，并缓存 N 个独立写请求，但前 N-1 次写返回成功时 stripe 尚未提交。除非再增加持久化 staging area，否则这不满足严格同步写语义，因此不建议用于 UBI。
+UBI 兼容模式保持 `mtd.writesize = physical_page_size`。每个 data page 的 main+OOB 编程成功即表示数据持久化，parity 只表示 RAID 保护是否完成；收齐 N 页后由低优先级后台队列异步写 parity。该模式不提供“每个 16KiB 写返回时已经具备 page-RAID 保护”的保证，详细调度见第 11 节。
 
 ### 5.3 读恢复
 
@@ -445,10 +445,12 @@ fs/ubifs/super.c 当前会：
 ### 10.2 路径 B：串行保持 16KiB MTD 兼容面
 
 - mtd.writesize = mtd.writebufsize = physical_page_size。
-- 串行驱动等待 N 个独立 page 后生成 parity。
+- 每个 data page 首次 program 时同时写入 main 和 data OOB 元数据，成功后立即向 UBI 返回。
+- 串行驱动使用 RAM accumulator 增量 XOR，收齐 N 个 page 后异步生成 parity。
+- Data 请求高优先级，parity 请求低优先级，但必须服从物理 block 内 page index 升序约束。
 - UBI/UBIFS 不修改。
 
-表面代价中等，但单页 _write() 返回成功时 stripe 可能尚未提交。要严格解决只能增加持久化 staging log，这会重新引入类似日志/FTL 的复杂度。因此不建议作为产品方案。
+该路径保持 UBI 的 16KiB 写入语义，但 `_write()` 返回到 parity 完成之间存在 UNPROTECTED 窗口。缺少 parity 时 data 仍然有效，只是不具备 page-RAID 恢复能力。若产品接受这一窗口，这是串行方案兼容原生 UBI 的最低代价路径；若要求每次写返回时已经具备 RAID 保护，则仍需持久化 staging/log 或改用严格模式。
 
 并行方案不采用本路径，因为等待 7 个单页请求会削弱一次 7D+1P 提交的接口语义和性能确定性。
 
@@ -477,14 +479,249 @@ fs/ubifs/super.c 当前会：
 2. 串行方案若必须兼容原生 UBI/UBIFS，优先评估路径 C，选择 2 次幂 N。
 3. 并行 7+1 若必须进入 UBI，或串行必须使用非 2 次幂 N，再采用路径 D 改造 UBI/mtd-utils。
 4. UBIFS 成为硬需求后，才扩展到 UBIFS 对齐和恢复路径。
-5. 不推荐路径 B 产品化；它没有 2 次幂问题，但把持久化问题隐藏在驱动缓存中，最终容易演变成更复杂的日志系统。
+5. 路径 B 只在产品明确接受短暂或掉电后持续的 UNPROTECTED 状态时使用；不得把 parity 缺失解释为 data 未提交。
 
-## 11. 异常处理
+## 11. 串行 UBI 模式性能优化与升序调度
+
+### 11.1 语义调整
+
+UBI 的最小 I/O 是 16KiB，不能保证每次写满 `N × 16KiB`。在不修改 UBI、不增加持久化 staging log 的前提下，三项目标不能同时满足：
+
+1. 每次只写 16KiB。
+2. `_write()` 返回时已经拥有完整 N+1 parity 保护。
+3. parity 只写一次。
+
+因此串行 UBI 模式采用：
+
+```text
+Data main+OOB program success = 数据已经持久化
+Parity main+manifest success  = stripe 已获得 RAID 保护
+```
+
+状态机：
+
+```text
+EMPTY
+  -> OPEN / UNPROTECTED
+  -> PARITY_QUEUED
+  -> PROTECTED
+
+PARITY_QUEUED
+  -> PARITY_FAILED / UNPROTECTED
+```
+
+掉电后缺少 parity 的 data page 仍然可读，不得因为没有 parity manifest 而隐藏已经向 UBI 返回成功的数据。
+
+### 11.2 Data Page 元数据
+
+每个 data page 首次编程时同时写入 main 和 OOB：
+
+```text
+data main = 16KiB UBI payload
+data OOB  = stripe_id + slot + data_crc + header_crc
+```
+
+```c
+struct q3n_data_meta {
+    u16 magic;
+    u8 version;
+    u8 slot;
+    u64 stripe_id;
+    u32 data_crc;
+    u32 header_crc;
+};
+```
+
+该操作不需要 OOB-only。重启扫描可以识别已经持久化的 data slot，并将缺少有效 parity 的 stripe 标记为 UNPROTECTED。
+
+### 11.3 增量 XOR
+
+写 data 时同步更新一个 page 大小的 accumulator，不在 stripe 收齐后从 NAND 读回：
+
+```c
+program_data_main_and_oob(data);
+parity_accumulator ^= data;
+data_crc[slot] = crc32c(data);
+valid_bitmap |= BIT(slot);
+```
+
+每个 open stripe 的主要 RAM 为一个 `page_size` parity buffer。缓存压力较大时，可以淘汰 accumulator，但保留成员状态；后续收齐 stripe 时读取已有 data page 重建 parity。不能淘汰尚未真正 program 的 data 后向 UBI 返回成功。
+
+### 11.4 异步 Parity 队列
+
+最后一个 data page program 成功后，将 parity accumulator 的所有权转移给后台请求：
+
+```c
+struct q3n_parity_req {
+    struct list_head node;
+    u64 stripe_id;
+    struct q3n_phys_addr parity_addr;
+    u8 *parity_buf;
+    struct q3n_parity_manifest manifest;
+    int status;
+};
+```
+
+前台路径：
+
+```text
+program Data main+OOB
+wait Data program success
+update XOR/CRC
+if stripe full:
+    enqueue parity request
+return success to UBI
+```
+
+后台路径：
+
+```text
+dequeue parity request
+program parity main+OOB manifest
+mark stripe PROTECTED or PARITY_FAILED
+```
+
+每个 parity request 必须拥有独立 buffer，不能在后台 program 完成前被下一 stripe 复用。
+
+### 11.5 简单优先级调度
+
+使用一个调度 kthread 和两个请求队列：
+
+```text
+HIGH: data_queue
+LOW:  parity_queue
+```
+
+基础规则：
+
+```text
+有可执行 Data  -> 执行 Data
+无可执行 Data  -> 执行一个 Parity
+每个 NAND 操作完成后重新调度
+已启动的 Parity 不抢占
+```
+
+Linux workqueue nice 或 `WQ_HIGHPRI` 只能影响 CPU 调度，不能保证 NAND 命令优先级。Data 和 parity 都必须经过同一个驱动调度器，不能由两个 worker 分别直接访问 MMIO。
+
+为了防止 parity 永久饥饿，只保留一个简单硬水位：
+
+```text
+Q3N_MAX_PENDING_PARITY = 32
+```
+
+达到上限后暂停创建新的 data stripe，优先消化至少一个 parity request，再恢复 data 写入。正常情况下 data 优先；只有 parity 队列达到硬上限时产生背压。
+
+### 11.6 Block 内 Page 升序约束
+
+每个物理 block 维护：
+
+```c
+struct q3n_block_state {
+    u32 next_prog_page;
+    bool busy;
+    bool bad;
+};
+```
+
+首版采用最严格规则：
+
+```text
+request.page == block.next_prog_page
+```
+
+只有满足该条件的请求才是 ready。编程成功后才执行：
+
+```c
+block->next_prog_page++;
+```
+
+DMA 完成、数据装入 page register 或命令已提交都不能提前推进编程前沿。program fail 时不推进，整个物理 block/逻辑组进入失败处理。
+
+如果请求 page 小于 `next_prog_page`，说明发生倒序，立即返回 `-EINVAL`。如果请求 page 大于 `next_prog_page`，只有缺失的低 page 请求已经在队列中时才允许等待；否则返回 `-EINVAL`，避免无限等待和 RAM 假持久化。
+
+### 11.7 Ready Data 优先
+
+优先级定义为“所有 ready 请求中的 Data 优先”，而不是无条件 Data 优先：
+
+```c
+static struct q3n_io_req *q3n_pick_next(struct q3n *q3n)
+{
+    struct q3n_io_req *req;
+
+    list_for_each_entry(req, &q3n->data_queue, node)
+        if (q3n_req_ready(q3n, req))
+            return req;
+
+    list_for_each_entry(req, &q3n->parity_queue, node)
+        if (q3n_req_ready(q3n, req))
+            return req;
+
+    return NULL;
+}
+```
+
+不同 block/LUN 的 ready data 可以绕过被阻塞的 block。Multi-plane 请求只有在全部成员 block 都满足 page-order 时才能提交。
+
+### 11.8 同 Block 交错布局的 Parity 屏障
+
+如果布局是：
+
+```text
+D0 D1 ... D(N-1) P0 D(N) ... P1
+```
+
+写完一组 data 后，`P0` 是该 block 的 `next_prog_page`。下一组 data 虽然优先级更高，但 page index 更大，必须先写 P0：
+
+```text
+D0 -> D1 -> ... -> D(N-1) -> P0 -> next data stripe
+```
+
+所以同 block 交错布局中，parity 是 page-order barrier。异步 parity 只能降低最后一个 data 写调用的返回延迟，不能让同 block 的下一 stripe 越过 parity。只有其他 block/LUN 的 data 可以继续优先执行。
+
+### 11.9 推荐的独立 Parity Block 布局
+
+为了让低优先级 parity 真正后台执行，推荐 data 和 parity 使用不同物理 block：
+
+```text
+Data block:   D0 D1 D2 D3 D4 ...
+Parity block: P0 P1 P2 P3 ...
+```
+
+两类 block 各自严格升序：
+
+```text
+data_block.next_prog_page++
+parity_block.next_prog_page++
+```
+
+收益：
+
+- 下一 stripe data 不被上一 stripe parity 阻塞。
+- Data queue 可以保持严格高优先级。
+- Parity queue 在 data 空闲时写入。
+- parity 放在另一个 LUN 时，可与 data internal program 重叠。
+
+代价：
+
+- 增加 data block 到 parity block 的静态映射。
+- erase 和坏块状态需要以 block-group 为单位协调。
+- parity block 耗尽或失败时 stripe 保持 UNPROTECTED；不做 FTL 重映射。
+
+### 11.10 同步与异常边界
+
+- `_sync()`：等待已经 program 的 data，并排空 parity 队列；MTD `_sync()` 为 `void`，异步 parity 错误需用 sticky error/统计暴露。
+- `_erase()`：取消尚未执行且属于目标 block-group 的 parity，等待正在执行的 parity，并用 generation 防止旧 worker 在 erase 后写回。
+- suspend/remove/reboot：停止新请求，排空或明确取消 parity，再关闭 IRQ/DMA。
+- parity program fail：data 保持有效，stripe 标记 PARITY_FAILED/UNPROTECTED。
+- pending parity 达到硬上限：对新 data 施加背压，不能无限分配 RAM。
+- 已启动 parity 不抢占；新 data 最多等待一次 parity program latency。
+
+## 12. 异常处理
 
 | 场景 | 处理 |
 | --- | --- |
-| 串行 data program fail | 不写 parity，整组 incomplete |
-| 串行 parity program fail | parity ECC/CRC 无效，整组 incomplete |
+| 串行 data program fail | 当前 data 写失败；严格模式整组 incomplete，UBI 异步模式不影响此前已成功 data |
+| 串行 parity program fail | 严格模式整组 incomplete；UBI 异步模式 data 保持有效，整组标 PARITY_FAILED/UNPROTECTED |
 | 并行 data slot 失败但 parity 成功 | manifest 为候选；成员 CRC 验证失败，整组 corrupt |
 | 并行 parity slot 失败 | 无有效 manifest，整组 incomplete |
 | 单 data page ECC 不可纠 | 尝试 XOR 恢复 |
@@ -494,15 +731,15 @@ fs/ubifs/super.c 当前会：
 | 并行提交部分失败 | 整个 7D+1P stripe invalid |
 | 序号或角色不一致 | 视为元数据损坏，不猜测恢复 |
 
-## 12. 测试计划
+## 13. 测试计划
 
-### 12.1 映射测试
+### 13.1 映射测试
 
 - 使用非 2 次幂 page size、N 和 pages-per-block 测试除法/取模边界。
 - 覆盖 stripe 首尾、block 尾部 unused page 和最后一个 block。
 - 验证物理地址不重叠、不越界。
 
-### 12.2 功能和故障注入
+### 13.2 功能和故障注入
 
 - 串行 N+1 完整 stripe 读写和 parity 比对。
 - 并行 7+1 的 112KiB 读写和 multi-plane 命令计数。
@@ -511,9 +748,22 @@ fs/ubifs/super.c 当前会：
 - 串行方案在任意 data 和 parity 写入前后注入掉电。
 - 并行方案在 8-page multi-plane program 的不同成员完成点注入掉电，覆盖 parity 成功但 data 失败的情况。
 
-成功标准：串行方案只有有效 parity manifest 的组可见；并行方案只有 manifest 和全部成员 CRC 均有效的组可见；未完成组不被当作有效数据；不需要 GC 或自动补写。
+成功标准：串行严格模式只有有效 parity manifest 的组可见；串行 UBI 异步模式中已成功 program 的 data 始终可见，parity manifest 只决定 PROTECTED/UNPROTECTED；并行方案只有 manifest 和全部成员 CRC 均有效的组可见；不需要 GC 或自动补写。
 
-### 12.3 UBI/UBIFS 回归，仅路径 C
+### 13.3 串行 UBI 异步 Parity 测试
+
+- 单次 16KiB data 写入成功后可立即读回，即使 parity 尚未写入。
+- 收齐 N 个 data page 后 parity request 入低优先级队列。
+- Data 和 parity 同时等待时，优先调度 ready data。
+- 同 block 下一 stripe data 被低 page index parity 正确阻塞。
+- 不同 block/LUN 的 data 可以绕过该 parity barrier。
+- pending parity 达到 32 时触发背压，完成一个 parity 后恢复 data。
+- 掉电时 OPEN/PARITY_QUEUED stripe 的 data 保持可见并标为 UNPROTECTED。
+- parity fail 不回滚已成功 data，只更新状态和错误统计。
+- erase/suspend/remove 不发生旧 parity worker 越代写回。
+- 对每个物理 block 断言实际 program page index 单调递增。
+
+### 13.4 UBI/UBIFS 回归，仅路径 C/D
 
 - 以 112KiB min I/O、175MiB PEB 执行 ubiformat/ubiattach。
 - 测试 dynamic/static volume、update、rename、remove 和 atomic LEB change。
@@ -521,7 +771,7 @@ fs/ubifs/super.c 当前会：
 - 对关键写路径做掉电点注入。
 - 使用常见 2 次幂 NAND 几何跑全量回归，确保快速路径无退化。
 
-## 13. 实现前必须确认的硬件条件
+## 14. 实现前必须确认的硬件条件
 
 - “双 plane、每 plane 4 page”的确切并行命令和地址约束。
 - 8 个 page 是否可在一个 controller transaction 中并行提交。
