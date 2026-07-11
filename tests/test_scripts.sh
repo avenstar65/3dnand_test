@@ -156,6 +156,17 @@ assert_contains qemu/include/hw/mtd/q3n-nand.h 'Q3N_REG_STAT_PAGE_READ_ERRORS'
 assert_contains qemu/include/hw/mtd/q3n-nand.h 'Q3N_REG_STAT_FAULTS_INJECTED'
 assert_contains qemu/include/hw/mtd/q3n-nand.h 'Q3N_DEFAULT_DATA_BLOCKS_PER_PLANE[[:space:]]+208'
 assert_contains qemu/include/hw/mtd/q3n-nand.h 'Q3N_DEFAULT_PARITY_BLOCKS_PER_PLANE[[:space:]]+32'
+for symbol in \
+  Q3N_CMD_READ_PAGE_OOB \
+  Q3N_CMD_PROGRAM_PAGE_OOB \
+  Q3N_REG_OOB_LEN \
+  Q3N_REG_STAT_FG_OPS \
+  Q3N_REG_STAT_PARITY_READS \
+  Q3N_REG_STAT_PARITY_WRITES \
+  Q3N_REG_STAT_ORDER_ERRORS; do
+  assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h "$symbol"
+  assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
+done
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_erase_block'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_inject_data_loss'
 assert_contains qemu/hw/mtd/q3n-nand.c 'faults_injected'

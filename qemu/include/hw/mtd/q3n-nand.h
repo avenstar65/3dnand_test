@@ -49,6 +49,7 @@ enum q3n_reg {
     Q3N_REG_GEOM1              = 0x0024,
     Q3N_REG_POOL0              = 0x0028,
     Q3N_REG_POOL1              = 0x002c,
+    Q3N_REG_OOB_LEN            = 0x0030,
     Q3N_REG_IRQ_STATUS         = 0x0038,
     Q3N_REG_IRQ_MASK           = 0x003c,
     Q3N_REG_STAT_PAGE_PROGRAMS = 0x0040,
@@ -58,6 +59,10 @@ enum q3n_reg {
     Q3N_REG_FAULT_ADDR_LO      = 0x0060,
     Q3N_REG_FAULT_ADDR_HI      = 0x0064,
     Q3N_REG_FAULT_CTRL         = 0x0068,
+    Q3N_REG_STAT_FG_OPS        = 0x0070,
+    Q3N_REG_STAT_PARITY_READS  = 0x0074,
+    Q3N_REG_STAT_PARITY_WRITES = 0x0078,
+    Q3N_REG_STAT_ORDER_ERRORS  = 0x007c,
     Q3N_REG_DATA               = 0x1000,
 };
 
@@ -68,6 +73,8 @@ enum q3n_cmd {
     Q3N_CMD_PROGRAM_PAGE = 3,
     Q3N_CMD_ERASE_BLOCK = 4,
     Q3N_CMD_RESET      = 5,
+    Q3N_CMD_READ_PAGE_OOB = 6,
+    Q3N_CMD_PROGRAM_PAGE_OOB = 7,
 };
 
 enum q3n_status {
