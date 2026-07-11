@@ -585,27 +585,36 @@ mark stripe PROTECTED or PARITY_FAILED
 
 ### 11.5 简单优先级调度
 
-使用一个调度 kthread 和四个请求队列：
+当前驱动使用前台 MTD 锁串行化 `_read/_write/_erase`，因此不会同时存在前台读和前台写。调度器不需要区分两种前台优先级，使用一个调度 kthread 和三个请求队列：
 
 ```text
-P0: foreground_read_queue
-P1: foreground_write_queue
-P2: parity_read_queue
-P3: parity_write_queue
+P0: foreground_queue
+P1: parity_read_queue
+P2: parity_write_queue
 ```
 
 基础规则：
 
 ```text
-有可执行前台 Read  -> 执行 Read
-否则有可执行 Data  -> 执行 Data
+有可执行前台 MTD 请求 -> 执行前台请求
 否则执行一个 Parity rebuild Read
 最后执行一个 Parity Write
 每个 NAND 操作完成后重新调度
 已启动的 NAND 操作不抢占
 ```
 
-Linux workqueue nice 或 `WQ_HIGHPRI` 只能影响 CPU 调度，不能保证 NAND 命令优先级。前台读写和 parity 后台操作都必须经过同一个驱动调度器，不能由多个 worker 分别直接访问 MMIO。
+Linux workqueue nice 或 `WQ_HIGHPRI` 只能影响 CPU 调度，不能保证 NAND 命令优先级。前台 MTD 请求和 parity 后台操作都必须经过同一个驱动调度器，不能由多个 worker 分别直接访问 MMIO。
+
+这里的前台串行性必须由驱动明确提供，不能假设所有 MTD 消费者天然串行。建议拆分两类锁：
+
+```c
+struct q3n {
+    struct mutex mtd_lock;      /* 串行化 _read/_write/_erase */
+    spinlock_t sched_lock;      /* 只保护队列和硬件状态 */
+};
+```
+
+前台回调使用 `mtd_lock` 保证一次只有一个 MTD 请求；请求入队后使用独立 completion 等待。调度线程和 IRQ completion 只能短时间获取 `sched_lock`，不能获取 `mtd_lock`，否则可能形成“前台持锁等待 completion、IRQ 等待同一锁”的死锁。
 
 为了防止 parity 永久饥饿，只保留一个简单硬水位：
 
@@ -643,20 +652,16 @@ DMA 完成、数据装入 page register 或命令已提交都不能提前推进�
 
 如果请求 page 小于 `next_prog_page`，说明发生倒序，立即返回 `-EINVAL`。如果请求 page 大于 `next_prog_page`，只有缺失的低 page 请求已经在队列中时才允许等待；否则返回 `-EINVAL`，避免无限等待和 RAM 假持久化。
 
-### 11.7 Ready Data 优先
+### 11.7 Ready 前台请求优先
 
-优先级定义为“所有 ready 请求中的前台读优先、其次 Data 写优先”，而不是无条件选择某一类请求：
+优先级定义为“所有 ready 请求中的前台 MTD 请求优先”，前台读写之间由 `mtd_lock` 串行，不再由 scheduler 排序：
 
 ```c
 static struct q3n_io_req *q3n_pick_next(struct q3n *q3n)
 {
     struct q3n_io_req *req;
 
-    list_for_each_entry(req, &q3n->foreground_read_queue, node)
-        if (q3n_req_ready(q3n, req))
-            return req;
-
-    list_for_each_entry(req, &q3n->foreground_write_queue, node)
+    list_for_each_entry(req, &q3n->foreground_queue, node)
         if (q3n_req_ready(q3n, req))
             return req;
 
@@ -672,7 +677,7 @@ static struct q3n_io_req *q3n_pick_next(struct q3n *q3n)
 }
 ```
 
-不同 block/LUN 的 ready 前台请求可以绕过被阻塞的 block。Multi-plane program 请求只有在全部成员 block 都满足 page-order 时才能提交；普通 read 不受 `next_prog_page` 限制，只需要目标 LUN/plane 当前可用。
+当前只有一个前台请求，因此不存在多个前台请求之间的重排。该请求如果是 program，必须满足 block page-order；如果是普通 read，则不受 `next_prog_page` 限制，只需要目标 LUN/plane 当前可用。当前前台请求因 page-order 阻塞时，调度器可以执行用于推进该 block 前沿的 parity，或者执行不冲突的其他 LUN 后台任务。
 
 ### 11.8 同 Block 交错布局的 Parity 屏障
 
@@ -748,7 +753,7 @@ struct q3n_parity_rebuild {
 2. 更新对应 data CRC。
 3. 增加 `next_slot`。
 4. 若尚未完成，则重新放入 `parity_read_queue` 尾部。
-5. 重新运行统一调度器，让已经等待的前台读先执行。
+5. 重新运行统一调度器，让已经等待的前台 MTD 请求先执行。
 
 首版限制：
 
@@ -758,7 +763,7 @@ Q3N_MAX_PARITY_READ_INFLIGHT = 1
 
 不使用 multi-plane/cache read 批量重建 parity，避免一次占用多个 plane/LUN 并把前台读延迟扩大到 `N × tR`。
 
-如果前台读和 parity rebuild 位于不同空闲 LUN，可以并行执行；不能因为某个 LUN 有前台请求，就让其他完全空闲的 LUN 停止后台工作。
+如果前台请求和 parity rebuild 位于不同空闲 LUN，可以并行执行；不能因为某个 LUN 有前台请求，就让其他完全空闲的 LUN 停止后台工作。
 
 NAND read 一旦发出通常不能安全抢占。因此同一 LUN 上不能保证绝对零等待，只能保证新到前台读最多等待一个已经启动的后台 page read，额外延迟上限约为单页 `tR + completion latency`，而不是整个 stripe 的重建时间。
 
@@ -821,7 +826,9 @@ Page 升序约束只作用于 program，不作用于 read。Parity rebuild read 
 - parity fail 不回滚已成功 data，只更新状态和错误统计。
 - erase/suspend/remove 不发生旧 parity worker 越代写回。
 - 对每个物理 block 断言实际 program page index 单调递增。
-- 前台普通读、Data 写、parity rebuild read、parity write 同时排队时，按 P0/P1/P2/P3 选择 ready 请求。
+- 验证 `mtd_lock` 使前台 read/write/erase 同步执行，同一时刻最多一个前台请求。
+- 前台 MTD 请求、parity rebuild read、parity write 同时等待时，按 P0/P1/P2 选择 ready 请求。
+- 前台持有 `mtd_lock` 等待 completion 时，IRQ 和调度线程只使用 `sched_lock`，不发生锁反转或死锁。
 - parity rebuild 每次只读取一个 page，完成后重新调度，不连续占用 N 个 `tR`。
 - 同 LUN 中前台读最多等待一个已经启动的 parity page read。
 - 不同 LUN 中前台读与 parity rebuild read 可以同时执行。
