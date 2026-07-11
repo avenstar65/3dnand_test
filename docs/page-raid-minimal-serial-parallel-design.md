@@ -38,7 +38,7 @@ UBIFS / UBI raw volume / MTD user
         | logical mapper        |
         | serial/parallel path  |
         | XOR and recovery      |
-        | commit scanner        |
+        | parity validator      |
         +-----------------------+
                  |
        NAND controller / QEMU model
@@ -55,12 +55,20 @@ UBIFS / UBI raw volume / MTD user
 | XOR engine | 计算 parity，重建单个缺失 page |
 | serial writer | 完成 N 个 data page 后写 parity |
 | parallel writer | 组合 7D+1P，提交 multi-plane 命令 |
-| commit scanner | 启动时识别 committed、incomplete、corrupt stripe |
+| parity validator | 根据 parity manifest 识别 committed、incomplete、corrupt stripe |
 | recovery | ECC 不可纠时读取其余成员并恢复 |
 
-## 4. 最小持久化格式
+## 4. Parity Page 内嵌提交信息
 
-每个物理 page 的 OOB 保存：
+本方案不使用独立 commit page，也不要求控制器支持 OOB-only program。提交信息只存放在 parity page 的 OOB 中，并与 parity main data 在该页首次编程时一次写入：
+
+```text
+program_page(parity_main, parity_oob_manifest)
+```
+
+控制器需要支持常规的 main + OOB 同次 page program，但不需要在 parity page 写完后再次修改 OOB，也不会重复编程前面的 data page。
+
+parity OOB manifest 保存：
 
 | 字段 | 建议宽度 | 说明 |
 | --- | ---: | --- |
@@ -68,26 +76,30 @@ UBIFS / UBI raw volume / MTD user
 | format_version | 8 bit | 布局版本 |
 | profile | 8 bit | serial-N+1 或 parallel-7+1 |
 | group_seq | 64 bit | stripe 序号 |
-| role | 8 bit | data slot、parity 或 commit |
+| role | 8 bit | 固定为 parity/manifest |
 | member_bitmap | 16 bit | 预期成员集合 |
-| payload_crc | 32 bit | 可选的静默损坏检测 |
+| data_crc[N] | N × 32 bit | 每个 data page 的 CRC |
+| parity_crc | 32 bit | parity main data 的 CRC |
 | header_crc | 32 bit | 元数据校验 |
 
-默认不依赖同一 NAND page 的二次编程，而使用 append-only commit record：
+如果 parity OOB 空间不足，可将 manifest 放在控制器提供的受保护 metadata/spare 区。只有确认 parity main data 可以保留少量非校验字节时，才考虑占用 main 区；否则不能牺牲 parity 覆盖范围。
+
+parity page 同时承担两个角色：
 
 ```text
-commit = { magic, version, profile, group_seq,
-           member_bitmap, parity_location, header_crc }
+parity main = D0 ^ D1 ^ ... ^ D(N-1)
+parity OOB  = stripe manifest + commit evidence
 ```
 
-一个 commit page 可容纳多条定长记录。扫描规则：
+有效性规则：
 
-1. 成员完整、元数据一致且存在有效 commit：COMMITTED。
-2. 只有部分成员或没有 commit：INCOMPLETE，不向上层暴露。
-3. 有 commit 但成员不足或 CRC 不一致：CORRUPT，返回 -EBADMSG。
-4. 全 0xff 且没有 commit：EMPTY。
+1. parity page 不存在或其 ECC、parity_crc、header_crc 无效：INCOMPLETE。
+2. 串行方案中，parity manifest 有效即表示前面的 data page 写流程已完成；读取时仍可用 data_crc 验证成员。
+3. 并行方案中，parity manifest 只表示候选提交；必须确认 D0..D6 均可读且 data_crc 全部匹配后才是 COMMITTED。
+4. parity manifest 有效但任一成员缺失或 CRC 不匹配：CORRUPT，返回 -EBADMSG。
+5. data 和 parity 均为全 0xff：EMPTY。
 
-只有确认硬件支持安全的 OOB 部分页二次编程时，才考虑用 OOB commit bit 替代独立记录。
+并行方案不能仅凭“parity page 存在”判断提交，因为一次 multi-plane program 可能出现 parity 成功但某个 data slot 失败。成员 CRC 验证用于消除这种误判。
 
 ## 5. 串行方案：N+1
 
@@ -114,8 +126,8 @@ parity_page        = stripe * (N + 1) + N
 1. 验证请求按完整 stripe 对齐。
 2. 依次写 D0 到 D(N-1)，同时累计 XOR。
 3. 最后一个 data page 成功后写 parity。
-4. data 和 parity 均成功后追加 commit record。
-5. commit 落盘后整组才有效。
+4. 最后一次性写入 parity main data 和 parity OOB manifest。
+5. parity page ECC、parity CRC 和 manifest CRC 有效后整组生效。
 
 推荐严格模式：一次请求必须包含 N × page_size 数据，驱动不保留跨请求脏缓存。
 
@@ -125,19 +137,19 @@ parity_page        = stripe * (N + 1) + N
 
 正常读取只访问目标 data page。ECC 不可纠时：
 
-1. 确认 stripe 已提交。
+1. 确认 parity manifest 有效。
 2. 读取 parity 和其余 N-1 个 data page。
 3. 只有一个成员失败时执行 XOR 恢复。
-4. 校验 payload CRC；成功则返回数据，失败返回 -EBADMSG。
+4. 校验 parity manifest 中对应的 data_crc；成功则返回数据，失败返回 -EBADMSG。
 
 ### 5.4 代价
 
 | 项目 | 代价 |
 | --- | --- |
-| 容量 | parity 基本开销为 1/(N+1)，commit 通常小于 1% |
-| 写放大 | 不含 commit 时为 (N+1)/N |
+| 容量 | parity 基本开销为 1/(N+1)，无独立 commit page |
+| 写放大 | (N+1)/N，无额外 commit page program |
 | RAM | 严格流式 XOR 约 page_size；整组缓存为 N × page_size |
-| 延迟 | N 个 data program + parity + commit，基本串行 |
+| 延迟 | N 个 data program + 1 个 parity program，基本串行 |
 | 实现复杂度 | 低；但完整 stripe 写粒度不兼容通用 UBI 小写 |
 
 ## 6. 并行方案：7+1
@@ -160,8 +172,11 @@ physical write  = 8 * physical_page_size
 2. 驱动计算 7 个 16KiB data page 的 16KiB parity。
 3. 构造包含 8 个 page descriptor 的 multi-plane 命令。
 4. 控制器并行 program 8 个 slot。
-5. 全部成功后追加 commit record。
-6. 任一 slot 失败则不提交，整组无效。
+5. parity main data 和包含成员 CRC 的 OOB manifest 与 parity page 同时编程。
+6. 命令完成时只有 8 个 slot 全部成功才向本次调用返回成功。
+7. 重启后将有效 parity manifest 视为候选提交；读取并验证 D0..D6 的 CRC 后才标记 COMMITTED。
+
+为避免启动时读取全部数据页，推荐懒验证：启动扫描只建立 parity 候选索引，第一次访问 stripe 时读取并校验 7 个 data page，成功后在 RAM bitmap 中缓存 COMMITTED 状态。重启后重新验证，不把 RAM 状态持久化。
 
 ### 6.3 地址映射
 
@@ -194,10 +209,10 @@ mtd.erasesize = 7 * 1600 * 16KiB = 175MiB
 
 | 项目 | 代价 |
 | --- | --- |
-| 容量 | parity 固定 12.5%，commit 通常小于 1% |
-| 写放大 | 不含 commit 时为 8/7 = 1.143 |
+| 容量 | parity 固定 12.5%，无独立 commit page |
+| 写放大 | 8/7 = 1.143，无额外 commit page program |
 | RAM | 至少 112KiB input + 16KiB parity；按 queue depth 倍增 |
-| 延迟 | 约一次 multi-plane program + commit |
+| 延迟 | 约一次 8-page multi-plane program；首次验证需读取成员 |
 | 失败粒度 | 任一 slot program 失败导致整个 112KiB stripe 无效 |
 | 内核代价 | MTD 可直接支持；原生 UBI/UBIFS 改造代价高 |
 
@@ -227,7 +242,7 @@ Linux 7.0.12 仍有路径直接使用 offset & (writesize - 1)：
 
 1. 驱动内部统一使用 div_u64_rem()、div_u64() 或 MTD helper。
 2. 不把 112KiB 虚拟 stripe 伪装成 raw NAND 物理 page。
-3. 首版不开放通用 OOB 字符设备写接口；私有元数据通过驱动的物理命令访问。
+3. 首版不开放通用 OOB 字符设备写接口；驱动通过控制器私有命令在首次 program parity page 时同时写入 main 和 OOB manifest。
 4. 不启用 NFTL、INFTL、mtdswap 等未审计消费者。
 
 ### 7.3 驱动修改点
@@ -341,7 +356,7 @@ fs/ubifs/super.c 当前会：
 - 只允许专用测试程序提交完整 stripe。
 - 串行 profile 使用 N × page_size 写粒度。
 - 并行 profile 使用 112KiB 写粒度。
-- 先验证布局、XOR、单页恢复、未提交检测和 multi-plane 性能。
+- 先验证布局、XOR、单页恢复、parity manifest、未提交检测和 multi-plane 性能。
 
 代价低，但不能直接挂载 UBI/UBIFS。
 
@@ -374,9 +389,10 @@ fs/ubifs/super.c 当前会：
 
 | 场景 | 处理 |
 | --- | --- |
-| data program fail | 不写 commit，整组 invalid |
-| parity program fail | 不写 commit，整组 invalid |
-| commit program fail | 整组 incomplete，重启扫描时忽略 |
+| 串行 data program fail | 不写 parity，整组 incomplete |
+| 串行 parity program fail | parity ECC/CRC 无效，整组 incomplete |
+| 并行 data slot 失败但 parity 成功 | manifest 为候选；成员 CRC 验证失败，整组 corrupt |
+| 并行 parity slot 失败 | 无有效 manifest，整组 incomplete |
 | 单 data page ECC 不可纠 | 尝试 XOR 恢复 |
 | parity page 失效 | data 仍可读，但失去 RAID 恢复能力 |
 | 两个及以上成员失效 | 返回 -EBADMSG |
@@ -398,9 +414,10 @@ fs/ubifs/super.c 当前会：
 - 并行 7+1 的 112KiB 读写和 multi-plane 命令计数。
 - 分别对每个 data slot 注入单页错误并恢复。
 - 测试 parity 失效、双页失效和 CRC 错误。
-- 在任意 data、parity、commit 写入前后注入掉电。
+- 串行方案在任意 data 和 parity 写入前后注入掉电。
+- 并行方案在 8-page multi-plane program 的不同成员完成点注入掉电，覆盖 parity 成功但 data 失败的情况。
 
-成功标准：已提交组始终可识别；未提交组始终不被当作有效数据；不需要 GC 或自动补写。
+成功标准：串行方案只有有效 parity manifest 的组可见；并行方案只有 manifest 和全部成员 CRC 均有效的组可见；未完成组不被当作有效数据；不需要 GC 或自动补写。
 
 ### 12.3 UBI/UBIFS 回归，仅路径 C
 
@@ -415,6 +432,6 @@ fs/ubifs/super.c 当前会：
 - “双 plane、每 plane 4 page”的确切并行命令和地址约束。
 - 8 个 page 是否可在一个 controller transaction 中并行提交。
 - multi-plane program 对 block/page address 相同性的要求。
-- OOB 是否参与 ECC、可用字节数和部分页编程限制。
+- OOB 是否参与 ECC、可用字节数，以及控制器能否在首次 page program 时同时提供 main 和 OOB。
 - program fail 能否定位到单个 slot。
 - DMA descriptor 数量、对齐、scatter-gather 和最大传输长度。
