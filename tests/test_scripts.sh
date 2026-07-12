@@ -221,6 +221,10 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'Q3N_STRIPE_UNPROT
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'q3n->parity_index = kvcalloc'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'kvfree\(q3n->parity_index\)'
 assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'q3n->parity_index = devm_kcalloc'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'mtd->_sync = qemu_3dnand_mtd_sync'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'struct mutex mtd_lock'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'q3n_sched_enqueue'
+assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'IS_ALIGNED\(instr->addr, mtd->erasesize\)'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_map_non_power_of_two_geometry_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_program_order_test'
 

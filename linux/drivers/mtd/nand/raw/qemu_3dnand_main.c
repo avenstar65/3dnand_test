@@ -40,7 +40,8 @@ struct qemu_3dnand {
 	struct pci_dev *pdev;
 	void __iomem *regs;
 	resource_size_t regs_size;
-	struct mutex lock;
+	struct mutex mtd_lock;
+	struct q3n_sched sched;
 	struct dentry *debugfs_dir;
 	struct mtd_info mtd;
 
@@ -77,6 +78,18 @@ static void qemu_3dnand_free_metadata(struct qemu_3dnand *q3n)
 	q3n->data_page_valid = NULL;
 	kvfree(q3n->parity_index);
 	q3n->parity_index = NULL;
+}
+
+static int qemu_3dnand_schedule_foreground(struct qemu_3dnand *q3n)
+{
+	struct q3n_request req = {
+		.class = Q3N_REQ_FOREGROUND,
+		.op = Q3N_REQ_READ,
+	};
+
+	if (q3n_sched_enqueue(&q3n->sched, &req))
+		return -EIO;
+	return q3n_sched_pick_next(&q3n->sched) == &req ? 0 : -EIO;
 }
 
 static u32 qemu_3dnand_readl(struct qemu_3dnand *q3n, u32 reg)
@@ -353,7 +366,10 @@ static int qemu_3dnand_mtd_read(struct mtd_info *mtd, loff_t from, size_t len,
 	if (from < 0 || from + len > mtd->size)
 		return -EINVAL;
 
-	mutex_lock(&q3n->lock);
+	mutex_lock(&q3n->mtd_lock);
+	ret = qemu_3dnand_schedule_foreground(q3n);
+	if (ret)
+		goto out_unlock;
 	while (done < len) {
 		u32 block, page, column;
 		size_t chunk;
@@ -368,7 +384,8 @@ static int qemu_3dnand_mtd_read(struct mtd_info *mtd, loff_t from, size_t len,
 		memcpy(buf + done, q3n->page_buf + column, chunk);
 		done += chunk;
 	}
-	mutex_unlock(&q3n->lock);
+	out_unlock:
+	mutex_unlock(&q3n->mtd_lock);
 
 	*retlen = done;
 	return ret;
@@ -386,7 +403,10 @@ static int qemu_3dnand_mtd_write(struct mtd_info *mtd, loff_t to, size_t len,
 	if (!IS_ALIGNED(to, q3n->page_size) || !IS_ALIGNED(len, q3n->page_size))
 		return -EINVAL;
 
-	mutex_lock(&q3n->lock);
+	mutex_lock(&q3n->mtd_lock);
+	ret = qemu_3dnand_schedule_foreground(q3n);
+	if (ret)
+		goto out_unlock;
 	while (done < len) {
 		u32 block, page, column;
 		u32 group;
@@ -407,7 +427,8 @@ static int qemu_3dnand_mtd_write(struct mtd_info *mtd, loff_t to, size_t len,
 			break;
 		done += q3n->page_size;
 	}
-	mutex_unlock(&q3n->lock);
+	out_unlock:
+	mutex_unlock(&q3n->mtd_lock);
 
 	*retlen = done;
 	return ret;
@@ -440,11 +461,10 @@ static int qemu_3dnand_mtd_erase(struct mtd_info *mtd,
 
 	if (instr->addr + instr->len > mtd->size)
 		return -EINVAL;
-	if (!IS_ALIGNED(instr->addr, mtd->erasesize) ||
-	    !IS_ALIGNED(instr->len, mtd->erasesize))
+	if (instr->addr % mtd->erasesize || instr->len % mtd->erasesize)
 		return -EINVAL;
 
-	mutex_lock(&q3n->lock);
+	mutex_lock(&q3n->mtd_lock);
 	while (done < instr->len) {
 		u32 block, page, column;
 
@@ -466,9 +486,18 @@ static int qemu_3dnand_mtd_erase(struct mtd_info *mtd,
 						    block / Q3N_RAID_LANES);
 		done += mtd->erasesize;
 	}
-	mutex_unlock(&q3n->lock);
+	mutex_unlock(&q3n->mtd_lock);
 
 	return ret;
+}
+
+static void qemu_3dnand_mtd_sync(struct mtd_info *mtd)
+{
+	struct qemu_3dnand *q3n = mtd->priv;
+
+	mutex_lock(&q3n->mtd_lock);
+	q3n_sched_drain(&q3n->sched);
+	mutex_unlock(&q3n->mtd_lock);
 }
 
 static int qemu_3dnand_register_mtd(struct qemu_3dnand *q3n)
@@ -489,6 +518,7 @@ static int qemu_3dnand_register_mtd(struct qemu_3dnand *q3n)
 	mtd->_read = qemu_3dnand_mtd_read;
 	mtd->_write = qemu_3dnand_mtd_write;
 	mtd->_erase = qemu_3dnand_mtd_erase;
+	mtd->_sync = qemu_3dnand_mtd_sync;
 	mtd->dev.parent = &q3n->pdev->dev;
 
 	return mtd_device_register(mtd, NULL, 0);
@@ -499,13 +529,13 @@ static int qemu_3dnand_inject_data_loss(void *data, u64 value)
 	struct qemu_3dnand *q3n = data;
 	int ret;
 
-	mutex_lock(&q3n->lock);
+	mutex_lock(&q3n->mtd_lock);
 	qemu_3dnand_writel(q3n, Q3N_REG_FAULT_ADDR_LO, lower_32_bits(value));
 	qemu_3dnand_writel(q3n, Q3N_REG_FAULT_ADDR_HI, upper_32_bits(value));
 	qemu_3dnand_writel(q3n, Q3N_REG_FAULT_CTRL,
 			   Q3N_FAULT_INJECT_DATA_LOSS);
 	ret = qemu_3dnand_wait_ready(q3n);
-	mutex_unlock(&q3n->lock);
+	mutex_unlock(&q3n->mtd_lock);
 
 	return ret;
 }
@@ -629,7 +659,8 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 	if (IS_ERR(q3n->regs))
 		return PTR_ERR(q3n->regs);
 
-	mutex_init(&q3n->lock);
+	mutex_init(&q3n->mtd_lock);
+	q3n_sched_init(&q3n->sched);
 	pci_set_drvdata(pdev, q3n);
 
 	ident = qemu_3dnand_readl(q3n, Q3N_REG_ID);
