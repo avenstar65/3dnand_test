@@ -154,6 +154,22 @@ static void q3n_recover_single_missing_page_test(struct kunit *test)
 	KUNIT_EXPECT_MEMEQ(test, recovered, d1, sizeof(recovered));
 }
 
+static void q3n_rebuild_processes_one_member_per_step_test(struct kunit *test)
+{
+	u8 parity[4] = { 0x11, 0x22, 0x33, 0x44 };
+	u8 member[4] = { 0x01, 0x02, 0x03, 0x04 };
+	struct q3n_parity_rebuild rebuild = {
+		.data_pages = 7,
+		.missing_slot = 3,
+		.parity_accumulator = parity,
+		.page_size = sizeof(parity),
+	};
+
+	KUNIT_ASSERT_EQ(test, q3n_rebuild_xor_one(&rebuild, member), 0);
+	KUNIT_EXPECT_EQ(test, rebuild.next_slot, (u8)1);
+	KUNIT_EXPECT_EQ(test, parity[0], (u8)0x10);
+}
+
 static void q3n_scheduler_prioritizes_ready_foreground_test(struct kunit *test)
 {
 	struct q3n_sched sched;
@@ -200,6 +216,22 @@ static void q3n_scheduler_prioritizes_parity_read_test(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, q3n_sched_pick_next(&sched), &read);
 }
 
+static void q3n_scheduler_foreground_preempts_requeued_rebuild_test(struct kunit *test)
+{
+	struct q3n_sched sched;
+	struct q3n_request rebuild = { .class = Q3N_REQ_PARITY_READ,
+		.op = Q3N_REQ_READ };
+	struct q3n_request foreground = { .class = Q3N_REQ_FOREGROUND,
+		.op = Q3N_REQ_READ };
+
+	q3n_sched_init(&sched);
+	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &rebuild), 0);
+	KUNIT_ASSERT_PTR_EQ(test, q3n_sched_pick_next(&sched), &rebuild);
+	KUNIT_ASSERT_EQ(test, q3n_sched_requeue_p1(&sched, &rebuild), 0);
+	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &foreground), 0);
+	KUNIT_EXPECT_PTR_EQ(test, q3n_sched_pick_next(&sched), &foreground);
+}
+
 static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_map_separate_parity_block_test),
 	KUNIT_CASE(q3n_map_non_power_of_two_geometry_test),
@@ -210,9 +242,11 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_manifest_rejects_header_crc_corruption_test),
 	KUNIT_CASE(q3n_open_stripe_is_unprotected_until_parity_completes_test),
 	KUNIT_CASE(q3n_recover_single_missing_page_test),
+	KUNIT_CASE(q3n_rebuild_processes_one_member_per_step_test),
 	KUNIT_CASE(q3n_scheduler_prioritizes_ready_foreground_test),
 	KUNIT_CASE(q3n_scheduler_skips_unready_foreground_program_test),
 	KUNIT_CASE(q3n_scheduler_prioritizes_parity_read_test),
+	KUNIT_CASE(q3n_scheduler_foreground_preempts_requeued_rebuild_test),
 	{}
 };
 

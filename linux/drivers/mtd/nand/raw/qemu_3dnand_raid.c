@@ -122,5 +122,19 @@ int q3n_recover_page(u8 *out, const u8 *parity, const u8 * const *members,
 	return 0;
 }
 
+int q3n_rebuild_xor_one(struct q3n_parity_rebuild *rebuild,
+			const u8 *member)
+{
+	if (!rebuild || !member || !rebuild->parity_accumulator ||
+	    !rebuild->page_size || !rebuild->data_pages ||
+	    rebuild->data_pages > Q3N_RAID_MAX_DATA_PAGES ||
+	    rebuild->next_slot >= rebuild->data_pages)
+		return -EINVAL;
+
+	q3n_xor_page(rebuild->parity_accumulator, member, rebuild->page_size);
+	rebuild->next_slot++;
+	return 0;
+}
+
 MODULE_DESCRIPTION("QEMU 3D NAND serial Page-RAID metadata and XOR");
 MODULE_LICENSE("GPL");

@@ -74,6 +74,14 @@ int q3n_sched_enqueue(struct q3n_sched *sched, struct q3n_request *req)
 	return 0;
 }
 
+int q3n_sched_requeue_p1(struct q3n_sched *sched, struct q3n_request *req)
+{
+	if (!req)
+		return -EINVAL;
+	req->class = Q3N_REQ_PARITY_READ;
+	return q3n_sched_enqueue(sched, req);
+}
+
 struct q3n_request *q3n_sched_pick_next(struct q3n_sched *sched)
 {
 	struct q3n_request *req = NULL;
