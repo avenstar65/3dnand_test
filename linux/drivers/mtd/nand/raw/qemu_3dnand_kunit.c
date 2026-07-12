@@ -66,6 +66,24 @@ static void q3n_program_order_test(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, q3n_program_order_ready(&state, 18));
 }
 
+static void q3n_serial_same_block_mapping_test(struct kunit *test)
+{
+	struct q3n_phys_addr first, last, next;
+
+	KUNIT_ASSERT_EQ(test, q3n_map_serial_data_page(&q3n_test_geometry, 0,
+							  &first), 0);
+	KUNIT_ASSERT_EQ(test, q3n_map_serial_data_page(&q3n_test_geometry, 6,
+							  &last), 0);
+	KUNIT_ASSERT_EQ(test, q3n_map_serial_data_page(&q3n_test_geometry, 7,
+							  &next), 0);
+	KUNIT_EXPECT_EQ(test, first.block, 0U);
+	KUNIT_EXPECT_EQ(test, first.page, 0U);
+	KUNIT_EXPECT_EQ(test, last.block, 0U);
+	KUNIT_EXPECT_EQ(test, last.page, 6U);
+	KUNIT_EXPECT_EQ(test, next.block, 0U);
+	KUNIT_EXPECT_EQ(test, next.page, 8U);
+}
+
 static void q3n_incremental_xor_test(struct kunit *test)
 {
 	u8 d0[16] = { 0x55 };
@@ -139,10 +157,11 @@ static void q3n_recover_single_missing_page_test(struct kunit *test)
 static void q3n_scheduler_prioritizes_ready_foreground_test(struct kunit *test)
 {
 	struct q3n_sched sched;
+	struct q3n_block_state state = { .next_prog_page = 0 };
 	struct q3n_request foreground = { .class = Q3N_REQ_FOREGROUND,
 		.op = Q3N_REQ_READ };
 	struct q3n_request parity = { .class = Q3N_REQ_PARITY_WRITE,
-		.op = Q3N_REQ_PROGRAM };
+		.op = Q3N_REQ_PROGRAM, .block_state = &state };
 
 	q3n_sched_init(&sched);
 	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &parity), 0);
@@ -186,6 +205,7 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_map_non_power_of_two_geometry_test),
 	KUNIT_CASE(q3n_map_rejects_invalid_input_test),
 	KUNIT_CASE(q3n_program_order_test),
+	KUNIT_CASE(q3n_serial_same_block_mapping_test),
 	KUNIT_CASE(q3n_incremental_xor_test),
 	KUNIT_CASE(q3n_manifest_rejects_header_crc_corruption_test),
 	KUNIT_CASE(q3n_open_stripe_is_unprotected_until_parity_completes_test),

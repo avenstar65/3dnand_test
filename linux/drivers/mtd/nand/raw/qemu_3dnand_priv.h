@@ -99,6 +99,8 @@ int q3n_map_data_page(const struct q3n_geometry *geometry, u64 stripe,
 		      u8 slot, struct q3n_phys_addr *out);
 int q3n_map_parity_page(const struct q3n_geometry *geometry, u64 stripe,
 			struct q3n_phys_addr *out);
+int q3n_map_serial_data_page(const struct q3n_geometry *geometry,
+			     u64 logical_page, struct q3n_phys_addr *out);
 bool q3n_program_order_ready(const struct q3n_block_state *state, u32 page);
 void q3n_xor_page(u8 *parity, const u8 *data, size_t len);
 int q3n_open_stripe_update(struct q3n_open_stripe *stripe, u8 slot,

@@ -69,6 +69,40 @@ int q3n_map_parity_page(const struct q3n_geometry *geometry, u64 stripe,
 	return 0;
 }
 
+int q3n_map_serial_data_page(const struct q3n_geometry *geometry,
+			     u64 logical_page, struct q3n_phys_addr *out)
+{
+	u64 logical_pages_per_block;
+	u64 block;
+	u64 page_in_block;
+	u32 stripe;
+	u32 slot;
+	int ret;
+
+	ret = q3n_validate_geometry(geometry);
+	if (ret)
+		return ret;
+	if (!out)
+		return -EINVAL;
+
+	logical_pages_per_block =
+		(geometry->pages_per_block /
+		 (geometry->data_pages_per_stripe + 1)) *
+		geometry->data_pages_per_stripe;
+	if (!logical_pages_per_block)
+		return -ERANGE;
+
+	block = div64_u64_rem(logical_page, logical_pages_per_block,
+				    &page_in_block);
+	if (block >= geometry->data_block_count)
+		return -ERANGE;
+	stripe = div_u64_rem(page_in_block,
+			    geometry->data_pages_per_stripe, &slot);
+	out->block = block;
+	out->page = stripe * (geometry->data_pages_per_stripe + 1) + slot;
+	return 0;
+}
+
 bool q3n_program_order_ready(const struct q3n_block_state *state, u32 page)
 {
 	return state && page == state->next_prog_page;
