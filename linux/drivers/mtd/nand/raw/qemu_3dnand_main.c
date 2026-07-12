@@ -81,6 +81,9 @@ struct qemu_3dnand_parity_work {
 	struct qemu_3dnand *q3n;
 	u32 block;
 	u32 stripe;
+	u8 next_slot;
+	u8 *accumulator;
+	u8 *page_buf;
 };
 
 static void qemu_3dnand_free_metadata(struct qemu_3dnand *q3n)
@@ -251,11 +254,32 @@ static void qemu_3dnand_mark_parity_stale(struct qemu_3dnand *q3n,
 	q3n->parity_stale++;
 }
 
-static int qemu_3dnand_append_parity_locked(struct qemu_3dnand *q3n,
+static int qemu_3dnand_commit_parity_locked(struct qemu_3dnand *q3n,
+					    u32 block, u32 stripe,
+					    struct qemu_3dnand_parity_entry *entry,
+					    const u8 *parity)
+{
+	int ret;
+
+	ret = qemu_3dnand_program_phys_page_locked(q3n, block,
+			stripe * Q3N_STRIPE_PAGES + Q3N_DATA_PAGES, parity);
+	if (ret)
+		return ret;
+
+	entry->physical_block = block;
+	entry->page = stripe * Q3N_STRIPE_PAGES + Q3N_DATA_PAGES;
+	entry->data_block_generation[0] = q3n->data_meta[block].generation;
+	entry->parity_version++;
+	entry->sequence = ++q3n->parity_sequence;
+	entry->valid = true;
+	q3n->parity_written++;
+	return 0;
+}
+
+static int __maybe_unused qemu_3dnand_append_parity_locked(struct qemu_3dnand *q3n,
 					    u32 block, u32 stripe)
 {
 	struct qemu_3dnand_parity_entry *entry;
-	u32 parity_version;
 	u32 lane;
 	u32 i;
 	int ret;
@@ -264,8 +288,6 @@ static int qemu_3dnand_append_parity_locked(struct qemu_3dnand *q3n,
 		return 0;
 
 	entry = &q3n->parity_index[qemu_3dnand_parity_index(q3n, block, stripe)];
-	parity_version = entry->parity_version + 1;
-
 	memset(q3n->raid_buf, 0, q3n->page_size);
 	for (lane = 0; lane < Q3N_DATA_PAGES; lane++) {
 		ret = qemu_3dnand_read_phys_page_locked(q3n, block,
@@ -277,32 +299,45 @@ static int qemu_3dnand_append_parity_locked(struct qemu_3dnand *q3n,
 			q3n->raid_buf[i] ^= q3n->page_buf[i];
 	}
 
-	ret = qemu_3dnand_program_phys_page_locked(q3n, block,
-						   stripe * Q3N_STRIPE_PAGES + Q3N_DATA_PAGES,
-						   q3n->raid_buf);
-	if (ret)
-		return ret;
-
-	entry->physical_block = block;
-	entry->page = stripe * Q3N_STRIPE_PAGES + Q3N_DATA_PAGES;
-	entry->data_block_generation[0] = q3n->data_meta[block].generation;
-	entry->parity_version = parity_version;
-	entry->sequence = ++q3n->parity_sequence;
-	entry->valid = true;
-	q3n->parity_written++;
-	return 0;
+	return qemu_3dnand_commit_parity_locked(q3n, block, stripe, entry,
+						q3n->raid_buf);
 }
 
 static void qemu_3dnand_parity_worker(struct work_struct *work)
 {
 	struct qemu_3dnand_parity_work *parity =
 		container_of(work, struct qemu_3dnand_parity_work, work);
+	struct qemu_3dnand_parity_entry *entry;
+	int ret;
 
 	mutex_lock(&parity->q3n->mtd_lock);
-	qemu_3dnand_append_parity_locked(parity->q3n, parity->block,
-					parity->stripe);
+	ret = qemu_3dnand_read_phys_page_locked(parity->q3n, parity->block,
+		parity->stripe * Q3N_STRIPE_PAGES + parity->next_slot,
+		parity->page_buf);
+	if (!ret) {
+		q3n_xor_page(parity->accumulator, parity->page_buf,
+				     parity->q3n->page_size);
+		parity->next_slot++;
+		if (parity->next_slot == Q3N_DATA_PAGES) {
+			entry = &parity->q3n->parity_index[
+				qemu_3dnand_parity_index(parity->q3n, parity->block,
+						  parity->stripe)];
+			ret = qemu_3dnand_commit_parity_locked(parity->q3n,
+				parity->block, parity->stripe, entry,
+				parity->accumulator);
+		}
+	}
 	mutex_unlock(&parity->q3n->mtd_lock);
-	kfree(parity);
+	if (ret || parity->next_slot == Q3N_DATA_PAGES) {
+		if (ret)
+			parity->q3n->raid_failed++;
+		kfree(parity->page_buf);
+		kfree(parity->accumulator);
+		kfree(parity);
+		return;
+	}
+
+	queue_work(parity->q3n->parity_wq, &parity->work);
 }
 
 static int qemu_3dnand_queue_parity_locked(struct qemu_3dnand *q3n,
@@ -315,6 +350,14 @@ static int qemu_3dnand_queue_parity_locked(struct qemu_3dnand *q3n,
 	parity = kzalloc(sizeof(*parity), GFP_KERNEL);
 	if (!parity)
 		return -ENOMEM;
+	parity->accumulator = kzalloc(q3n->page_size, GFP_KERNEL);
+	parity->page_buf = kmalloc(q3n->page_size, GFP_KERNEL);
+	if (!parity->accumulator || !parity->page_buf) {
+		kfree(parity->page_buf);
+		kfree(parity->accumulator);
+		kfree(parity);
+		return -ENOMEM;
+	}
 	parity->q3n = q3n;
 	parity->block = block;
 	parity->stripe = stripe;
