@@ -2,11 +2,15 @@
 #ifndef __QEMU_3DNAND_PRIV_H
 #define __QEMU_3DNAND_PRIV_H
 
+#include <linux/list.h>
+#include <linux/spinlock.h>
 #include <linux/types.h>
 
 #define Q3N_RAID_MAX_DATA_PAGES	7
 #define Q3N_RAID_META_MAGIC		0x5133
 #define Q3N_RAID_META_VERSION		1
+#define Q3N_MAX_PENDING_PARITY		32
+#define Q3N_MAX_PARITY_READ_INFLIGHT	1
 
 struct q3n_geometry {
 	u32 page_size;
@@ -64,6 +68,33 @@ struct q3n_open_stripe {
 	enum q3n_stripe_state state;
 };
 
+enum q3n_req_class {
+	Q3N_REQ_FOREGROUND,
+	Q3N_REQ_PARITY_READ,
+	Q3N_REQ_PARITY_WRITE,
+};
+
+enum q3n_req_op {
+	Q3N_REQ_READ,
+	Q3N_REQ_PROGRAM,
+};
+
+struct q3n_request {
+	struct list_head node;
+	enum q3n_req_class class;
+	enum q3n_req_op op;
+	const struct q3n_block_state *block_state;
+	u32 page;
+};
+
+struct q3n_sched {
+	spinlock_t lock;
+	struct list_head foreground_queue;
+	struct list_head parity_read_queue;
+	struct list_head parity_write_queue;
+	u32 pending_parity;
+};
+
 int q3n_map_data_page(const struct q3n_geometry *geometry, u64 stripe,
 		      u8 slot, struct q3n_phys_addr *out);
 int q3n_map_parity_page(const struct q3n_geometry *geometry, u64 stripe,
@@ -79,5 +110,9 @@ int q3n_build_manifest(const struct q3n_open_stripe *stripe,
 int q3n_validate_manifest(const struct q3n_parity_manifest *manifest);
 int q3n_recover_page(u8 *out, const u8 *parity, const u8 * const *members,
 		     u8 data_pages, u8 missing_slot, size_t len);
+void q3n_sched_init(struct q3n_sched *sched);
+int q3n_sched_enqueue(struct q3n_sched *sched, struct q3n_request *req);
+struct q3n_request *q3n_sched_pick_next(struct q3n_sched *sched);
+void q3n_sched_drain(struct q3n_sched *sched);
 
 #endif /* __QEMU_3DNAND_PRIV_H */
