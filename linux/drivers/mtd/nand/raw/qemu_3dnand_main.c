@@ -15,6 +15,7 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 
 #include "qemu_3dnand.h"
 #include "qemu_3dnand_priv.h"
@@ -44,6 +45,7 @@ struct qemu_3dnand {
 	resource_size_t regs_size;
 	struct mutex mtd_lock;
 	struct q3n_sched sched;
+	struct workqueue_struct *parity_wq;
 	struct dentry *debugfs_dir;
 	struct mtd_info mtd;
 
@@ -72,6 +74,13 @@ struct qemu_3dnand {
 	u64 raid_recovered;
 	u64 raid_failed;
 	u64 generation_updates;
+};
+
+struct qemu_3dnand_parity_work {
+	struct work_struct work;
+	struct qemu_3dnand *q3n;
+	u32 block;
+	u32 stripe;
 };
 
 static void qemu_3dnand_free_metadata(struct qemu_3dnand *q3n)
@@ -284,6 +293,36 @@ static int qemu_3dnand_append_parity_locked(struct qemu_3dnand *q3n,
 	return 0;
 }
 
+static void qemu_3dnand_parity_worker(struct work_struct *work)
+{
+	struct qemu_3dnand_parity_work *parity =
+		container_of(work, struct qemu_3dnand_parity_work, work);
+
+	mutex_lock(&parity->q3n->mtd_lock);
+	qemu_3dnand_append_parity_locked(parity->q3n, parity->block,
+					parity->stripe);
+	mutex_unlock(&parity->q3n->mtd_lock);
+	kfree(parity);
+}
+
+static int qemu_3dnand_queue_parity_locked(struct qemu_3dnand *q3n,
+					    u32 block, u32 stripe)
+{
+	struct qemu_3dnand_parity_work *parity;
+
+	if (!qemu_3dnand_stripe_full(q3n, block, stripe))
+		return 0;
+	parity = kzalloc(sizeof(*parity), GFP_KERNEL);
+	if (!parity)
+		return -ENOMEM;
+	parity->q3n = q3n;
+	parity->block = block;
+	parity->stripe = stripe;
+	INIT_WORK(&parity->work, qemu_3dnand_parity_worker);
+	queue_work(q3n->parity_wq, &parity->work);
+	return 0;
+}
+
 static int qemu_3dnand_recover_page_locked(struct qemu_3dnand *q3n,
 					   u32 data_block, u32 page, u8 *buf)
 {
@@ -409,7 +448,7 @@ static int qemu_3dnand_mtd_write(struct mtd_info *mtd, loff_t to, size_t len,
 								  page)] = 1;
 		q3n->data_meta[block].erased = false;
 		stripe = page / Q3N_STRIPE_PAGES;
-		ret = qemu_3dnand_append_parity_locked(q3n, block, stripe);
+		ret = qemu_3dnand_queue_parity_locked(q3n, block, stripe);
 		if (ret)
 			break;
 		done += q3n->page_size;
@@ -481,6 +520,7 @@ static void qemu_3dnand_mtd_sync(struct mtd_info *mtd)
 {
 	struct qemu_3dnand *q3n = mtd->priv;
 
+	flush_workqueue(q3n->parity_wq);
 	mutex_lock(&q3n->mtd_lock);
 	q3n_sched_drain(&q3n->sched);
 	mutex_unlock(&q3n->mtd_lock);
@@ -649,6 +689,9 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 
 	mutex_init(&q3n->mtd_lock);
 	q3n_sched_init(&q3n->sched);
+	q3n->parity_wq = alloc_workqueue("q3n-parity", WQ_UNBOUND, 1);
+	if (!q3n->parity_wq)
+		return -ENOMEM;
 	pci_set_drvdata(pdev, q3n);
 
 	ident = qemu_3dnand_readl(q3n, Q3N_REG_ID);
@@ -712,6 +755,8 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 	return 0;
 
 err_free_metadata:
+	if (q3n->parity_wq)
+		destroy_workqueue(q3n->parity_wq);
 	qemu_3dnand_free_metadata(q3n);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to register MTD\n");
@@ -723,9 +768,11 @@ static void qemu_3dnand_remove(struct pci_dev *pdev)
 	struct qemu_3dnand *q3n = pci_get_drvdata(pdev);
 
 	if (q3n) {
+		flush_workqueue(q3n->parity_wq);
 		debugfs_remove_recursive(q3n->debugfs_dir);
 		mtd_device_unregister(&q3n->mtd);
 		qemu_3dnand_free_metadata(q3n);
+		destroy_workqueue(q3n->parity_wq);
 	}
 	pci_set_drvdata(pdev, NULL);
 }

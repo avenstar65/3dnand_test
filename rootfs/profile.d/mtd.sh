@@ -51,7 +51,13 @@ mtd_q3n_serial_smoke() {
   flash_erase -q "$mtd_dev" 0 1 || return 1
   dd if=/dev/zero of=/tmp/q3n-data.bin bs=16384 count=7 2>/dev/null || return 1
   dd if=/tmp/q3n-data.bin of="$mtd_dev" bs=16384 count=7 2>/dev/null || return 1
+  tries=0
   parity_written_after=$(cat "$stats/parity_written") || return 1
+  while [ "$parity_written_after" -le "$parity_written_before" ] && [ "$tries" -lt 20 ]; do
+    sleep 1
+    tries=$((tries + 1))
+    parity_written_after=$(cat "$stats/parity_written") || return 1
+  done
   [ "$parity_written_after" -gt "$parity_written_before" ] || return 1
 
   echo 0 > "$stats/inject_data_loss" || return 1
