@@ -59,6 +59,7 @@ for file in \
   linux/drivers/mtd/nand/raw/qemu_3dnand.h \
   linux/drivers/mtd/nand/raw/qemu_3dnand_priv.h \
   linux/drivers/mtd/nand/raw/qemu_3dnand_map.c \
+  linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c \
   linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c \
   linux/drivers/mtd/nand/raw/Kconfig.qemu_3dnand \
   linux/drivers/mtd/nand/raw/Makefile.qemu_3dnand \
@@ -215,6 +216,8 @@ assert_contains linux/drivers/mtd/nand/raw/Kconfig.qemu_3dnand 'config MTD_NAND_
 assert_contains linux/drivers/mtd/nand/raw/Makefile.qemu_3dnand 'qemu_3dnand.o'
 assert_contains linux/drivers/mtd/nand/raw/Makefile.qemu_3dnand 'qemu_3dnand_main.o qemu_3dnand_map.o'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_map.c 'div_u64_rem'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_validate_manifest'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'Q3N_STRIPE_UNPROTECTED'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_map_non_power_of_two_geometry_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_program_order_test'
 
