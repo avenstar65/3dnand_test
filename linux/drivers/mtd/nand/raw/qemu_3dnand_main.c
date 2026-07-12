@@ -71,6 +71,14 @@ struct qemu_3dnand {
 	u64 generation_updates;
 };
 
+static void qemu_3dnand_free_metadata(struct qemu_3dnand *q3n)
+{
+	kvfree(q3n->data_page_valid);
+	q3n->data_page_valid = NULL;
+	kvfree(q3n->parity_index);
+	q3n->parity_index = NULL;
+}
+
 static u32 qemu_3dnand_readl(struct qemu_3dnand *q3n, u32 reg)
 {
 	return readl(q3n->regs + reg);
@@ -649,21 +657,18 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 
 	q3n->page_buf = devm_kmalloc(dev, q3n->page_size, GFP_KERNEL);
 	q3n->raid_buf = devm_kmalloc(dev, q3n->page_size, GFP_KERNEL);
-	q3n->data_page_valid = devm_kcalloc(dev,
-					    q3n->data_block_count *
-					    q3n->pages_per_block,
-					    sizeof(*q3n->data_page_valid),
-					    GFP_KERNEL);
+	/* These arrays are multi-megabyte with the 2-die x 4-plane geometry. */
+	q3n->data_page_valid = kvcalloc(q3n->data_block_count,
+					  q3n->pages_per_block,
+					  GFP_KERNEL);
 	q3n->data_meta = devm_kcalloc(dev, q3n->data_block_count,
 				      sizeof(*q3n->data_meta), GFP_KERNEL);
-	q3n->parity_index = devm_kcalloc(dev,
-					 q3n->raid_group_count *
-					 q3n->pages_per_block,
-					 sizeof(*q3n->parity_index),
-					 GFP_KERNEL);
+	q3n->parity_index = kvcalloc(q3n->raid_group_count * q3n->pages_per_block,
+					     sizeof(*q3n->parity_index),
+					     GFP_KERNEL);
 	if (!q3n->page_buf || !q3n->raid_buf || !q3n->data_page_valid ||
 	    !q3n->data_meta || !q3n->parity_index)
-		return -ENOMEM;
+		goto err_free_metadata;
 
 	for (ret = 0; ret < q3n->data_block_count; ret++) {
 		q3n->data_meta[ret].generation = 1;
@@ -672,7 +677,7 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 
 	ret = qemu_3dnand_register_mtd(q3n);
 	if (ret)
-		return dev_err_probe(dev, ret, "failed to register MTD\n");
+		goto err_free_metadata;
 	qemu_3dnand_debugfs_init(q3n);
 
 	dev_info(dev,
@@ -686,6 +691,12 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 		 &bar.start, &q3n->regs_size, q3n->mtd.name);
 
 	return 0;
+
+err_free_metadata:
+	qemu_3dnand_free_metadata(q3n);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to register MTD\n");
+	return -ENOMEM;
 }
 
 static void qemu_3dnand_remove(struct pci_dev *pdev)
@@ -695,6 +706,7 @@ static void qemu_3dnand_remove(struct pci_dev *pdev)
 	if (q3n) {
 		debugfs_remove_recursive(q3n->debugfs_dir);
 		mtd_device_unregister(&q3n->mtd);
+		qemu_3dnand_free_metadata(q3n);
 	}
 	pci_set_drvdata(pdev, NULL);
 }

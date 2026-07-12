@@ -218,6 +218,9 @@ assert_contains linux/drivers/mtd/nand/raw/Makefile.qemu_3dnand 'qemu_3dnand_mai
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_map.c 'div_u64_rem'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_validate_manifest'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'Q3N_STRIPE_UNPROTECTED'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'q3n->parity_index = kvcalloc'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'kvfree\(q3n->parity_index\)'
+assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'q3n->parity_index = devm_kcalloc'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_map_non_power_of_two_geometry_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_program_order_test'
 
