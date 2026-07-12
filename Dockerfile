@@ -55,6 +55,7 @@ RUN dpkg --add-architecture amd64 \
         pkg-config \
         perl \
         python3 \
+        python3-venv \
         qemu-system-x86 \
         rsync \
         strace \

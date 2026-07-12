@@ -81,8 +81,13 @@ else
 fi
 
 unsigned_bin="$out_dir/qemu-system-x86_64-unsigned"
-qemu_bin="$unsigned_bin"
-
-[ -x "$qemu_bin" ] || die "未生成 $qemu_bin"
+standard_bin="$out_dir/qemu-system-x86_64"
+if [ -x "$unsigned_bin" ]; then
+  qemu_bin="$unsigned_bin"
+elif [ -x "$standard_bin" ]; then
+  qemu_bin="$standard_bin"
+else
+  die "未生成 $unsigned_bin 或 $standard_bin"
+fi
 
 info "完成: $qemu_bin"

@@ -3,6 +3,13 @@ set -eu
 
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/common.sh"
 
+# QEMU is built by the Linux toolchain container.  On macOS, transparently
+# execute this script in that same container instead of trying to run an ELF
+# binary on the host.
+if [ "$(uname -s)" = "Darwin" ]; then
+  exec "$repo_root/scripts/shell.sh" ./scripts/run-qemu.sh "$@"
+fi
+
 debug=0
 extra_append=
 
@@ -31,6 +38,9 @@ done
 . "$repo_root/configs/qemu/x86_64.env"
 
 repo_qemu="$build_dir/qemu-11.0.2/qemu-system-x86_64-unsigned"
+if [ ! -x "$repo_qemu" ]; then
+  repo_qemu="$build_dir/qemu-11.0.2/qemu-system-x86_64"
+fi
 if [ "${QEMU_BIN:-}" = "qemu-system-x86_64" ] && [ -x "$repo_qemu" ]; then
   QEMU_BIN="$repo_qemu"
 fi
