@@ -35,6 +35,33 @@ mtd_q3n_inject_loss() {
   echo "$addr" > /sys/kernel/debug/qemu_3dnand/inject_data_loss
 }
 
+mtd_find_q3n() {
+  sed -n 's/^mtd\([0-9][0-9]*\):.*"qemu-3dnand"$/\1/p' /proc/mtd | head -n 1
+}
+
+mtd_q3n_serial_smoke() {
+  mtd_load_q3n || return 1
+  mtd_num=$(mtd_find_q3n)
+  [ -n "$mtd_num" ] || return 1
+  mtd_dev="/dev/mtd${mtd_num}"
+  stats=/sys/kernel/debug/qemu_3dnand
+  parity_written_before=$(cat "$stats/parity_written") || return 1
+  raid_recovered_before=$(cat "$stats/raid_recovered") || return 1
+
+  flash_erase -q "$mtd_dev" 0 1 || return 1
+  dd if=/dev/zero of=/tmp/q3n-data.bin bs=16384 count=7 2>/dev/null || return 1
+  dd if=/tmp/q3n-data.bin of="$mtd_dev" bs=16384 count=7 2>/dev/null || return 1
+  parity_written_after=$(cat "$stats/parity_written") || return 1
+  [ "$parity_written_after" -gt "$parity_written_before" ] || return 1
+
+  echo 0 > "$stats/inject_data_loss" || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-recovered.bin bs=16384 count=1 2>/dev/null || return 1
+  cmp /tmp/q3n-data.bin /tmp/q3n-recovered.bin -n 16384 || return 1
+  raid_recovered_after=$(cat "$stats/raid_recovered") || return 1
+  [ "$raid_recovered_after" -gt "$raid_recovered_before" ] || return 1
+  echo "q3n serial smoke passed: parity=$parity_written_after recovered=$raid_recovered_after"
+}
+
 mtd_find_nandsim() {
   while IFS= read -r line; do
     case "$line" in
@@ -130,6 +157,7 @@ case "${1:-}" in
   q3n) mtd_load_q3n ;;
   q3n-stats) mtd_q3n_stats ;;
   q3n-inject-loss) mtd_q3n_inject_loss "${2:-}" ;;
+  q3n-serial-smoke) mtd_q3n_serial_smoke ;;
   nandsim) mtd_load_simulators; cat /proc/mtd ;;
   ubifs) mtd_ubifs ;;
   clean) mtd_clean ;;
