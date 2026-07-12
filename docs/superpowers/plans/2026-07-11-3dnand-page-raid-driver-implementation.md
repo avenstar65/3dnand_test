@@ -8,6 +8,26 @@
 
 **Tech Stack:** Linux 7.0.12、MTD direct callbacks、PCI/MMIO、kernel kthread/completion/spinlock/mutex/mempool、QEMU 11.0.2、ONFI 5.1 capability model、POSIX shell smoke tests、QEMU guest fault injection。
 
+## 实施状态（2026-07-12）
+
+已完成并已提交：Task 1-5；Task 6 的纯 P0/P1/P2 选择器、P1 重排和
+KUnit；Task 7 的 16KiB direct MTD 串行布局；Task 10 的基础 guest
+端到端 smoke。当前串行 profile 已固定为同一物理 block 内的
+`D0..D6,P`：7 个连续 data page 后写第 8 个 parity page，parity page
+不暴露给 MTD。
+
+- 已验证：QEMU 介质页序、qemu-3dnand probe、完整 Linux/rootfs 构建、
+  KUnit（P0/P1/P2 和 mapper）、以及 `q3n-serial-smoke`。
+- 已验证的 guest 结果：7 个 16KiB data page 写入后 `parity_written`
+  增加；注入第一个 data page 丢失后数据由同 block parity 恢复，
+  `raid_recovered` 增加。
+- 当前已实现但仍需扩展验证：P2 parity workqueue，data page 成功后
+  立即返回、parity 在后台执行，`_sync()` 排空 workqueue。
+- 当前进行中：Task 8。已具备 rebuild context、单 member XOR step 和
+  P1 队尾重排；尚未把真实 QEMU 单页读取接入该 P1 状态机。
+- 未开始：Task 9 的 stale/cancel barrier 和坏块钩子、Task 11 ONFI
+  backend、Task 12 并行 profile 计划。
+
 ## Global Constraints
 
 - 代码仓库：`/Users/yangyu/Documents/linux环境搭建`。
@@ -21,7 +41,9 @@
 - 调度优先级固定为 P0 foreground、P1 parity rebuild read、P2 parity write。
 - Parity rebuild 每次只读一个 page，最多一个后台 rebuild read 在飞。
 - 物理 block 首版要求 `request.page == next_prog_page`，不得降序或跳页 program。
-- 同 block 交错 parity 是顺序屏障；产品 profile 优先采用独立 parity block 静态映射。
+- 首个产品 profile 使用同 block 串行 `D0..D6,P` 布局；page 7 是
+  parity，随后从 page 8 开始下一 stripe。独立 parity block 映射保留为
+  后续 profile 的可选方案，不作为当前实现前提。
 - 不实现 FTL、GC、磨损均衡或自动数据迁移。
 - 所有开发任务遵循测试先行、小提交和完整错误回滚。
 
@@ -36,7 +58,7 @@ linux/drivers/mtd/nand/raw/
 ├── qemu_3dnand_main.c         # PCI probe/remove、MTD 注册、debugfs
 ├── qemu_3dnand.h              # MMIO ABI，与 QEMU 头保持一致
 ├── qemu_3dnand_priv.h         # 驱动私有对象、状态和跨文件接口
-├── qemu_3dnand_map.c          # 逻辑地址、data/parity block 静态映射
+├── qemu_3dnand_map.c          # 逻辑地址、同 block serial page 映射
 ├── qemu_3dnand_raid.c         # XOR、CRC、manifest、恢复和 open stripe
 ├── qemu_3dnand_sched.c        # P0/P1/P2 队列、kthread、completion、背压
 └── qemu_3dnand_kunit.c        # mapper、状态机、调度选择和页序测试
@@ -50,11 +72,12 @@ tests/test_scripts.sh           # overlay/ABI/配置静态门禁
 scripts/smoke-test.sh           # 本地结构和 shell 语法门禁
 ```
 
-`qemu_3dnand.c` 保留现有文件名以减少 overlay/Kconfig 风险；调度、映射和 RAID 算法拆成独立编译单元。
+主实现已重命名为 `qemu_3dnand_main.c` 以支持复合模块；最终模块名仍为
+`qemu_3dnand.ko`。调度、映射和 RAID 算法拆成独立编译单元。
 
 ---
 
-### Task 1: 建立隔离工作区并固定基线
+### Task 1: 建立隔离工作区并固定基线（已完成）
 
 **Files:**
 - Verify: `/Users/yangyu/Documents/linux环境搭建/.gitignore`
@@ -98,7 +121,7 @@ Do not change product code. Record the exact failure and decide whether it is a 
 
 ---
 
-### Task 2: 扩展共享 MMIO ABI 和结构门禁
+### Task 2: 扩展共享 MMIO ABI 和结构门禁（已完成）
 
 **Files:**
 - Modify: `linux/drivers/mtd/nand/raw/qemu_3dnand.h`
@@ -164,7 +187,7 @@ git commit -m "feat: extend q3n main and OOB command ABI"
 
 ---
 
-### Task 3: QEMU 介质支持 main+OOB 和严格页序
+### Task 3: QEMU 介质支持 main+OOB 和严格页序（已完成）
 
 **Files:**
 - Modify: `qemu/hw/mtd/q3n-nand.c`
@@ -244,7 +267,7 @@ git commit -m "feat: model OOB data and sequential page programming"
 
 ---
 
-### Task 4: 拆分驱动私有接口和纯映射层
+### Task 4: 拆分驱动私有接口和纯映射层（已完成）
 
 **Files:**
 - Create: `linux/drivers/mtd/nand/raw/qemu_3dnand_priv.h`
@@ -340,7 +363,7 @@ git commit -m "refactor: add q3n mapping and private driver interfaces"
 
 ---
 
-### Task 5: 实现 manifest、增量 XOR 和恢复状态
+### Task 5: 实现 manifest、增量 XOR 和恢复状态（已完成）
 
 **Files:**
 - Create: `linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c`
@@ -419,7 +442,7 @@ git commit -m "feat: add serial page RAID metadata and XOR state machine"
 
 ---
 
-### Task 6: 实现 P0/P1/P2 调度器和锁拆分
+### Task 6: 实现 P0/P1/P2 调度器和锁拆分（部分完成）
 
 **Files:**
 - Create: `linux/drivers/mtd/nand/raw/qemu_3dnand_sched.c`
@@ -480,7 +503,7 @@ git commit -m "feat: add foreground-priority NAND request scheduler"
 
 ---
 
-### Task 7: 接入 Direct MTD 16KiB 前台路径
+### Task 7: 接入 Direct MTD 16KiB 前台路径（部分完成）
 
 **Files:**
 - Modify: `linux/drivers/mtd/nand/raw/qemu_3dnand.c`
@@ -541,7 +564,7 @@ git commit -m "feat: expose 16KiB MTD writes with async parity protection"
 
 ---
 
-### Task 8: 实现分片 parity rebuild read
+### Task 8: 实现分片 parity rebuild read（进行中）
 
 **Files:**
 - Modify: `linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c`
@@ -624,7 +647,7 @@ git commit -m "feat: coordinate bad groups and stale parity requests"
 
 ---
 
-### Task 10: Guest 工具和端到端串行验证
+### Task 10: Guest 工具和端到端串行验证（部分完成）
 
 **Files:**
 - Modify: `rootfs/profile.d/mtd.sh`
