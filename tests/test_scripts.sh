@@ -198,7 +198,7 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_ERASE_BLO
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'debugfs_create_dir'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_append_parity_locked'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_recover_page_locked'
-assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_invalidate_group_parity'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_invalidate_block_parity'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'struct qemu_3dnand_data_block_meta'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'data_block_generation\[Q3N_RAID_LANES\]'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_parity_generation_valid'
