@@ -11,8 +11,12 @@ raw_dir="$linux_dir/drivers/mtd/nand/raw"
 
 info "应用 qemu_3dnand Linux overlay 到: $linux_dir"
 
-cp "$overlay_dir/qemu_3dnand.c" "$raw_dir/qemu_3dnand.c"
+rm -f "$raw_dir/qemu_3dnand.c"
+cp "$overlay_dir/qemu_3dnand_main.c" "$raw_dir/qemu_3dnand_main.c"
 cp "$overlay_dir/qemu_3dnand.h" "$raw_dir/qemu_3dnand.h"
+cp "$overlay_dir/qemu_3dnand_priv.h" "$raw_dir/qemu_3dnand_priv.h"
+cp "$overlay_dir/qemu_3dnand_map.c" "$raw_dir/qemu_3dnand_map.c"
+cp "$overlay_dir/qemu_3dnand_kunit.c" "$raw_dir/qemu_3dnand_kunit.c"
 cp "$overlay_dir/Kconfig.qemu_3dnand" "$raw_dir/Kconfig.qemu_3dnand"
 cp "$overlay_dir/Makefile.qemu_3dnand" "$raw_dir/Makefile.qemu_3dnand"
 

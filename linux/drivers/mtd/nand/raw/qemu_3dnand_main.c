@@ -17,6 +17,7 @@
 #include <linux/slab.h>
 
 #include "qemu_3dnand.h"
+#include "qemu_3dnand_priv.h"
 
 #define Q3N_RAID_LANES 8
 

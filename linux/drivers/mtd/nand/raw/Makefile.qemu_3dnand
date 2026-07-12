@@ -1,1 +1,5 @@
-obj-$(CONFIG_MTD_NAND_QEMU_3DNAND)	+= qemu_3dnand.o
+obj-$(CONFIG_MTD_NAND_QEMU_3DNAND) += qemu_3dnand.o
+qemu_3dnand-y := qemu_3dnand_main.o qemu_3dnand_map.o
+
+obj-$(CONFIG_MTD_NAND_QEMU_3DNAND_KUNIT_TEST) += qemu_3dnand_test.o
+qemu_3dnand_test-y := qemu_3dnand_kunit.o qemu_3dnand_map.o

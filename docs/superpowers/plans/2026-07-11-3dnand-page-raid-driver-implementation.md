@@ -33,7 +33,7 @@
 
 ```text
 linux/drivers/mtd/nand/raw/
-├── qemu_3dnand.c              # PCI probe/remove、MTD 注册、debugfs
+├── qemu_3dnand_main.c         # PCI probe/remove、MTD 注册、debugfs
 ├── qemu_3dnand.h              # MMIO ABI，与 QEMU 头保持一致
 ├── qemu_3dnand_priv.h         # 驱动私有对象、状态和跨文件接口
 ├── qemu_3dnand_map.c          # 逻辑地址、data/parity block 静态映射
@@ -250,7 +250,7 @@ git commit -m "feat: model OOB data and sequential page programming"
 - Create: `linux/drivers/mtd/nand/raw/qemu_3dnand_priv.h`
 - Create: `linux/drivers/mtd/nand/raw/qemu_3dnand_map.c`
 - Create: `linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c`
-- Modify: `linux/drivers/mtd/nand/raw/qemu_3dnand.c`
+- Rename: `linux/drivers/mtd/nand/raw/qemu_3dnand.c` to `qemu_3dnand_main.c`
 - Modify: `linux/drivers/mtd/nand/raw/Makefile.qemu_3dnand`
 - Modify: `linux/drivers/mtd/nand/raw/Kconfig.qemu_3dnand`
 - Modify: `configs/linux/qemu-x86_64-debug.fragment`
@@ -286,6 +286,7 @@ static void q3n_map_separate_parity_block_test(struct kunit *test)
 ```text
 CONFIG_KUNIT=y
 CONFIG_KUNIT_ALL_TESTS=n
+CONFIG_MTD_NAND_QEMU_3DNAND_KUNIT_TEST=m
 ```
 
 Run:
@@ -296,6 +297,10 @@ Run:
 ```
 
 Expected: fail because `q3n_map_data_page` is undefined when KUnit config is enabled.
+
+Kbuild 使用复合模块：`qemu_3dnand-y := qemu_3dnand_main.o
+qemu_3dnand_map.o`，保持最终模块名为 `qemu_3dnand.ko`；测试模块由
+`qemu_3dnand_kunit.o` 和同一 `qemu_3dnand_map.o` 组成。
 
 - [ ] **Step 3: 定义私有类型和映射接口**
 
