@@ -232,6 +232,35 @@ static void q3n_scheduler_foreground_preempts_requeued_rebuild_test(struct kunit
 	KUNIT_EXPECT_PTR_EQ(test, q3n_sched_pick_next(&sched), &foreground);
 }
 
+static void q3n_scheduler_p1_claim_preserves_foreground_test(struct kunit *test)
+{
+	struct q3n_sched sched;
+	struct q3n_request rebuild = { .class = Q3N_REQ_PARITY_READ,
+		.op = Q3N_REQ_READ };
+	struct q3n_request foreground = { .class = Q3N_REQ_FOREGROUND,
+		.op = Q3N_REQ_READ };
+
+	q3n_sched_init(&sched);
+	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &rebuild), 0);
+	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &foreground), 0);
+	KUNIT_EXPECT_EQ(test, q3n_sched_try_start(&sched, &rebuild), -EAGAIN);
+	KUNIT_EXPECT_EQ(test, q3n_sched_try_start(&sched, &foreground), 0);
+	KUNIT_EXPECT_EQ(test, q3n_sched_try_start(&sched, &rebuild), 0);
+}
+
+static void q3n_scheduler_reserves_capacity_per_stripe_test(struct kunit *test)
+{
+	struct q3n_sched sched;
+	u32 i;
+
+	q3n_sched_init(&sched);
+	for (i = 0; i < Q3N_MAX_PENDING_PARITY; i++)
+		KUNIT_ASSERT_EQ(test, q3n_sched_reserve_parity(&sched), 0);
+	KUNIT_EXPECT_EQ(test, q3n_sched_reserve_parity(&sched), -ENOSPC);
+	q3n_sched_release_parity(&sched);
+	KUNIT_EXPECT_EQ(test, q3n_sched_reserve_parity(&sched), 0);
+}
+
 static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_map_separate_parity_block_test),
 	KUNIT_CASE(q3n_map_non_power_of_two_geometry_test),
@@ -247,6 +276,8 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_scheduler_skips_unready_foreground_program_test),
 	KUNIT_CASE(q3n_scheduler_prioritizes_parity_read_test),
 	KUNIT_CASE(q3n_scheduler_foreground_preempts_requeued_rebuild_test),
+	KUNIT_CASE(q3n_scheduler_p1_claim_preserves_foreground_test),
+	KUNIT_CASE(q3n_scheduler_reserves_capacity_per_stripe_test),
 	{}
 };
 

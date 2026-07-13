@@ -49,8 +49,9 @@ mtd_q3n_serial_smoke() {
   raid_recovered_before=$(cat "$stats/raid_recovered") || return 1
 
   flash_erase -q "$mtd_dev" 0 1 || return 1
-  dd if=/dev/zero of=/tmp/q3n-data.bin bs=16384 count=7 2>/dev/null || return 1
-  dd if=/tmp/q3n-data.bin of="$mtd_dev" bs=16384 count=7 2>/dev/null || return 1
+  # Cross the first parity barrier without waiting: D0..D6,P,D0.
+  dd if=/dev/zero of=/tmp/q3n-data.bin bs=16384 count=8 2>/dev/null || return 1
+  dd if=/tmp/q3n-data.bin of="$mtd_dev" bs=16384 count=8 2>/dev/null || return 1
   tries=0
   parity_written_after=$(cat "$stats/parity_written") || return 1
   while [ "$parity_written_after" -le "$parity_written_before" ] && [ "$tries" -lt 20 ]; do

@@ -104,6 +104,7 @@ struct q3n_sched {
 	struct list_head parity_read_queue;
 	struct list_head parity_write_queue;
 	u32 pending_parity;
+	u32 reserved_parity;
 };
 
 int q3n_map_data_page(const struct q3n_geometry *geometry, u64 stripe,
@@ -128,6 +129,9 @@ int q3n_rebuild_xor_one(struct q3n_parity_rebuild *rebuild,
 void q3n_sched_init(struct q3n_sched *sched);
 int q3n_sched_enqueue(struct q3n_sched *sched, struct q3n_request *req);
 int q3n_sched_requeue_p1(struct q3n_sched *sched, struct q3n_request *req);
+int q3n_sched_reserve_parity(struct q3n_sched *sched);
+void q3n_sched_release_parity(struct q3n_sched *sched);
+int q3n_sched_try_start(struct q3n_sched *sched, struct q3n_request *req);
 struct q3n_request *q3n_sched_pick_next(struct q3n_sched *sched);
 void q3n_sched_drain(struct q3n_sched *sched);
 

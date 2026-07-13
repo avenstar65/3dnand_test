@@ -8,23 +8,32 @@
 
 **Tech Stack:** Linux 7.0.12、MTD direct callbacks、PCI/MMIO、kernel kthread/completion/spinlock/mutex/mempool、QEMU 11.0.2、ONFI 5.1 capability model、POSIX shell smoke tests、QEMU guest fault injection。
 
-## 实施状态（2026-07-12）
+## 实施状态（2026-07-13）
 
 已完成并已提交：Task 1-5；Task 6 的纯 P0/P1/P2 选择器、P1 重排和
 KUnit；Task 7 的 16KiB direct MTD 串行布局；Task 10 的基础 guest
-端到端 smoke。当前串行 profile 已固定为同一物理 block 内的
+端到端 smoke。Task 8 的同 LUN 单页 P1 rebuild 和独立 P2 parity program
+已完成实现与验收，等待本阶段提交。当前串行 profile 已固定为同一物理 block 内的
 `D0..D6,P`：7 个连续 data page 后写第 8 个 parity page，parity page
 不暴露给 MTD。
 
 - 已验证：QEMU 介质页序、qemu-3dnand probe、完整 Linux/rootfs 构建、
   KUnit（P0/P1/P2 和 mapper）、以及 `q3n-serial-smoke`。
-- 已验证的 guest 结果：7 个 16KiB data page 写入后 `parity_written`
-  增加；注入第一个 data page 丢失后数据由同 block parity 恢复，
-  `raid_recovered` 增加。
-- 当前已实现但仍需扩展验证：P2 parity workqueue，data page 成功后
-  立即返回、parity 在后台执行，`_sync()` 排空 workqueue。
-- 当前进行中：Task 8。已具备 rebuild context、单 member XOR step 和
-  P1 队尾重排；尚未把真实 QEMU 单页读取接入该 P1 状态机。
+- 已验证的 guest 结果：单次连续写 8 个 16KiB data page，不等待第一
+  stripe parity；驱动保证 physical page 7 parity 先于下一 stripe 的
+  physical page 8 data program。随后注入第一个 data page 丢失，数据由
+  同 block parity 恢复，`raid_recovered` 增加。
+- 当前已实现：前台请求在等待 `mtd_lock` 前进入 P0；后台 parity 每次只
+  claim 一个 P1 请求并读取一个物理 page，完成后重新进入 P1 队尾；第
+  7 个 data page rebuild read 完成后，parity program 作为独立 P2 请求
+  再次参与调度。data/parity program 共用 per-block `next_prog_page`。
+  parity hard limit 按未完成 stripe 预留一次配额，在 D6 编程前施加
+  背压，终态释放；`_sync()` 排空 workqueue。
+- Task 8 调度子项验收：KUnit 16/16；全新 guest 中先加载 KUnit 后执行
+  `q3n-serial-smoke` 成功，`parity_written=1`、`raid_recovered=1`、
+  `raid_failed=0`。串行 profile 只验证同 LUN 行为；异 LUN 并行留到
+  Task 11/12。rebuild CRC/持久化 manifest 的主路径接线仍未完成，不在
+  本次调度子项内宣称完成。
 - 未开始：Task 9 的 stale/cancel barrier 和坏块钩子、Task 11 ONFI
   backend、Task 12 并行 profile 计划。
 
@@ -564,7 +573,7 @@ git commit -m "feat: expose 16KiB MTD writes with async parity protection"
 
 ---
 
-### Task 8: 实现分片 parity rebuild read（进行中）
+### Task 8: 实现分片 parity rebuild read（调度子项已完成）
 
 **Files:**
 - Modify: `linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c`

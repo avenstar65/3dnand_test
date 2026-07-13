@@ -47,6 +47,7 @@ void q3n_sched_init(struct q3n_sched *sched)
 	INIT_LIST_HEAD(&sched->parity_read_queue);
 	INIT_LIST_HEAD(&sched->parity_write_queue);
 	sched->pending_parity = 0;
+	sched->reserved_parity = 0;
 }
 
 int q3n_sched_enqueue(struct q3n_sched *sched, struct q3n_request *req)
@@ -61,11 +62,6 @@ int q3n_sched_enqueue(struct q3n_sched *sched, struct q3n_request *req)
 		return -EINVAL;
 
 	spin_lock_irqsave(&sched->lock, flags);
-	if (req->class != Q3N_REQ_FOREGROUND &&
-	    sched->pending_parity >= Q3N_MAX_PENDING_PARITY) {
-		spin_unlock_irqrestore(&sched->lock, flags);
-		return -ENOSPC;
-	}
 	INIT_LIST_HEAD(&req->node);
 	list_add_tail(&req->node, queue);
 	if (req->class != Q3N_REQ_FOREGROUND)
@@ -80,6 +76,62 @@ int q3n_sched_requeue_p1(struct q3n_sched *sched, struct q3n_request *req)
 		return -EINVAL;
 	req->class = Q3N_REQ_PARITY_READ;
 	return q3n_sched_enqueue(sched, req);
+}
+
+int q3n_sched_reserve_parity(struct q3n_sched *sched)
+{
+	unsigned long flags;
+	int ret = 0;
+
+	if (!sched)
+		return -EINVAL;
+
+	spin_lock_irqsave(&sched->lock, flags);
+	if (sched->reserved_parity >= Q3N_MAX_PENDING_PARITY)
+		ret = -ENOSPC;
+	else
+		sched->reserved_parity++;
+	spin_unlock_irqrestore(&sched->lock, flags);
+	return ret;
+}
+
+void q3n_sched_release_parity(struct q3n_sched *sched)
+{
+	unsigned long flags;
+
+	if (!sched)
+		return;
+
+	spin_lock_irqsave(&sched->lock, flags);
+	if (sched->reserved_parity)
+		sched->reserved_parity--;
+	spin_unlock_irqrestore(&sched->lock, flags);
+}
+
+int q3n_sched_try_start(struct q3n_sched *sched, struct q3n_request *req)
+{
+	struct q3n_request *next = NULL;
+	unsigned long flags;
+
+	if (!sched || !req)
+		return -EINVAL;
+
+	spin_lock_irqsave(&sched->lock, flags);
+	next = q3n_sched_pick_ready(&sched->foreground_queue);
+	if (!next)
+		next = q3n_sched_pick_ready(&sched->parity_read_queue);
+	if (!next)
+		next = q3n_sched_pick_ready(&sched->parity_write_queue);
+	if (next != req) {
+		spin_unlock_irqrestore(&sched->lock, flags);
+		return -EAGAIN;
+	}
+
+	list_del_init(&req->node);
+	if (req->class != Q3N_REQ_FOREGROUND)
+		sched->pending_parity--;
+	spin_unlock_irqrestore(&sched->lock, flags);
+	return 0;
 }
 
 struct q3n_request *q3n_sched_pick_next(struct q3n_sched *sched)

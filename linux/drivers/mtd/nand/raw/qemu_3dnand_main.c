@@ -52,6 +52,7 @@ struct qemu_3dnand {
 	u8 *page_buf;
 	u8 *raid_buf;
 	u8 *data_page_valid;
+	struct q3n_block_state *program_state;
 	struct qemu_3dnand_data_block_meta *data_meta;
 	struct qemu_3dnand_parity_entry *parity_index;
 
@@ -79,11 +80,12 @@ struct qemu_3dnand {
 struct qemu_3dnand_parity_work {
 	struct work_struct work;
 	struct qemu_3dnand *q3n;
+	struct q3n_request request;
+	struct q3n_parity_rebuild rebuild;
 	u32 block;
 	u32 stripe;
-	u8 next_slot;
-	u8 *accumulator;
 	u8 *page_buf;
+	bool request_queued;
 };
 
 static void qemu_3dnand_free_metadata(struct qemu_3dnand *q3n)
@@ -94,16 +96,37 @@ static void qemu_3dnand_free_metadata(struct qemu_3dnand *q3n)
 	q3n->parity_index = NULL;
 }
 
-static int qemu_3dnand_schedule_foreground(struct qemu_3dnand *q3n)
+static int qemu_3dnand_lock_request(struct qemu_3dnand *q3n,
+				    struct q3n_request *req)
 {
-	struct q3n_request req = {
-		.class = Q3N_REQ_FOREGROUND,
-		.op = Q3N_REQ_READ,
-	};
+	int ret;
 
-	if (q3n_sched_enqueue(&q3n->sched, &req))
-		return -EIO;
-	return q3n_sched_pick_next(&q3n->sched) == &req ? 0 : -EIO;
+	ret = q3n_sched_enqueue(&q3n->sched, req);
+	if (ret)
+		return ret;
+
+	for (;;) {
+		mutex_lock(&q3n->mtd_lock);
+		ret = q3n_sched_try_start(&q3n->sched, req);
+		if (!ret)
+			return 0;
+		mutex_unlock(&q3n->mtd_lock);
+		if (ret != -EAGAIN)
+			return ret;
+		cond_resched();
+	}
+}
+
+static int qemu_3dnand_reserve_parity(struct qemu_3dnand *q3n)
+{
+	int ret;
+
+	ret = q3n_sched_reserve_parity(&q3n->sched);
+	if (ret != -ENOSPC)
+		return ret;
+
+	flush_workqueue(q3n->parity_wq);
+	return q3n_sched_reserve_parity(&q3n->sched);
 }
 
 static u32 qemu_3dnand_readl(struct qemu_3dnand *q3n, u32 reg)
@@ -166,6 +189,7 @@ static int qemu_3dnand_program_phys_page_locked(struct qemu_3dnand *q3n,
 						const u8 *buf)
 {
 	const u32 *words = (const u32 *)buf;
+	int ret;
 	u32 i;
 
 	qemu_3dnand_set_addr(q3n, qemu_3dnand_phys_addr(q3n, block, page));
@@ -174,7 +198,10 @@ static int qemu_3dnand_program_phys_page_locked(struct qemu_3dnand *q3n,
 		qemu_3dnand_writel(q3n, Q3N_REG_DATA, words[i]);
 
 	qemu_3dnand_writel(q3n, Q3N_REG_CMD, Q3N_CMD_PROGRAM_PAGE);
-	return qemu_3dnand_wait_ready(q3n);
+	ret = qemu_3dnand_wait_ready(q3n);
+	if (!ret && block < q3n->data_block_count)
+		q3n->program_state[block].next_prog_page = page + 1;
+	return ret;
 }
 
 static int qemu_3dnand_erase_phys_block_locked(struct qemu_3dnand *q3n,
@@ -310,34 +337,71 @@ static void qemu_3dnand_parity_worker(struct work_struct *work)
 	struct qemu_3dnand_parity_entry *entry;
 	int ret;
 
-	mutex_lock(&parity->q3n->mtd_lock);
-	ret = qemu_3dnand_read_phys_page_locked(parity->q3n, parity->block,
-		parity->stripe * Q3N_STRIPE_PAGES + parity->next_slot,
-		parity->page_buf);
-	if (!ret) {
-		q3n_xor_page(parity->accumulator, parity->page_buf,
-				     parity->q3n->page_size);
-		parity->next_slot++;
-		if (parity->next_slot == Q3N_DATA_PAGES) {
-			entry = &parity->q3n->parity_index[
-				qemu_3dnand_parity_index(parity->q3n, parity->block,
-						  parity->stripe)];
-			ret = qemu_3dnand_commit_parity_locked(parity->q3n,
-				parity->block, parity->stripe, entry,
-				parity->accumulator);
-		}
-	}
-	mutex_unlock(&parity->q3n->mtd_lock);
-	if (ret || parity->next_slot == Q3N_DATA_PAGES) {
+	if (!parity->request_queued) {
+		ret = q3n_sched_requeue_p1(&parity->q3n->sched,
+					   &parity->request);
 		if (ret)
-			parity->q3n->raid_failed++;
-		kfree(parity->page_buf);
-		kfree(parity->accumulator);
-		kfree(parity);
-		return;
+			goto out_failed;
+		parity->request_queued = true;
 	}
 
+	mutex_lock(&parity->q3n->mtd_lock);
+	ret = q3n_sched_try_start(&parity->q3n->sched, &parity->request);
+	if (ret == -EAGAIN) {
+		mutex_unlock(&parity->q3n->mtd_lock);
+		queue_work(parity->q3n->parity_wq, &parity->work);
+		return;
+	}
+	if (ret) {
+		mutex_unlock(&parity->q3n->mtd_lock);
+		goto out_failed;
+	}
+	parity->request_queued = false;
+
+	if (parity->rebuild.next_slot < Q3N_DATA_PAGES) {
+		ret = qemu_3dnand_read_phys_page_locked(parity->q3n,
+			parity->block,
+			parity->stripe * Q3N_STRIPE_PAGES +
+				parity->rebuild.next_slot,
+			parity->page_buf);
+		if (!ret)
+			ret = q3n_rebuild_xor_one(&parity->rebuild,
+						  parity->page_buf);
+		if (!ret && parity->rebuild.next_slot < Q3N_DATA_PAGES) {
+			ret = q3n_sched_requeue_p1(&parity->q3n->sched,
+						   &parity->request);
+			parity->request_queued = !ret;
+		} else if (!ret) {
+			parity->request.class = Q3N_REQ_PARITY_WRITE;
+			parity->request.op = Q3N_REQ_PROGRAM;
+			ret = q3n_sched_enqueue(&parity->q3n->sched,
+						&parity->request);
+			parity->request_queued = !ret;
+		}
+	} else {
+		entry = &parity->q3n->parity_index[
+			qemu_3dnand_parity_index(parity->q3n, parity->block,
+						  parity->stripe)];
+		ret = qemu_3dnand_commit_parity_locked(parity->q3n,
+			parity->block, parity->stripe, entry,
+			parity->rebuild.parity_accumulator);
+	}
+	mutex_unlock(&parity->q3n->mtd_lock);
+	if (ret)
+		goto out_failed;
+	if (parity->rebuild.next_slot == Q3N_DATA_PAGES &&
+	    !parity->request_queued)
+		goto out_free;
 	queue_work(parity->q3n->parity_wq, &parity->work);
+	return;
+
+out_failed:
+	parity->q3n->raid_failed++;
+out_free:
+	q3n_sched_release_parity(&parity->q3n->sched);
+	kfree(parity->page_buf);
+	kfree(parity->rebuild.parity_accumulator);
+	kfree(parity);
 }
 
 static int qemu_3dnand_queue_parity_locked(struct qemu_3dnand *q3n,
@@ -345,24 +409,42 @@ static int qemu_3dnand_queue_parity_locked(struct qemu_3dnand *q3n,
 {
 	struct qemu_3dnand_parity_work *parity;
 
-	if (!qemu_3dnand_stripe_full(q3n, block, stripe))
-		return 0;
+	if (!qemu_3dnand_stripe_full(q3n, block, stripe)) {
+		q3n_sched_release_parity(&q3n->sched);
+		return -EINVAL;
+	}
 	parity = kzalloc(sizeof(*parity), GFP_KERNEL);
-	if (!parity)
+	if (!parity) {
+		q3n_sched_release_parity(&q3n->sched);
 		return -ENOMEM;
-	parity->accumulator = kzalloc(q3n->page_size, GFP_KERNEL);
+	}
+	parity->rebuild.parity_accumulator = kzalloc(q3n->page_size, GFP_KERNEL);
 	parity->page_buf = kmalloc(q3n->page_size, GFP_KERNEL);
-	if (!parity->accumulator || !parity->page_buf) {
+	if (!parity->rebuild.parity_accumulator || !parity->page_buf) {
+		q3n_sched_release_parity(&q3n->sched);
 		kfree(parity->page_buf);
-		kfree(parity->accumulator);
+		kfree(parity->rebuild.parity_accumulator);
 		kfree(parity);
 		return -ENOMEM;
 	}
 	parity->q3n = q3n;
 	parity->block = block;
 	parity->stripe = stripe;
+	parity->rebuild.stripe_id = (u64)block * q3n->pages_per_block + stripe;
+	parity->rebuild.data_pages = Q3N_DATA_PAGES;
+	parity->rebuild.page_size = q3n->page_size;
+	parity->request.class = Q3N_REQ_PARITY_READ;
+	parity->request.op = Q3N_REQ_READ;
+	parity->request.block_state = &q3n->program_state[block];
+	parity->request.page = stripe * Q3N_STRIPE_PAGES + Q3N_DATA_PAGES;
 	INIT_WORK(&parity->work, qemu_3dnand_parity_worker);
-	queue_work(q3n->parity_wq, &parity->work);
+	if (!queue_work(q3n->parity_wq, &parity->work)) {
+		q3n_sched_release_parity(&q3n->sched);
+		kfree(parity->page_buf);
+		kfree(parity->rebuild.parity_accumulator);
+		kfree(parity);
+		return -EIO;
+	}
 	return 0;
 }
 
@@ -429,16 +511,19 @@ static int qemu_3dnand_mtd_read(struct mtd_info *mtd, loff_t from, size_t len,
 				size_t *retlen, u_char *buf)
 {
 	struct qemu_3dnand *q3n = mtd->priv;
+	struct q3n_request req = {
+		.class = Q3N_REQ_FOREGROUND,
+		.op = Q3N_REQ_READ,
+	};
 	size_t done = 0;
 	int ret = 0;
 
 	if (from < 0 || from + len > mtd->size)
 		return -EINVAL;
 
-	mutex_lock(&q3n->mtd_lock);
-	ret = qemu_3dnand_schedule_foreground(q3n);
+	ret = qemu_3dnand_lock_request(q3n, &req);
 	if (ret)
-		goto out_unlock;
+		return ret;
 	while (done < len) {
 		u32 block, page, column;
 		size_t chunk;
@@ -453,7 +538,6 @@ static int qemu_3dnand_mtd_read(struct mtd_info *mtd, loff_t from, size_t len,
 		memcpy(buf + done, q3n->page_buf + column, chunk);
 		done += chunk;
 	}
-	out_unlock:
 	mutex_unlock(&q3n->mtd_lock);
 
 	*retlen = done;
@@ -472,32 +556,51 @@ static int qemu_3dnand_mtd_write(struct mtd_info *mtd, loff_t to, size_t len,
 	if (!IS_ALIGNED(to, q3n->page_size) || !IS_ALIGNED(len, q3n->page_size))
 		return -EINVAL;
 
-	mutex_lock(&q3n->mtd_lock);
-	ret = qemu_3dnand_schedule_foreground(q3n);
-	if (ret)
-		goto out_unlock;
 	while (done < len) {
+		struct q3n_request req = {
+			.class = Q3N_REQ_FOREGROUND,
+			.op = Q3N_REQ_PROGRAM,
+		};
 		u32 block, page, column;
 		u32 stripe;
+		bool parity_reserved = false;
 
 		qemu_3dnand_decode_logical(q3n, to + done, &block, &page,
 					   &column);
+		if (page % Q3N_STRIPE_PAGES == Q3N_DATA_PAGES - 1) {
+			ret = qemu_3dnand_reserve_parity(q3n);
+			if (ret)
+				break;
+			parity_reserved = true;
+		}
+		req.block_state = &q3n->program_state[block];
+		req.page = page;
+		ret = qemu_3dnand_lock_request(q3n, &req);
+		if (ret) {
+			if (parity_reserved)
+				q3n_sched_release_parity(&q3n->sched);
+			break;
+		}
 		ret = qemu_3dnand_program_phys_page_locked(q3n, block, page,
 							   buf + done);
-		if (ret)
+		if (ret) {
+			mutex_unlock(&q3n->mtd_lock);
+			if (parity_reserved)
+				q3n_sched_release_parity(&q3n->sched);
 			break;
+		}
 
 		q3n->data_page_valid[qemu_3dnand_data_page_index(q3n, block,
 								  page)] = 1;
 		q3n->data_meta[block].erased = false;
 		stripe = page / Q3N_STRIPE_PAGES;
-		ret = qemu_3dnand_queue_parity_locked(q3n, block, stripe);
+		if (parity_reserved)
+			ret = qemu_3dnand_queue_parity_locked(q3n, block, stripe);
+		mutex_unlock(&q3n->mtd_lock);
 		if (ret)
 			break;
 		done += q3n->page_size;
 	}
-	out_unlock:
-	mutex_unlock(&q3n->mtd_lock);
 
 	*retlen = done;
 	return ret;
@@ -550,6 +653,7 @@ static int qemu_3dnand_mtd_erase(struct mtd_info *mtd,
 		if (!q3n->data_meta[block].generation)
 			q3n->data_meta[block].generation = 1;
 		q3n->data_meta[block].erased = true;
+		q3n->program_state[block].next_prog_page = 0;
 		q3n->generation_updates++;
 		qemu_3dnand_invalidate_block_parity(q3n, block);
 		done += mtd->erasesize;
@@ -768,10 +872,13 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 					  GFP_KERNEL);
 	q3n->data_meta = devm_kcalloc(dev, q3n->data_block_count,
 				      sizeof(*q3n->data_meta), GFP_KERNEL);
+	q3n->program_state = devm_kcalloc(dev, q3n->data_block_count,
+					  sizeof(*q3n->program_state), GFP_KERNEL);
 	q3n->parity_index = kvcalloc(q3n->raid_group_count * q3n->pages_per_block,
 					     sizeof(*q3n->parity_index),
 					     GFP_KERNEL);
 	if (!q3n->page_buf || !q3n->raid_buf || !q3n->data_page_valid ||
+	    !q3n->program_state ||
 	    !q3n->data_meta || !q3n->parity_index)
 		goto err_free_metadata;
 
