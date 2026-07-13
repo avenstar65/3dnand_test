@@ -148,6 +148,8 @@ int q3n_sched_cancel(struct q3n_sched *sched, struct q3n_request *req);
 int q3n_sched_requeue_p1(struct q3n_sched *sched, struct q3n_request *req);
 int q3n_sched_reserve_parity(struct q3n_sched *sched);
 void q3n_sched_release_parity(struct q3n_sched *sched);
+void q3n_sched_get_counts(struct q3n_sched *sched, u32 *pending,
+			  u32 *reserved);
 int q3n_sched_try_start(struct q3n_sched *sched, struct q3n_request *req);
 struct q3n_request *q3n_sched_pick_next(struct q3n_sched *sched);
 void q3n_sched_drain(struct q3n_sched *sched);

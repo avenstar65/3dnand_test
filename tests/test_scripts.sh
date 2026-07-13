@@ -199,6 +199,12 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_mtd_e
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_finish_parity_work'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_cancel_block_parity'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'wait_event.*pending_parity'
+for name in parity_pause_block parity_pause_enable parity_paused \
+		pending_parity reserved_parity; do
+	assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+		"debugfs_create_file.*$name"
+done
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_sched.c 'q3n_sched_get_counts'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_READ_PAGE'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_PROGRAM_PAGE'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_ERASE_BLOCK'

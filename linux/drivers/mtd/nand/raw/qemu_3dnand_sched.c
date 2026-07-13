@@ -202,6 +202,17 @@ void q3n_sched_release_parity(struct q3n_sched *sched)
 	spin_unlock_irqrestore(&sched->lock, flags);
 }
 
+void q3n_sched_get_counts(struct q3n_sched *sched, u32 *pending,
+			  u32 *reserved)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&sched->lock, flags);
+	*pending = sched->pending_parity;
+	*reserved = sched->reserved_parity;
+	spin_unlock_irqrestore(&sched->lock, flags);
+}
+
 int q3n_sched_try_start(struct q3n_sched *sched, struct q3n_request *req)
 {
 	struct q3n_request *next = NULL;

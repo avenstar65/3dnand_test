@@ -49,6 +49,10 @@ struct qemu_3dnand {
 	struct q3n_sched sched;
 	struct workqueue_struct *parity_wq;
 	wait_queue_head_t parity_cancel_waitq;
+	wait_queue_head_t parity_pause_waitq;
+	atomic_t parity_paused;
+	u32 parity_pause_block;
+	bool parity_pause_enable;
 	struct dentry *debugfs_dir;
 	struct mtd_info mtd;
 
@@ -352,25 +356,37 @@ static void qemu_3dnand_parity_worker(struct work_struct *work)
 {
 	struct qemu_3dnand_parity_work *parity =
 		container_of(work, struct qemu_3dnand_parity_work, work);
+	struct qemu_3dnand *q3n = parity->q3n;
 	struct q3n_block_barrier *barrier =
-		&parity->q3n->data_meta[parity->block].parity_barrier;
+		&q3n->data_meta[parity->block].parity_barrier;
 	struct qemu_3dnand_parity_entry *entry;
 	int ret;
 
+	if (READ_ONCE(q3n->parity_pause_enable) &&
+	    READ_ONCE(q3n->parity_pause_block) == parity->block &&
+	    !q3n_block_is_cancelling(barrier)) {
+		atomic_inc(&q3n->parity_paused);
+		wait_event(q3n->parity_pause_waitq,
+			   !READ_ONCE(q3n->parity_pause_enable) ||
+			   READ_ONCE(q3n->parity_pause_block) != parity->block ||
+			   q3n_block_is_cancelling(barrier));
+		atomic_dec(&q3n->parity_paused);
+	}
+
 	if (!parity->request_queued) {
-		ret = q3n_sched_requeue_p1(&parity->q3n->sched,
+		ret = q3n_sched_requeue_p1(&q3n->sched,
 					   &parity->request);
 		if (ret)
 			goto out_failed;
 		parity->request_queued = true;
 	}
 
-	mutex_lock(&parity->q3n->mtd_lock);
+	mutex_lock(&q3n->mtd_lock);
 	if (q3n_block_is_cancelling(barrier)) {
 		if (parity->request_queued)
-			q3n_sched_cancel(&parity->q3n->sched, &parity->request);
+			q3n_sched_cancel(&q3n->sched, &parity->request);
 		parity->request_queued = false;
-		mutex_unlock(&parity->q3n->mtd_lock);
+		mutex_unlock(&q3n->mtd_lock);
 		qemu_3dnand_finish_parity_work(parity);
 		return;
 	}
@@ -700,6 +716,7 @@ static void qemu_3dnand_cancel_block_parity(struct qemu_3dnand *q3n,
 		&q3n->data_meta[block].parity_barrier;
 
 	q3n_block_cancel_begin(barrier);
+	wake_up_all(&q3n->parity_pause_waitq);
 	mutex_unlock(&q3n->mtd_lock);
 	wait_event(q3n->parity_cancel_waitq, qemu_3dnand_pending_parity_drained(barrier));
 	mutex_lock(&q3n->mtd_lock);
@@ -876,6 +893,75 @@ static int qemu_3dnand_generation_updates_get(void *data, u64 *value)
 	return 0;
 }
 
+static int qemu_3dnand_parity_pause_block_get(void *data, u64 *value)
+{
+	struct qemu_3dnand *q3n = data;
+
+	*value = READ_ONCE(q3n->parity_pause_block);
+	return 0;
+}
+
+static int qemu_3dnand_parity_pause_block_set(void *data, u64 value)
+{
+	struct qemu_3dnand *q3n = data;
+
+	if (value >= q3n->data_block_count)
+		return -ERANGE;
+	WRITE_ONCE(q3n->parity_pause_block, value);
+	wake_up_all(&q3n->parity_pause_waitq);
+	return 0;
+}
+
+static int qemu_3dnand_parity_pause_enable_get(void *data, u64 *value)
+{
+	struct qemu_3dnand *q3n = data;
+
+	*value = READ_ONCE(q3n->parity_pause_enable);
+	return 0;
+}
+
+static int qemu_3dnand_parity_pause_enable_set(void *data, u64 value)
+{
+	struct qemu_3dnand *q3n = data;
+
+	if (value > 1)
+		return -EINVAL;
+	WRITE_ONCE(q3n->parity_pause_enable, value);
+	if (!value)
+		wake_up_all(&q3n->parity_pause_waitq);
+	return 0;
+}
+
+static int qemu_3dnand_parity_paused_get(void *data, u64 *value)
+{
+	struct qemu_3dnand *q3n = data;
+
+	*value = atomic_read(&q3n->parity_paused);
+	return 0;
+}
+
+static int qemu_3dnand_pending_parity_get(void *data, u64 *value)
+{
+	struct qemu_3dnand *q3n = data;
+	u32 pending;
+	u32 reserved;
+
+	q3n_sched_get_counts(&q3n->sched, &pending, &reserved);
+	*value = pending;
+	return 0;
+}
+
+static int qemu_3dnand_reserved_parity_get(void *data, u64 *value)
+{
+	struct qemu_3dnand *q3n = data;
+	u32 pending;
+	u32 reserved;
+
+	q3n_sched_get_counts(&q3n->sched, &pending, &reserved);
+	*value = reserved;
+	return 0;
+}
+
 DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_inject_data_loss_fops, NULL,
 			 qemu_3dnand_inject_data_loss, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_raid_recovered_fops,
@@ -890,6 +976,18 @@ DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_parity_written_fops,
 			 qemu_3dnand_parity_written_get, NULL, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_generation_updates_fops,
 			 qemu_3dnand_generation_updates_get, NULL, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_parity_pause_block_fops,
+			 qemu_3dnand_parity_pause_block_get,
+			 qemu_3dnand_parity_pause_block_set, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_parity_pause_enable_fops,
+			 qemu_3dnand_parity_pause_enable_get,
+			 qemu_3dnand_parity_pause_enable_set, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_parity_paused_fops,
+			 qemu_3dnand_parity_paused_get, NULL, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_pending_parity_fops,
+			 qemu_3dnand_pending_parity_get, NULL, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_reserved_parity_fops,
+			 qemu_3dnand_reserved_parity_get, NULL, "%llu\n");
 
 static void qemu_3dnand_debugfs_init(struct qemu_3dnand *q3n)
 {
@@ -908,6 +1006,16 @@ static void qemu_3dnand_debugfs_init(struct qemu_3dnand *q3n)
 			    &qemu_3dnand_generation_updates_fops);
 	debugfs_create_file("faults_injected", 0400, q3n->debugfs_dir, q3n,
 			    &qemu_3dnand_faults_injected_fops);
+	debugfs_create_file("parity_pause_block", 0600, q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_parity_pause_block_fops);
+	debugfs_create_file("parity_pause_enable", 0600, q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_parity_pause_enable_fops);
+	debugfs_create_file("parity_paused", 0400, q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_parity_paused_fops);
+	debugfs_create_file("pending_parity", 0400, q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_pending_parity_fops);
+	debugfs_create_file("reserved_parity", 0400, q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_reserved_parity_fops);
 }
 
 static int qemu_3dnand_probe(struct pci_dev *pdev,
@@ -950,6 +1058,8 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 	mutex_init(&q3n->mtd_lock);
 	q3n_sched_init(&q3n->sched);
 	init_waitqueue_head(&q3n->parity_cancel_waitq);
+	init_waitqueue_head(&q3n->parity_pause_waitq);
+	atomic_set(&q3n->parity_paused, 0);
 	q3n->parity_wq = alloc_workqueue("q3n-parity", WQ_UNBOUND, 1);
 	if (!q3n->parity_wq)
 		return -ENOMEM;
@@ -1033,11 +1143,13 @@ static void qemu_3dnand_remove(struct pci_dev *pdev)
 	struct qemu_3dnand *q3n = pci_get_drvdata(pdev);
 
 	if (q3n) {
-		flush_workqueue(q3n->parity_wq);
 		debugfs_remove_recursive(q3n->debugfs_dir);
+		WRITE_ONCE(q3n->parity_pause_enable, false);
+		wake_up_all(&q3n->parity_pause_waitq);
 		mtd_device_unregister(&q3n->mtd);
-		qemu_3dnand_free_metadata(q3n);
+		flush_workqueue(q3n->parity_wq);
 		destroy_workqueue(q3n->parity_wq);
+		qemu_3dnand_free_metadata(q3n);
 	}
 	pci_set_drvdata(pdev, NULL);
 }
