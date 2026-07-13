@@ -314,6 +314,23 @@ static void q3n_block_barrier_blocks_new_work_and_drains_test(struct kunit *test
 	KUNIT_EXPECT_FALSE(test, q3n_block_is_cancelling(&barrier));
 }
 
+static void q3n_block_barrier_terminal_put_wakes_on_drain_test(struct kunit *test)
+{
+	struct q3n_block_barrier success;
+	struct q3n_block_barrier cancel;
+
+	q3n_block_barrier_init(&success);
+	KUNIT_ASSERT_EQ(test, q3n_block_parity_get(&success), 0);
+	KUNIT_EXPECT_TRUE(test, q3n_block_parity_put(&success));
+	KUNIT_EXPECT_EQ(test, q3n_block_pending(&success), 0);
+
+	q3n_block_barrier_init(&cancel);
+	KUNIT_ASSERT_EQ(test, q3n_block_parity_get(&cancel), 0);
+	q3n_block_cancel_begin(&cancel);
+	KUNIT_EXPECT_TRUE(test, q3n_block_parity_put(&cancel));
+	KUNIT_EXPECT_EQ(test, q3n_block_pending(&cancel), 0);
+}
+
 static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_map_separate_parity_block_test),
 	KUNIT_CASE(q3n_map_non_power_of_two_geometry_test),
@@ -335,6 +352,7 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_scheduler_p1_claim_preserves_foreground_test),
 	KUNIT_CASE(q3n_scheduler_reserves_capacity_per_stripe_test),
 	KUNIT_CASE(q3n_block_barrier_blocks_new_work_and_drains_test),
+	KUNIT_CASE(q3n_block_barrier_terminal_put_wakes_on_drain_test),
 	{}
 };
 

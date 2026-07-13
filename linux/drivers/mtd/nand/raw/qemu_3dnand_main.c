@@ -15,6 +15,7 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
+#include <linux/wait.h>
 #include <linux/workqueue.h>
 
 #include "qemu_3dnand.h"
@@ -28,6 +29,7 @@ struct qemu_3dnand_data_block_meta {
 	u32 generation;
 	bool bad;
 	bool erased;
+	struct q3n_block_barrier parity_barrier;
 };
 
 struct qemu_3dnand_parity_entry {
@@ -46,6 +48,7 @@ struct qemu_3dnand {
 	struct mutex mtd_lock;
 	struct q3n_sched sched;
 	struct workqueue_struct *parity_wq;
+	wait_queue_head_t parity_cancel_waitq;
 	struct dentry *debugfs_dir;
 	struct mtd_info mtd;
 
@@ -87,6 +90,21 @@ struct qemu_3dnand_parity_work {
 	u8 *page_buf;
 	bool request_queued;
 };
+
+static void qemu_3dnand_finish_parity_work(
+		struct qemu_3dnand_parity_work *parity)
+{
+	struct qemu_3dnand *q3n = parity->q3n;
+	struct q3n_block_barrier *barrier =
+		&q3n->data_meta[parity->block].parity_barrier;
+
+	q3n_sched_release_parity(&q3n->sched);
+	if (q3n_block_parity_put(barrier))
+		wake_up_all(&q3n->parity_cancel_waitq);
+	kfree(parity->page_buf);
+	kfree(parity->rebuild.parity_accumulator);
+	kfree(parity);
+}
 
 static void qemu_3dnand_free_metadata(struct qemu_3dnand *q3n)
 {
@@ -334,6 +352,8 @@ static void qemu_3dnand_parity_worker(struct work_struct *work)
 {
 	struct qemu_3dnand_parity_work *parity =
 		container_of(work, struct qemu_3dnand_parity_work, work);
+	struct q3n_block_barrier *barrier =
+		&parity->q3n->data_meta[parity->block].parity_barrier;
 	struct qemu_3dnand_parity_entry *entry;
 	int ret;
 
@@ -346,6 +366,14 @@ static void qemu_3dnand_parity_worker(struct work_struct *work)
 	}
 
 	mutex_lock(&parity->q3n->mtd_lock);
+	if (q3n_block_is_cancelling(barrier)) {
+		if (parity->request_queued)
+			q3n_sched_cancel(&parity->q3n->sched, &parity->request);
+		parity->request_queued = false;
+		mutex_unlock(&parity->q3n->mtd_lock);
+		qemu_3dnand_finish_parity_work(parity);
+		return;
+	}
 	ret = q3n_rebuild_check_generation(&parity->rebuild,
 		parity->q3n->data_meta[parity->block].generation);
 	if (ret) {
@@ -357,7 +385,7 @@ static void qemu_3dnand_parity_worker(struct work_struct *work)
 			parity->q3n->parity_stale++;
 		else
 			parity->q3n->raid_failed++;
-		goto out_free;
+		goto out_finish;
 	}
 	ret = q3n_sched_try_start(&parity->q3n->sched, &parity->request);
 	if (ret == -EAGAIN) {
@@ -404,44 +432,48 @@ static void qemu_3dnand_parity_worker(struct work_struct *work)
 		goto out_failed;
 	if (parity->rebuild.next_slot == Q3N_DATA_PAGES &&
 	    !parity->request_queued)
-		goto out_free;
+		goto out_finish;
 	queue_work(parity->q3n->parity_wq, &parity->work);
 	return;
 
 out_failed:
 	parity->q3n->raid_failed++;
-out_free:
-	q3n_sched_release_parity(&parity->q3n->sched);
-	kfree(parity->page_buf);
-	kfree(parity->rebuild.parity_accumulator);
-	kfree(parity);
+out_finish:
+	qemu_3dnand_finish_parity_work(parity);
 }
 
 static int qemu_3dnand_queue_parity_locked(struct qemu_3dnand *q3n,
 					    u32 block, u32 stripe)
 {
 	struct qemu_3dnand_parity_work *parity;
+	struct q3n_block_barrier *barrier =
+		&q3n->data_meta[block].parity_barrier;
+	int ret;
 
 	if (!qemu_3dnand_stripe_full(q3n, block, stripe)) {
 		q3n_sched_release_parity(&q3n->sched);
 		return -EINVAL;
 	}
+	ret = q3n_block_parity_get(barrier);
+	if (ret) {
+		q3n_sched_release_parity(&q3n->sched);
+		return ret;
+	}
 	parity = kzalloc(sizeof(*parity), GFP_KERNEL);
 	if (!parity) {
 		q3n_sched_release_parity(&q3n->sched);
-		return -ENOMEM;
-	}
-	parity->rebuild.parity_accumulator = kzalloc(q3n->page_size, GFP_KERNEL);
-	parity->page_buf = kmalloc(q3n->page_size, GFP_KERNEL);
-	if (!parity->rebuild.parity_accumulator || !parity->page_buf) {
-		q3n_sched_release_parity(&q3n->sched);
-		kfree(parity->page_buf);
-		kfree(parity->rebuild.parity_accumulator);
-		kfree(parity);
+		if (q3n_block_parity_put(barrier))
+			wake_up_all(&q3n->parity_cancel_waitq);
 		return -ENOMEM;
 	}
 	parity->q3n = q3n;
 	parity->block = block;
+	parity->rebuild.parity_accumulator = kzalloc(q3n->page_size, GFP_KERNEL);
+	parity->page_buf = kmalloc(q3n->page_size, GFP_KERNEL);
+	if (!parity->rebuild.parity_accumulator || !parity->page_buf) {
+		qemu_3dnand_finish_parity_work(parity);
+		return -ENOMEM;
+	}
 	parity->stripe = stripe;
 	parity->rebuild.stripe_id = (u64)block * q3n->pages_per_block + stripe;
 	parity->rebuild.generation = q3n->data_meta[block].generation;
@@ -453,19 +485,14 @@ static int qemu_3dnand_queue_parity_locked(struct qemu_3dnand *q3n,
 	parity->request.page = stripe * Q3N_STRIPE_PAGES + Q3N_DATA_PAGES;
 	INIT_WORK(&parity->work, qemu_3dnand_parity_worker);
 	if (q3n_sched_requeue_p1(&q3n->sched, &parity->request)) {
-		q3n_sched_release_parity(&q3n->sched);
-		kfree(parity->page_buf);
-		kfree(parity->rebuild.parity_accumulator);
-		kfree(parity);
+		qemu_3dnand_finish_parity_work(parity);
 		return -EIO;
 	}
 	parity->request_queued = true;
 	if (!queue_work(q3n->parity_wq, &parity->work)) {
 		q3n_sched_cancel(&q3n->sched, &parity->request);
-		q3n_sched_release_parity(&q3n->sched);
-		kfree(parity->page_buf);
-		kfree(parity->rebuild.parity_accumulator);
-		kfree(parity);
+		parity->request_queued = false;
+		qemu_3dnand_finish_parity_work(parity);
 		return -EIO;
 	}
 	return 0;
@@ -553,6 +580,11 @@ static int qemu_3dnand_mtd_read(struct mtd_info *mtd, loff_t from, size_t len,
 
 		qemu_3dnand_decode_logical(q3n, from + done, &block, &page,
 					   &column);
+		if (q3n_block_is_cancelling(
+				&q3n->data_meta[block].parity_barrier)) {
+			ret = -EBUSY;
+			break;
+		}
 		chunk = min_t(size_t, len - done, q3n->page_size - column);
 		ret = qemu_3dnand_read_data_page_locked(q3n, block, page,
 							q3n->page_buf);
@@ -604,6 +636,14 @@ static int qemu_3dnand_mtd_write(struct mtd_info *mtd, loff_t to, size_t len,
 				q3n_sched_release_parity(&q3n->sched);
 			break;
 		}
+		if (q3n_block_is_cancelling(
+				&q3n->data_meta[block].parity_barrier)) {
+			mutex_unlock(&q3n->mtd_lock);
+			if (parity_reserved)
+				q3n_sched_release_parity(&q3n->sched);
+			ret = -EBUSY;
+			break;
+		}
 		ret = qemu_3dnand_program_phys_page_locked(q3n, block, page,
 							   buf + done);
 		if (ret) {
@@ -647,6 +687,24 @@ static void qemu_3dnand_invalidate_block_parity(struct qemu_3dnand *q3n,
 	}
 }
 
+static bool qemu_3dnand_pending_parity_drained(
+		const struct q3n_block_barrier *barrier)
+{
+	return q3n_block_pending(barrier) == 0;
+}
+
+static void qemu_3dnand_cancel_block_parity(struct qemu_3dnand *q3n,
+					     u32 block)
+{
+	struct q3n_block_barrier *barrier =
+		&q3n->data_meta[block].parity_barrier;
+
+	q3n_block_cancel_begin(barrier);
+	mutex_unlock(&q3n->mtd_lock);
+	wait_event(q3n->parity_cancel_waitq, qemu_3dnand_pending_parity_drained(barrier));
+	mutex_lock(&q3n->mtd_lock);
+}
+
 static int qemu_3dnand_mtd_erase(struct mtd_info *mtd,
 				 struct erase_info *instr)
 {
@@ -665,9 +723,12 @@ static int qemu_3dnand_mtd_erase(struct mtd_info *mtd,
 
 		qemu_3dnand_decode_logical(q3n, instr->addr + done, &block,
 					   &page, &column);
+		qemu_3dnand_cancel_block_parity(q3n, block);
 		ret = qemu_3dnand_erase_phys_block_locked(q3n, block);
 		if (ret) {
 			instr->fail_addr = instr->addr + done;
+			q3n_block_cancel_end(
+				&q3n->data_meta[block].parity_barrier);
 			break;
 		}
 		memset(&q3n->data_page_valid[block * q3n->pages_per_block], 0,
@@ -679,6 +740,7 @@ static int qemu_3dnand_mtd_erase(struct mtd_info *mtd,
 		q3n->program_state[block].next_prog_page = 0;
 		q3n->generation_updates++;
 		qemu_3dnand_invalidate_block_parity(q3n, block);
+		q3n_block_cancel_end(&q3n->data_meta[block].parity_barrier);
 		done += mtd->erasesize;
 	}
 	mutex_unlock(&q3n->mtd_lock);
@@ -887,6 +949,7 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 
 	mutex_init(&q3n->mtd_lock);
 	q3n_sched_init(&q3n->sched);
+	init_waitqueue_head(&q3n->parity_cancel_waitq);
 	q3n->parity_wq = alloc_workqueue("q3n-parity", WQ_UNBOUND, 1);
 	if (!q3n->parity_wq)
 		return -ENOMEM;
@@ -936,6 +999,7 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 	for (ret = 0; ret < q3n->data_block_count; ret++) {
 		q3n->data_meta[ret].generation = 1;
 		q3n->data_meta[ret].erased = true;
+		q3n_block_barrier_init(&q3n->data_meta[ret].parity_barrier);
 	}
 
 	ret = qemu_3dnand_register_mtd(q3n);
