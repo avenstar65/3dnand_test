@@ -69,6 +69,33 @@ mtd_q3n_serial_smoke() {
   echo "q3n serial smoke passed: parity=$parity_written_after recovered=$raid_recovered_after"
 }
 
+mtd_q3n_generation_smoke() {
+  mtd_load_q3n || return 1
+  mtd_num=$(mtd_find_q3n)
+  [ -n "$mtd_num" ] || return 1
+  mtd_dev="/dev/mtd${mtd_num}"
+  stats=/sys/kernel/debug/qemu_3dnand
+  parity_stale_before=$(cat "$stats/parity_stale") || return 1
+  raid_failed_before=$(cat "$stats/raid_failed") || return 1
+
+  flash_erase -q "$mtd_dev" 0 1 || return 1
+  dd if=/dev/zero of=/tmp/q3n-generation.bin bs=16384 count=7 2>/dev/null || return 1
+  dd if=/tmp/q3n-generation.bin of="$mtd_dev" bs=16384 count=7 2>/dev/null || return 1
+  flash_erase -q "$mtd_dev" 0 1 || return 1
+
+  tries=0
+  parity_stale_after=$(cat "$stats/parity_stale") || return 1
+  while [ "$parity_stale_after" -le "$parity_stale_before" ] && [ "$tries" -lt 20 ]; do
+    sleep 1
+    tries=$((tries + 1))
+    parity_stale_after=$(cat "$stats/parity_stale") || return 1
+  done
+  raid_failed_after=$(cat "$stats/raid_failed") || return 1
+  [ "$parity_stale_after" -gt "$parity_stale_before" ] || return 1
+  [ "$raid_failed_after" -eq "$raid_failed_before" ] || return 1
+  echo "q3n generation smoke passed: stale=$parity_stale_after failed=$raid_failed_after"
+}
+
 mtd_find_nandsim() {
   while IFS= read -r line; do
     case "$line" in
@@ -165,6 +192,7 @@ case "${1:-}" in
   q3n-stats) mtd_q3n_stats ;;
   q3n-inject-loss) mtd_q3n_inject_loss "${2:-}" ;;
   q3n-serial-smoke) mtd_q3n_serial_smoke ;;
+  q3n-generation-smoke) mtd_q3n_generation_smoke ;;
   nandsim) mtd_load_simulators; cat /proc/mtd ;;
   ubifs) mtd_ubifs ;;
   clean) mtd_clean ;;

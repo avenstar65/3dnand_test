@@ -136,5 +136,14 @@ int q3n_rebuild_xor_one(struct q3n_parity_rebuild *rebuild,
 	return 0;
 }
 
+int q3n_rebuild_check_generation(const struct q3n_parity_rebuild *rebuild,
+				 u32 current_generation)
+{
+	if (!rebuild || !rebuild->generation || !current_generation)
+		return -EINVAL;
+
+	return rebuild->generation == current_generation ? 0 : -ESTALE;
+}
+
 MODULE_DESCRIPTION("QEMU 3D NAND serial Page-RAID metadata and XOR");
 MODULE_LICENSE("GPL");

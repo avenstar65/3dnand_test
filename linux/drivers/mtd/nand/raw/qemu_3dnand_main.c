@@ -346,6 +346,19 @@ static void qemu_3dnand_parity_worker(struct work_struct *work)
 	}
 
 	mutex_lock(&parity->q3n->mtd_lock);
+	ret = q3n_rebuild_check_generation(&parity->rebuild,
+		parity->q3n->data_meta[parity->block].generation);
+	if (ret) {
+		if (parity->request_queued)
+			q3n_sched_cancel(&parity->q3n->sched, &parity->request);
+		parity->request_queued = false;
+		mutex_unlock(&parity->q3n->mtd_lock);
+		if (ret == -ESTALE)
+			parity->q3n->parity_stale++;
+		else
+			parity->q3n->raid_failed++;
+		goto out_free;
+	}
 	ret = q3n_sched_try_start(&parity->q3n->sched, &parity->request);
 	if (ret == -EAGAIN) {
 		mutex_unlock(&parity->q3n->mtd_lock);
@@ -431,6 +444,7 @@ static int qemu_3dnand_queue_parity_locked(struct qemu_3dnand *q3n,
 	parity->block = block;
 	parity->stripe = stripe;
 	parity->rebuild.stripe_id = (u64)block * q3n->pages_per_block + stripe;
+	parity->rebuild.generation = q3n->data_meta[block].generation;
 	parity->rebuild.data_pages = Q3N_DATA_PAGES;
 	parity->rebuild.page_size = q3n->page_size;
 	parity->request.class = Q3N_REQ_PARITY_READ;
@@ -682,6 +696,32 @@ static void qemu_3dnand_mtd_sync(struct mtd_info *mtd)
 	mutex_unlock(&q3n->mtd_lock);
 }
 
+static int qemu_3dnand_mtd_block_isbad(struct mtd_info *mtd, loff_t ofs)
+{
+	struct qemu_3dnand *q3n = mtd->priv;
+	u64 block;
+	int bad;
+
+	if (ofs < 0 || ofs >= mtd->size)
+		return -EINVAL;
+	block = div64_u64(ofs, mtd->erasesize);
+	if (block >= q3n->data_block_count)
+		return -EINVAL;
+
+	mutex_lock(&q3n->mtd_lock);
+	bad = q3n->data_meta[block].bad;
+	mutex_unlock(&q3n->mtd_lock);
+	return bad;
+}
+
+static int qemu_3dnand_mtd_block_markbad(struct mtd_info *mtd, loff_t ofs)
+{
+	if (ofs < 0 || ofs >= mtd->size)
+		return -EINVAL;
+
+	return -EOPNOTSUPP;
+}
+
 static int qemu_3dnand_register_mtd(struct qemu_3dnand *q3n)
 {
 	struct mtd_info *mtd = &q3n->mtd;
@@ -703,6 +743,8 @@ static int qemu_3dnand_register_mtd(struct qemu_3dnand *q3n)
 	mtd->_write = qemu_3dnand_mtd_write;
 	mtd->_erase = qemu_3dnand_mtd_erase;
 	mtd->_sync = qemu_3dnand_mtd_sync;
+	mtd->_block_isbad = qemu_3dnand_mtd_block_isbad;
+	mtd->_block_markbad = qemu_3dnand_mtd_block_markbad;
 	mtd->dev.parent = &q3n->pdev->dev;
 
 	return mtd_device_register(mtd, NULL, 0);

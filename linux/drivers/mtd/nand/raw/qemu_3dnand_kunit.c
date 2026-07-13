@@ -170,6 +170,15 @@ static void q3n_rebuild_processes_one_member_per_step_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, parity[0], (u8)0x10);
 }
 
+static void q3n_rebuild_rejects_stale_generation_test(struct kunit *test)
+{
+	struct q3n_parity_rebuild rebuild = { .generation = 1 };
+
+	KUNIT_EXPECT_EQ(test, q3n_rebuild_check_generation(&rebuild, 1), 0);
+	KUNIT_EXPECT_EQ(test, q3n_rebuild_check_generation(&rebuild, 2),
+			-ESTALE);
+}
+
 static void q3n_scheduler_prioritizes_ready_foreground_test(struct kunit *test)
 {
 	struct q3n_sched sched;
@@ -299,6 +308,7 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_open_stripe_is_unprotected_until_parity_completes_test),
 	KUNIT_CASE(q3n_recover_single_missing_page_test),
 	KUNIT_CASE(q3n_rebuild_processes_one_member_per_step_test),
+	KUNIT_CASE(q3n_rebuild_rejects_stale_generation_test),
 	KUNIT_CASE(q3n_scheduler_prioritizes_ready_foreground_test),
 	KUNIT_CASE(q3n_scheduler_skips_unready_foreground_program_test),
 	KUNIT_CASE(q3n_scheduler_rejects_program_without_predecessor_test),

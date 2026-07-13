@@ -70,6 +70,7 @@ struct q3n_open_stripe {
 
 struct q3n_parity_rebuild {
 	u64 stripe_id;
+	u32 generation;
 	u16 member_bitmap;
 	u8 missing_slot;
 	u8 next_slot;
@@ -126,6 +127,8 @@ int q3n_recover_page(u8 *out, const u8 *parity, const u8 * const *members,
 		     u8 data_pages, u8 missing_slot, size_t len);
 int q3n_rebuild_xor_one(struct q3n_parity_rebuild *rebuild,
 			const u8 *member);
+int q3n_rebuild_check_generation(const struct q3n_parity_rebuild *rebuild,
+				 u32 current_generation);
 void q3n_sched_init(struct q3n_sched *sched);
 int q3n_sched_enqueue(struct q3n_sched *sched, struct q3n_request *req);
 int q3n_sched_cancel(struct q3n_sched *sched, struct q3n_request *req);

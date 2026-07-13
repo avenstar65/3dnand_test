@@ -37,8 +37,12 @@ KUnit；Task 7 的 16KiB direct MTD 串行布局；Task 10 的基础 guest
 - 页序异常不再永久等待：PROGRAM 落后 `next_prog_page` 返回 `-ESTALE`；
   超前且不存在同 block frontier dependency 返回 `-ERANGE` 并安全摘队。
   guest 已验证 erase 后直接写 D1 会立即失败，不会挂住 MTD 调用线程。
-- 未开始：Task 9 的 stale/cancel barrier 和坏块钩子、Task 11 ONFI
-  backend、Task 12 并行 profile 计划。
+- Task 9 进行中：parity work 已在创建时保存 block generation，并在每个
+  P1/P2 claim 前复核；erase 后旧请求原子摘队并记入 `parity_stale`，不再
+  program 新 generation。MTD `_block_isbad` 已注册，`_block_markbad`
+  因当前控制器 ABI 无持久化能力明确返回 `-EOPNOTSUPP`。尚未实现由
+  erase 主动遍历目标 block 请求的同步 cancel barrier。
+- 未开始：Task 11 ONFI backend、Task 12 并行 profile 计划。
 
 ## Global Constraints
 
@@ -627,7 +631,7 @@ git commit -m "feat: rebuild parity with preemptible single-page reads"
 
 ---
 
-### Task 9: 坏块、generation 和后台请求取消
+### Task 9: 坏块、generation 和后台请求取消（部分完成）
 
 **Files:**
 - Modify: `linux/drivers/mtd/nand/raw/qemu_3dnand.c`
