@@ -78,6 +78,45 @@ static void q3n_sched_remove_locked(struct q3n_sched *sched,
 		sched->pending_parity--;
 }
 
+void q3n_block_barrier_init(struct q3n_block_barrier *barrier)
+{
+	atomic_set(&barrier->pending_parity, 0);
+	barrier->cancelling = false;
+}
+
+int q3n_block_parity_get(struct q3n_block_barrier *barrier)
+{
+	if (barrier->cancelling)
+		return -EBUSY;
+	atomic_inc(&barrier->pending_parity);
+	return 0;
+}
+
+bool q3n_block_parity_put(struct q3n_block_barrier *barrier)
+{
+	return atomic_dec_and_test(&barrier->pending_parity);
+}
+
+void q3n_block_cancel_begin(struct q3n_block_barrier *barrier)
+{
+	WRITE_ONCE(barrier->cancelling, true);
+}
+
+void q3n_block_cancel_end(struct q3n_block_barrier *barrier)
+{
+	WRITE_ONCE(barrier->cancelling, false);
+}
+
+bool q3n_block_is_cancelling(const struct q3n_block_barrier *barrier)
+{
+	return READ_ONCE(barrier->cancelling);
+}
+
+int q3n_block_pending(const struct q3n_block_barrier *barrier)
+{
+	return atomic_read(&barrier->pending_parity);
+}
+
 void q3n_sched_init(struct q3n_sched *sched)
 {
 	spin_lock_init(&sched->lock);

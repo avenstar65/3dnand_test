@@ -297,6 +297,23 @@ static void q3n_scheduler_reserves_capacity_per_stripe_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, q3n_sched_reserve_parity(&sched), 0);
 }
 
+static void q3n_block_barrier_blocks_new_work_and_drains_test(struct kunit *test)
+{
+	struct q3n_block_barrier barrier;
+
+	q3n_block_barrier_init(&barrier);
+	KUNIT_EXPECT_EQ(test, q3n_block_pending(&barrier), 0);
+	KUNIT_ASSERT_EQ(test, q3n_block_parity_get(&barrier), 0);
+	KUNIT_EXPECT_EQ(test, q3n_block_pending(&barrier), 1);
+	q3n_block_cancel_begin(&barrier);
+	KUNIT_EXPECT_TRUE(test, q3n_block_is_cancelling(&barrier));
+	KUNIT_EXPECT_EQ(test, q3n_block_parity_get(&barrier), -EBUSY);
+	KUNIT_EXPECT_TRUE(test, q3n_block_parity_put(&barrier));
+	KUNIT_EXPECT_EQ(test, q3n_block_pending(&barrier), 0);
+	q3n_block_cancel_end(&barrier);
+	KUNIT_EXPECT_FALSE(test, q3n_block_is_cancelling(&barrier));
+}
+
 static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_map_separate_parity_block_test),
 	KUNIT_CASE(q3n_map_non_power_of_two_geometry_test),
@@ -317,6 +334,7 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_scheduler_foreground_preempts_requeued_rebuild_test),
 	KUNIT_CASE(q3n_scheduler_p1_claim_preserves_foreground_test),
 	KUNIT_CASE(q3n_scheduler_reserves_capacity_per_stripe_test),
+	KUNIT_CASE(q3n_block_barrier_blocks_new_work_and_drains_test),
 	{}
 };
 

@@ -2,6 +2,7 @@
 #ifndef __QEMU_3DNAND_PRIV_H
 #define __QEMU_3DNAND_PRIV_H
 
+#include <linux/atomic.h>
 #include <linux/list.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
@@ -27,6 +28,11 @@ struct q3n_phys_addr {
 
 struct q3n_block_state {
 	u32 next_prog_page;
+};
+
+struct q3n_block_barrier {
+	atomic_t pending_parity;
+	bool cancelling;
 };
 
 enum q3n_stripe_state {
@@ -129,6 +135,13 @@ int q3n_rebuild_xor_one(struct q3n_parity_rebuild *rebuild,
 			const u8 *member);
 int q3n_rebuild_check_generation(const struct q3n_parity_rebuild *rebuild,
 				 u32 current_generation);
+void q3n_block_barrier_init(struct q3n_block_barrier *barrier);
+int q3n_block_parity_get(struct q3n_block_barrier *barrier);
+bool q3n_block_parity_put(struct q3n_block_barrier *barrier);
+void q3n_block_cancel_begin(struct q3n_block_barrier *barrier);
+void q3n_block_cancel_end(struct q3n_block_barrier *barrier);
+bool q3n_block_is_cancelling(const struct q3n_block_barrier *barrier);
+int q3n_block_pending(const struct q3n_block_barrier *barrier);
 void q3n_sched_init(struct q3n_sched *sched);
 int q3n_sched_enqueue(struct q3n_sched *sched, struct q3n_request *req);
 int q3n_sched_cancel(struct q3n_sched *sched, struct q3n_request *req);
