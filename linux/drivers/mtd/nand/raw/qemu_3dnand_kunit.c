@@ -199,7 +199,34 @@ static void q3n_scheduler_skips_unready_foreground_program_test(struct kunit *te
 	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &unready_fg), 0);
 	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &ready_parity), 0);
 	KUNIT_EXPECT_PTR_EQ(test, q3n_sched_pick_next(&sched), &ready_parity);
-	KUNIT_EXPECT_PTR_EQ(test, q3n_sched_pick_next(&sched), NULL);
+	state.next_prog_page = 5;
+	KUNIT_EXPECT_PTR_EQ(test, q3n_sched_pick_next(&sched), &unready_fg);
+}
+
+static void q3n_scheduler_rejects_program_without_predecessor_test(struct kunit *test)
+{
+	struct q3n_sched sched;
+	struct q3n_block_state state = { .next_prog_page = 0 };
+	struct q3n_request skipped = { .class = Q3N_REQ_FOREGROUND,
+		.op = Q3N_REQ_PROGRAM, .block_state = &state, .page = 1 };
+
+	q3n_sched_init(&sched);
+	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &skipped), 0);
+	KUNIT_EXPECT_EQ(test, q3n_sched_try_start(&sched, &skipped), -ERANGE);
+	KUNIT_EXPECT_TRUE(test, list_empty(&skipped.node));
+}
+
+static void q3n_scheduler_rejects_stale_program_test(struct kunit *test)
+{
+	struct q3n_sched sched;
+	struct q3n_block_state state = { .next_prog_page = 2 };
+	struct q3n_request stale = { .class = Q3N_REQ_FOREGROUND,
+		.op = Q3N_REQ_PROGRAM, .block_state = &state, .page = 1 };
+
+	q3n_sched_init(&sched);
+	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &stale), 0);
+	KUNIT_EXPECT_EQ(test, q3n_sched_try_start(&sched, &stale), -ESTALE);
+	KUNIT_EXPECT_TRUE(test, list_empty(&stale.node));
 }
 
 static void q3n_scheduler_prioritizes_parity_read_test(struct kunit *test)
@@ -274,6 +301,8 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_rebuild_processes_one_member_per_step_test),
 	KUNIT_CASE(q3n_scheduler_prioritizes_ready_foreground_test),
 	KUNIT_CASE(q3n_scheduler_skips_unready_foreground_program_test),
+	KUNIT_CASE(q3n_scheduler_rejects_program_without_predecessor_test),
+	KUNIT_CASE(q3n_scheduler_rejects_stale_program_test),
 	KUNIT_CASE(q3n_scheduler_prioritizes_parity_read_test),
 	KUNIT_CASE(q3n_scheduler_foreground_preempts_requeued_rebuild_test),
 	KUNIT_CASE(q3n_scheduler_p1_claim_preserves_foreground_test),

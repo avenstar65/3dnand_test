@@ -128,6 +128,7 @@ int q3n_rebuild_xor_one(struct q3n_parity_rebuild *rebuild,
 			const u8 *member);
 void q3n_sched_init(struct q3n_sched *sched);
 int q3n_sched_enqueue(struct q3n_sched *sched, struct q3n_request *req);
+int q3n_sched_cancel(struct q3n_sched *sched, struct q3n_request *req);
 int q3n_sched_requeue_p1(struct q3n_sched *sched, struct q3n_request *req);
 int q3n_sched_reserve_parity(struct q3n_sched *sched);
 void q3n_sched_release_parity(struct q3n_sched *sched);

@@ -438,7 +438,16 @@ static int qemu_3dnand_queue_parity_locked(struct qemu_3dnand *q3n,
 	parity->request.block_state = &q3n->program_state[block];
 	parity->request.page = stripe * Q3N_STRIPE_PAGES + Q3N_DATA_PAGES;
 	INIT_WORK(&parity->work, qemu_3dnand_parity_worker);
+	if (q3n_sched_requeue_p1(&q3n->sched, &parity->request)) {
+		q3n_sched_release_parity(&q3n->sched);
+		kfree(parity->page_buf);
+		kfree(parity->rebuild.parity_accumulator);
+		kfree(parity);
+		return -EIO;
+	}
+	parity->request_queued = true;
 	if (!queue_work(q3n->parity_wq, &parity->work)) {
+		q3n_sched_cancel(&q3n->sched, &parity->request);
 		q3n_sched_release_parity(&q3n->sched);
 		kfree(parity->page_buf);
 		kfree(parity->rebuild.parity_accumulator);

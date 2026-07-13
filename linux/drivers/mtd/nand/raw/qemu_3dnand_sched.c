@@ -9,6 +9,8 @@ static bool q3n_req_ready(const struct q3n_request *req)
 {
 	if (req->op == Q3N_REQ_READ)
 		return true;
+	if (!req->block_state)
+		return false;
 
 	return q3n_program_order_ready(req->block_state, req->page);
 }
@@ -40,6 +42,42 @@ static struct q3n_request *q3n_sched_pick_ready(struct list_head *queue)
 	return NULL;
 }
 
+static bool q3n_queue_has_frontier_dependency(struct list_head *queue,
+					      const struct q3n_block_state *state,
+					      u32 page)
+{
+	struct q3n_request *req;
+
+	list_for_each_entry(req, queue, node) {
+		if (req->block_state == state && req->page == page &&
+		    (req->op == Q3N_REQ_PROGRAM ||
+		     req->class == Q3N_REQ_PARITY_READ))
+			return true;
+	}
+	return false;
+}
+
+static bool q3n_sched_has_frontier_dependency(struct q3n_sched *sched,
+					       const struct q3n_request *req)
+{
+	u32 page = req->block_state->next_prog_page;
+
+	return q3n_queue_has_frontier_dependency(&sched->foreground_queue,
+						 req->block_state, page) ||
+		q3n_queue_has_frontier_dependency(&sched->parity_read_queue,
+						  req->block_state, page) ||
+		q3n_queue_has_frontier_dependency(&sched->parity_write_queue,
+						  req->block_state, page);
+}
+
+static void q3n_sched_remove_locked(struct q3n_sched *sched,
+				    struct q3n_request *req)
+{
+	list_del_init(&req->node);
+	if (req->class != Q3N_REQ_FOREGROUND)
+		sched->pending_parity--;
+}
+
 void q3n_sched_init(struct q3n_sched *sched)
 {
 	spin_lock_init(&sched->lock);
@@ -66,6 +104,23 @@ int q3n_sched_enqueue(struct q3n_sched *sched, struct q3n_request *req)
 	list_add_tail(&req->node, queue);
 	if (req->class != Q3N_REQ_FOREGROUND)
 		sched->pending_parity++;
+	spin_unlock_irqrestore(&sched->lock, flags);
+	return 0;
+}
+
+int q3n_sched_cancel(struct q3n_sched *sched, struct q3n_request *req)
+{
+	unsigned long flags;
+
+	if (!sched || !req)
+		return -EINVAL;
+
+	spin_lock_irqsave(&sched->lock, flags);
+	if (list_empty(&req->node)) {
+		spin_unlock_irqrestore(&sched->lock, flags);
+		return -ENOENT;
+	}
+	q3n_sched_remove_locked(sched, req);
 	spin_unlock_irqrestore(&sched->lock, flags);
 	return 0;
 }
@@ -117,6 +172,24 @@ int q3n_sched_try_start(struct q3n_sched *sched, struct q3n_request *req)
 		return -EINVAL;
 
 	spin_lock_irqsave(&sched->lock, flags);
+	if (req->op == Q3N_REQ_PROGRAM) {
+		if (!req->block_state) {
+			q3n_sched_remove_locked(sched, req);
+			spin_unlock_irqrestore(&sched->lock, flags);
+			return -EINVAL;
+		}
+		if (req->page < req->block_state->next_prog_page) {
+			q3n_sched_remove_locked(sched, req);
+			spin_unlock_irqrestore(&sched->lock, flags);
+			return -ESTALE;
+		}
+		if (req->page > req->block_state->next_prog_page &&
+		    !q3n_sched_has_frontier_dependency(sched, req)) {
+			q3n_sched_remove_locked(sched, req);
+			spin_unlock_irqrestore(&sched->lock, flags);
+			return -ERANGE;
+		}
+	}
 	next = q3n_sched_pick_ready(&sched->foreground_queue);
 	if (!next)
 		next = q3n_sched_pick_ready(&sched->parity_read_queue);
@@ -127,9 +200,7 @@ int q3n_sched_try_start(struct q3n_sched *sched, struct q3n_request *req)
 		return -EAGAIN;
 	}
 
-	list_del_init(&req->node);
-	if (req->class != Q3N_REQ_FOREGROUND)
-		sched->pending_parity--;
+	q3n_sched_remove_locked(sched, req);
 	spin_unlock_irqrestore(&sched->lock, flags);
 	return 0;
 }

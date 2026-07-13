@@ -8,7 +8,7 @@
 
 **Tech Stack:** Linux 7.0.12、MTD direct callbacks、PCI/MMIO、kernel kthread/completion/spinlock/mutex/mempool、QEMU 11.0.2、ONFI 5.1 capability model、POSIX shell smoke tests、QEMU guest fault injection。
 
-## 实施状态（2026-07-13）
+## 实施状态（2026-07-14）
 
 已完成并已提交：Task 1-5；Task 6 的纯 P0/P1/P2 选择器、P1 重排和
 KUnit；Task 7 的 16KiB direct MTD 串行布局；Task 10 的基础 guest
@@ -29,11 +29,14 @@ KUnit；Task 7 的 16KiB direct MTD 串行布局；Task 10 的基础 guest
   再次参与调度。data/parity program 共用 per-block `next_prog_page`。
   parity hard limit 按未完成 stripe 预留一次配额，在 D6 编程前施加
   背压，终态释放；`_sync()` 排空 workqueue。
-- Task 8 调度子项验收：KUnit 16/16；全新 guest 中先加载 KUnit 后执行
+- Task 8 调度子项验收：KUnit 18/18；全新 guest 中先加载 KUnit 后执行
   `q3n-serial-smoke` 成功，`parity_written=1`、`raid_recovered=1`、
   `raid_failed=0`。串行 profile 只验证同 LUN 行为；异 LUN 并行留到
   Task 11/12。rebuild CRC/持久化 manifest 的主路径接线仍未完成，不在
   本次调度子项内宣称完成。
+- 页序异常不再永久等待：PROGRAM 落后 `next_prog_page` 返回 `-ESTALE`；
+  超前且不存在同 block frontier dependency 返回 `-ERANGE` 并安全摘队。
+  guest 已验证 erase 后直接写 D1 会立即失败，不会挂住 MTD 调用线程。
 - 未开始：Task 9 的 stale/cancel barrier 和坏块钩子、Task 11 ONFI
   backend、Task 12 并行 profile 计划。
 
