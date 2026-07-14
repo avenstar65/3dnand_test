@@ -37,11 +37,13 @@ KUnit；Task 7 的 16KiB direct MTD 串行布局；Task 10 的基础 guest
 - 页序异常不再永久等待：PROGRAM 落后 `next_prog_page` 返回 `-ESTALE`；
   超前且不存在同 block frontier dependency 返回 `-ERANGE` 并安全摘队。
   guest 已验证 erase 后直接写 D1 会立即失败，不会挂住 MTD 调用线程。
-- Task 9 进行中：parity work 已在创建时保存 block generation，并在每个
-  P1/P2 claim 前复核；erase 后旧请求原子摘队并记入 `parity_stale`，不再
-  program 新 generation。MTD `_block_isbad` 已注册，`_block_markbad`
-  因当前控制器 ABI 无持久化能力明确返回 `-EOPNOTSUPP`。尚未实现由
-  erase 主动遍历目标 block 请求的同步 cancel barrier。
+- Task 9 的 generation 和 group cancel barrier 已完成：parity work 在每个
+  P1/P2 claim 前复核 generation；erase 按 block 禁止新请求、唤醒并取消
+  暂停的旧 parity、等待 pending 归零后再擦除。确定性 guest 验收观测到
+  `parity_paused > 0`，且 erase 后 `parity_written`、`raid_failed` 均不变，
+  `pending_parity=0`、`reserved_parity=0`；新 generation 的串行写和 RAID
+  恢复继续通过。MTD `_block_isbad` 已注册；由于控制器 ABI 仍无持久化
+  markbad 能力，`_block_markbad` 返回 `-EOPNOTSUPP`，持久化坏块仍未完成。
 - 未开始：Task 11 ONFI backend、Task 12 并行 profile 计划。
 
 ## Global Constraints
@@ -631,7 +633,7 @@ git commit -m "feat: rebuild parity with preemptible single-page reads"
 
 ---
 
-### Task 9: 坏块、generation 和后台请求取消（部分完成）
+### Task 9: 坏块、generation 和后台请求取消（cancel barrier 已完成）
 
 **Files:**
 - Modify: `linux/drivers/mtd/nand/raw/qemu_3dnand.c`
@@ -642,24 +644,31 @@ git commit -m "feat: rebuild parity with preemptible single-page reads"
 **Interfaces:**
 - Produces: `_block_isbad`, optional `_block_markbad`, stale worker prevention.
 
-- [ ] **Step 1: 写 generation 失败测试**
+- [x] **Step 1: 写 generation 失败测试**
 
 构造 generation=1 的 parity request，模拟 erase 将 group generation 增到 2，断言 worker 返回 `-ESTALE` 且不 program。
 
-- [ ] **Step 2: 实现 group barrier**
+- [x] **Step 2: 实现 group barrier**
 
 Erase 前阻止目标 group 新请求，取消未提交 parity，等待 active request；成功 erase 后增加非零 generation 并清除 validation bitmap。
 
-- [ ] **Step 3: 注册坏块钩子**
+- [x] **Step 3: 注册坏块钩子**
 
 任一 data/parity block 坏则逻辑 group bad。不做替换映射；没有持久化 markbad 能力时 `_block_markbad` 返回 `-EOPNOTSUPP`。
 
-- [ ] **Step 4: 运行 KUnit、构建并提交**
+- [x] **Step 4: 运行 KUnit、构建并提交**
 
 ```bash
 git add linux/drivers/mtd/nand/raw
 git commit -m "feat: coordinate bad groups and stale parity requests"
 ```
+
+确定性验收结果：worker 在 claim 前达到 `parity_paused > 0`；目标 block
+erase 返回后 `parity_written` 与 `raid_failed` 保持不变，
+`pending_parity=0`、`reserved_parity=0`。随后新 generation 写入和单页
+Page-RAID 恢复通过。
+
+- [ ] **后续：实现控制器持久化 markbad ABI 和掉电后坏块状态恢复**
 
 ---
 

@@ -96,6 +96,125 @@ mtd_q3n_generation_smoke() {
   echo "q3n generation smoke passed: stale=$parity_stale_after failed=$raid_failed_after"
 }
 
+mtd_q3n_cancel_cleanup() {
+  echo 0 > "$stats/parity_pause_enable" 2>/dev/null || true
+  if [ -n "${cancel_writer_pid:-}" ]; then
+    kill "$cancel_writer_pid" 2>/dev/null || true
+    wait "$cancel_writer_pid" 2>/dev/null || true
+    cancel_writer_pid=
+  fi
+}
+
+mtd_q3n_cancel_barrier_smoke() {
+  mtd_load_q3n || {
+    echo "q3n cancel barrier smoke: failed to load qemu_3dnand"
+    return 1
+  }
+  mtd_num=$(mtd_find_q3n)
+  [ -n "$mtd_num" ] || {
+    echo "q3n cancel barrier smoke: qemu-3dnand MTD not found"
+    return 1
+  }
+  mtd_dev="/dev/mtd${mtd_num}"
+  stats=/sys/kernel/debug/qemu_3dnand
+  for counter in parity_pause_block parity_pause_enable parity_paused \
+                 parity_written raid_failed pending_parity reserved_parity; do
+    [ -e "$stats/$counter" ] || {
+      echo "q3n cancel barrier smoke: missing $stats/$counter"
+      return 1
+    }
+  done
+
+  # The EXIT trap is deliberately installed before enabling the pause.  Every
+  # subsequent error path therefore wakes a worker that may be stopped at the
+  # deterministic pre-claim test point.
+  cancel_writer_pid=
+  trap 'mtd_q3n_cancel_cleanup' 0
+  trap 'exit 1' HUP INT TERM
+
+  echo 0 > "$stats/parity_pause_block" || {
+    echo "q3n cancel barrier smoke: failed to select block 0"
+    return 1
+  }
+  echo 1 > "$stats/parity_pause_enable" || {
+    echo "q3n cancel barrier smoke: failed to enable parity pause"
+    return 1
+  }
+  flash_erase -q "$mtd_dev" 0 1 || {
+    echo "q3n cancel barrier smoke: initial block erase failed"
+    return 1
+  }
+  dd if=/dev/zero of=/tmp/q3n-cancel.bin bs=16384 count=7 2>/dev/null || {
+    echo "q3n cancel barrier smoke: failed to create input"
+    return 1
+  }
+  # Closing an MTD character-device fd invokes _sync(), which intentionally
+  # flushes the parity workqueue.  Keep dd in the background so the parent can
+  # observe the paused pre-claim worker and issue the erase that cancels it.
+  dd if=/tmp/q3n-cancel.bin of="$mtd_dev" bs=16384 count=7 \
+    2>/tmp/q3n-cancel-dd.err &
+  cancel_writer_pid=$!
+
+  tries=0
+  parity_paused=$(cat "$stats/parity_paused") || return 1
+  while [ "$parity_paused" -le 0 ] && [ "$tries" -lt 20 ]; do
+    sleep 1
+    tries=$((tries + 1))
+    parity_paused=$(cat "$stats/parity_paused") || return 1
+  done
+  [ "$parity_paused" -gt 0 ] || {
+    echo "q3n cancel barrier smoke: parity worker did not pause within ${tries}s"
+    return 1
+  }
+
+  written_before=$(cat "$stats/parity_written") || return 1
+  failed_before=$(cat "$stats/raid_failed") || return 1
+  flash_erase -q "$mtd_dev" 0 1 || {
+    echo "q3n cancel barrier smoke: cancel-barrier erase failed"
+    return 1
+  }
+  wait "$cancel_writer_pid" || {
+    echo "q3n cancel barrier smoke: data writer failed after cancellation"
+    cat /tmp/q3n-cancel-dd.err 2>/dev/null || true
+    cancel_writer_pid=
+    return 1
+  }
+  cancel_writer_pid=
+  written_after=$(cat "$stats/parity_written") || return 1
+  failed_after=$(cat "$stats/raid_failed") || return 1
+  pending_after=$(cat "$stats/pending_parity") || return 1
+  reserved_after=$(cat "$stats/reserved_parity") || return 1
+
+  [ "$written_after" -eq "$written_before" ] || {
+    echo "q3n cancel barrier smoke: parity_written changed ($written_before -> $written_after)"
+    return 1
+  }
+  [ "$failed_after" -eq "$failed_before" ] || {
+    echo "q3n cancel barrier smoke: raid_failed changed ($failed_before -> $failed_after)"
+    return 1
+  }
+  [ "$pending_after" -eq 0 ] || {
+    echo "q3n cancel barrier smoke: pending_parity=$pending_after, expected 0"
+    return 1
+  }
+  [ "$reserved_after" -eq 0 ] || {
+    echo "q3n cancel barrier smoke: reserved_parity=$reserved_after, expected 0"
+    return 1
+  }
+
+  echo 0 > "$stats/parity_pause_enable" || {
+    echo "q3n cancel barrier smoke: failed to disable parity pause"
+    return 1
+  }
+  trap - 0 HUP INT TERM
+
+  mtd_q3n_serial_smoke || {
+    echo "q3n cancel barrier smoke: new-generation serial recovery failed"
+    return 1
+  }
+  echo "q3n cancel barrier smoke passed: paused=$parity_paused parity=$written_after failed=$failed_after pending=$pending_after reserved=$reserved_after"
+}
+
 mtd_find_nandsim() {
   while IFS= read -r line; do
     case "$line" in
@@ -193,6 +312,7 @@ case "${1:-}" in
   q3n-inject-loss) mtd_q3n_inject_loss "${2:-}" ;;
   q3n-serial-smoke) mtd_q3n_serial_smoke ;;
   q3n-generation-smoke) mtd_q3n_generation_smoke ;;
+  q3n-cancel-barrier-smoke) mtd_q3n_cancel_barrier_smoke ;;
   nandsim) mtd_load_simulators; cat /proc/mtd ;;
   ubifs) mtd_ubifs ;;
   clean) mtd_clean ;;
