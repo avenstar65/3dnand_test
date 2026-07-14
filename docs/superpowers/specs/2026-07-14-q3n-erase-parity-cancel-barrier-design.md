@@ -48,7 +48,10 @@ block 的 reservation 已归零。
 
 对每个待擦除逻辑 block：
 
-1. 获取 `mtd_lock`，设置 `data_meta[block].cancelling = true`。
+1. 获取 `mtd_lock`，以 `q3n_block_cancel_begin()` 获取目标 block 的 barrier
+   所有权并设置 `data_meta[block].cancelling = true`。若同 block 已有 erase
+   owner，则后来的 erase 返回 `-EBUSY` 并设置 `fail_addr`，不得修改
+   cancelling，也不得调用 `cancel_end()`。
 2. 唤醒 debugfs 暂停等待，使目标 block 的 worker 能观察 cancelling。
 3. 释放 `mtd_lock`，等待 `pending_parity == 0`。
 4. Worker 被调度后，在 claim 前看到 cancelling：若请求仍在 P1/P2 队列，
@@ -58,7 +61,8 @@ block 的 reservation 已归零。
 6. 仅当物理 erase 成功时推进非零 generation，清空 data validation、重置
    `next_prog_page`，并使旧 parity index stale。
 7. 清除 cancelling 并唤醒等待者。物理 erase 失败也必须清除 cancelling；
-   已取消的未提交 stripe 保持 unprotected，不伪造 parity 成功。
+   只有成功取得 barrier 的 erase owner 可以执行该操作。已取消的未提交
+   stripe 保持 unprotected，不伪造 parity 成功。
 
 前台 read/write 在取得 `mtd_lock` 后检查 cancelling。正常 MTD core 会串行化
 这些入口；该检查作为防御，在 barrier 的主动解锁等待窗口内返回 `-EBUSY`，
@@ -103,6 +107,8 @@ barrier。模块 remove/debugfs 删除前必须关闭暂停并唤醒所有 worke
 - cancelling parity request 从 P1/P2 队列安全摘除。
 - cancel 不改变 generation；只有成功 erase 推进 generation。
 - reservation/pending 在 success、stale、cancel 和 enqueue failure 路径平衡。
+- 同 block 第一次 cancel begin 成功，第二次返回 `-EBUSY`；owner end 前
+  cancelling 保持为 true，owner end 后可再次取得 barrier。
 
 ### Guest 确定性验收
 

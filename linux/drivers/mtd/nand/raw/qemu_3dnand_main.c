@@ -3,8 +3,8 @@
  * Linux MTD driver for the QEMU 3D NAND controller model.
  *
  * QEMU provides only physical flash/controller semantics. This driver owns the
- * scheme-D page-raid layout: 8 data lanes plus append-only parity pages in a
- * parity block pool.
+ * same-block serial page-raid layout: seven data pages followed by one hidden
+ * parity page (D0..D6,P) per stripe.
  */
 
 #include <linux/bitops.h>
@@ -709,17 +709,21 @@ static bool qemu_3dnand_pending_parity_drained(
 	return q3n_block_pending(barrier) == 0;
 }
 
-static void qemu_3dnand_cancel_block_parity(struct qemu_3dnand *q3n,
-					     u32 block)
+static int qemu_3dnand_cancel_block_parity(struct qemu_3dnand *q3n,
+					    u32 block)
 {
 	struct q3n_block_barrier *barrier =
 		&q3n->data_meta[block].parity_barrier;
+	int ret;
 
-	q3n_block_cancel_begin(barrier);
+	ret = q3n_block_cancel_begin(barrier);
+	if (ret)
+		return ret;
 	wake_up_all(&q3n->parity_pause_waitq);
 	mutex_unlock(&q3n->mtd_lock);
 	wait_event(q3n->parity_cancel_waitq, qemu_3dnand_pending_parity_drained(barrier));
 	mutex_lock(&q3n->mtd_lock);
+	return 0;
 }
 
 static int qemu_3dnand_mtd_erase(struct mtd_info *mtd,
@@ -740,7 +744,11 @@ static int qemu_3dnand_mtd_erase(struct mtd_info *mtd,
 
 		qemu_3dnand_decode_logical(q3n, instr->addr + done, &block,
 					   &page, &column);
-		qemu_3dnand_cancel_block_parity(q3n, block);
+		ret = qemu_3dnand_cancel_block_parity(q3n, block);
+		if (ret) {
+			instr->fail_addr = instr->addr + done;
+			break;
+		}
 		ret = qemu_3dnand_erase_phys_block_locked(q3n, block);
 		if (ret) {
 			instr->fail_addr = instr->addr + done;

@@ -305,13 +305,19 @@ static void q3n_block_barrier_blocks_new_work_and_drains_test(struct kunit *test
 	KUNIT_EXPECT_EQ(test, q3n_block_pending(&barrier), 0);
 	KUNIT_ASSERT_EQ(test, q3n_block_parity_get(&barrier), 0);
 	KUNIT_EXPECT_EQ(test, q3n_block_pending(&barrier), 1);
-	q3n_block_cancel_begin(&barrier);
+	KUNIT_ASSERT_EQ(test, q3n_block_cancel_begin(&barrier), 0);
+	KUNIT_EXPECT_TRUE(test, q3n_block_is_cancelling(&barrier));
+	KUNIT_EXPECT_EQ(test, q3n_block_cancel_begin(&barrier), -EBUSY);
 	KUNIT_EXPECT_TRUE(test, q3n_block_is_cancelling(&barrier));
 	KUNIT_EXPECT_EQ(test, q3n_block_parity_get(&barrier), -EBUSY);
 	KUNIT_EXPECT_TRUE(test, q3n_block_parity_put(&barrier));
 	KUNIT_EXPECT_EQ(test, q3n_block_pending(&barrier), 0);
+	KUNIT_EXPECT_TRUE(test, q3n_block_is_cancelling(&barrier));
 	q3n_block_cancel_end(&barrier);
 	KUNIT_EXPECT_FALSE(test, q3n_block_is_cancelling(&barrier));
+	KUNIT_EXPECT_EQ(test, q3n_block_cancel_begin(&barrier), 0);
+	KUNIT_EXPECT_TRUE(test, q3n_block_is_cancelling(&barrier));
+	q3n_block_cancel_end(&barrier);
 }
 
 static void q3n_block_barrier_terminal_put_wakes_on_drain_test(struct kunit *test)
@@ -326,7 +332,7 @@ static void q3n_block_barrier_terminal_put_wakes_on_drain_test(struct kunit *tes
 
 	q3n_block_barrier_init(&cancel);
 	KUNIT_ASSERT_EQ(test, q3n_block_parity_get(&cancel), 0);
-	q3n_block_cancel_begin(&cancel);
+	KUNIT_ASSERT_EQ(test, q3n_block_cancel_begin(&cancel), 0);
 	KUNIT_EXPECT_TRUE(test, q3n_block_parity_put(&cancel));
 	KUNIT_EXPECT_EQ(test, q3n_block_pending(&cancel), 0);
 }

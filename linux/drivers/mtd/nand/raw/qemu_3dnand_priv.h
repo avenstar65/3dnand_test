@@ -138,7 +138,7 @@ int q3n_rebuild_check_generation(const struct q3n_parity_rebuild *rebuild,
 void q3n_block_barrier_init(struct q3n_block_barrier *barrier);
 int q3n_block_parity_get(struct q3n_block_barrier *barrier);
 bool q3n_block_parity_put(struct q3n_block_barrier *barrier);
-void q3n_block_cancel_begin(struct q3n_block_barrier *barrier);
+int q3n_block_cancel_begin(struct q3n_block_barrier *barrier);
 void q3n_block_cancel_end(struct q3n_block_barrier *barrier);
 bool q3n_block_is_cancelling(const struct q3n_block_barrier *barrier);
 int q3n_block_pending(const struct q3n_block_barrier *barrier);

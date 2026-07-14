@@ -44,6 +44,9 @@ KUnit；Task 7 的 16KiB direct MTD 串行布局；Task 10 的基础 guest
   `pending_parity=0`、`reserved_parity=0`；新 generation 的串行写和 RAID
   恢复继续通过。MTD `_block_isbad` 已注册；由于控制器 ABI 仍无持久化
   markbad 能力，`_block_markbad` 返回 `-EOPNOTSUPP`，持久化坏块仍未完成。
+  Cancel barrier 由第一个 same-block erase 独占；该 owner 解锁等待期间若有
+  后来的同 block erase，则后者设置 `fail_addr` 并返回 `-EBUSY`，不会清除
+  第一个 owner 的 cancelling 状态。
 - 未开始：Task 11 ONFI backend、Task 12 并行 profile 计划。
 
 ## Global Constraints

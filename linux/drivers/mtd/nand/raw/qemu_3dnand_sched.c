@@ -97,9 +97,12 @@ bool q3n_block_parity_put(struct q3n_block_barrier *barrier)
 	return atomic_dec_and_test(&barrier->pending_parity);
 }
 
-void q3n_block_cancel_begin(struct q3n_block_barrier *barrier)
+int q3n_block_cancel_begin(struct q3n_block_barrier *barrier)
 {
+	if (barrier->cancelling)
+		return -EBUSY;
 	WRITE_ONCE(barrier->cancelling, true);
+	return 0;
 }
 
 void q3n_block_cancel_end(struct q3n_block_barrier *barrier)
