@@ -98,11 +98,11 @@ mtd_q3n_generation_smoke() {
 
 mtd_q3n_cancel_cleanup() {
   echo 0 > "$stats/parity_pause_enable" 2>/dev/null || true
-  if [ -n "${cancel_writer_pid:-}" ]; then
-    kill "$cancel_writer_pid" 2>/dev/null || true
+  if [ "${cancel_writer_owned:-0}" -eq 1 ] &&
+     [ -n "${cancel_writer_pid:-}" ]; then
     wait "$cancel_writer_pid" 2>/dev/null || true
-    cancel_writer_pid=
   fi
+  cancel_writer_owned=0 cancel_writer_pid=
 }
 
 mtd_q3n_cancel_barrier_smoke() {
@@ -128,7 +128,7 @@ mtd_q3n_cancel_barrier_smoke() {
   # The EXIT trap is deliberately installed before enabling the pause.  Every
   # subsequent error path therefore wakes a worker that may be stopped at the
   # deterministic pre-claim test point.
-  cancel_writer_pid=
+  cancel_writer_pid= cancel_writer_owned=0
   trap 'mtd_q3n_cancel_cleanup' 0
   trap 'exit 1' HUP INT TERM
 
@@ -151,9 +151,8 @@ mtd_q3n_cancel_barrier_smoke() {
   # Closing an MTD character-device fd invokes _sync(), which intentionally
   # flushes the parity workqueue.  Keep dd in the background so the parent can
   # observe the paused pre-claim worker and issue the erase that cancels it.
-  dd if=/tmp/q3n-cancel.bin of="$mtd_dev" bs=16384 count=7 \
-    2>/tmp/q3n-cancel-dd.err &
-  cancel_writer_pid=$!
+  dd if=/tmp/q3n-cancel.bin of="$mtd_dev" bs=16384 count=7 2>/tmp/q3n-cancel-dd.err &
+  cancel_writer_pid=$! cancel_writer_owned=1
 
   tries=0
   parity_paused=$(cat "$stats/parity_paused") || return 1
@@ -173,13 +172,14 @@ mtd_q3n_cancel_barrier_smoke() {
     echo "q3n cancel barrier smoke: cancel-barrier erase failed"
     return 1
   }
-  wait "$cancel_writer_pid" || {
+  if wait "$cancel_writer_pid"; then
+    cancel_writer_owned=0 cancel_writer_pid=
+  else
+    cancel_writer_owned=0 cancel_writer_pid=
     echo "q3n cancel barrier smoke: data writer failed after cancellation"
     cat /tmp/q3n-cancel-dd.err 2>/dev/null || true
-    cancel_writer_pid=
     return 1
-  }
-  cancel_writer_pid=
+  fi
   written_after=$(cat "$stats/parity_written") || return 1
   failed_after=$(cat "$stats/raid_failed") || return 1
   pending_after=$(cat "$stats/pending_parity") || return 1
