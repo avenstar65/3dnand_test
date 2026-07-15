@@ -510,7 +510,7 @@ git add rootfs/profile.d/mtd.sh tests/test_scripts.sh \
 git commit -m "test: verify erase parity cancel barrier"
 ```
 
-- [ ] **后续：最终修正和验收完成后统一推送分支**
+- [x] **后续：最终修正和验收完成后统一推送分支**
 
 ---
 
@@ -525,4 +525,4 @@ git commit -m "test: verify erase parity cancel barrier"
 - [x] Cancel stripe 不增加 `parity_written` 或 `raid_failed`。
 - [x] `pending_parity` 和 `reserved_parity` 回到 0。
 - [x] 新 generation 严格升序写和 Page-RAID 恢复通过。
-- [ ] 分支已推送且工作区干净。
+- [x] 分支已推送且工作区干净。
