@@ -12,12 +12,17 @@ fi
 
 debug=0
 extra_append=
+nand_image=
+fresh_nand=0
 
 usage() {
   cat <<'USAGE'
 用法: scripts/run-qemu.sh [--debug] [--append "额外内核参数"]
+                           [--nand-image 路径] [--fresh-nand]
 
 --debug  添加 -s -S，让 QEMU 等待 GDB 连接。
+--nand-image  指定持久化物理 NAND 镜像，默认 work/media/q3n-nand.raw。
+--fresh-nand  启动前删除指定镜像，创建全新的擦除态 NAND。
 USAGE
 }
 
@@ -29,6 +34,12 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -gt 0 ] || die "--append 需要参数"
       extra_append=$1
       ;;
+    --nand-image)
+      shift
+      [ "$#" -gt 0 ] || die "--nand-image 需要参数"
+      nand_image=$1
+      ;;
+    --fresh-nand) fresh_nand=1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "未知参数: $1" ;;
   esac
@@ -47,6 +58,18 @@ fi
 
 need_cmd "$QEMU_BIN"
 mkdirs
+
+if [ -z "$nand_image" ]; then
+  nand_image="$work_dir/media/q3n-nand.raw"
+elif [ "${nand_image#/}" = "$nand_image" ]; then
+  nand_image="$repo_root/$nand_image"
+fi
+mkdir -p "$(dirname -- "$nand_image")"
+if [ "$fresh_nand" -eq 1 ]; then
+  rm -f "$nand_image"
+  info "已重置物理 NAND 镜像: $nand_image"
+fi
+[ -e "$nand_image" ] || touch "$nand_image"
 
 linux_dir=$(selected_linux_dir)
 version=$(kernel_version_from_dir "$linux_dir")
@@ -71,7 +94,9 @@ exec "$QEMU_BIN" \
   -kernel "$bzimage" \
   -initrd "$initramfs" \
   -append "$QEMU_APPEND $extra_append" \
-  -device q3n-nand-pci \
+  -blockdev "driver=file,filename=$nand_image,node-name=q3n-file" \
+  -blockdev driver=raw,file=q3n-file,node-name=q3n-media \
+  -device q3n-nand-pci,drive=q3n-media \
   -nographic \
   -no-reboot \
   $debug_args

@@ -9,6 +9,7 @@
 #include "hw/mtd/q3n-nand.h"
 #include "hw/pci/pci_device.h"
 #include "hw/core/qdev.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/core/sysbus.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
@@ -17,6 +18,7 @@ typedef struct Q3NNandPciState {
     PCIDevice parent_obj;
 
     Q3NNandState *nand;
+    BlockBackend *blk;
     qemu_irq irq;
 } Q3NNandPciState;
 
@@ -29,6 +31,13 @@ static void q3n_pci_realize(PCIDevice *pdev, Error **errp)
 
     s->nand = Q3N_NAND(object_new(TYPE_Q3N_NAND));
     nand_dev = DEVICE(s->nand);
+    if (!s->blk) {
+        error_setg(errp, "q3n-nand-pci requires a drive");
+        object_unref(OBJECT(s->nand));
+        s->nand = NULL;
+        return;
+    }
+    qdev_prop_set_drive(nand_dev, "drive", s->blk);
     if (!sysbus_realize(SYS_BUS_DEVICE(nand_dev), errp)) {
         object_unref(OBJECT(s->nand));
         s->nand = NULL;
@@ -42,6 +51,10 @@ static void q3n_pci_realize(PCIDevice *pdev, Error **errp)
     pci_register_bar(pdev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY,
                      q3n_nand_get_mmio(s->nand));
 }
+
+static const Property q3n_pci_properties[] = {
+    DEFINE_PROP_DRIVE("drive", Q3NNandPciState, blk),
+};
 
 static void q3n_pci_exit(PCIDevice *pdev)
 {
@@ -69,6 +82,7 @@ static void q3n_pci_class_init(ObjectClass *klass, const void *data)
     k->device_id = Q3N_PCI_DEVICE_ID;
     k->revision = Q3N_PCI_REVISION;
     k->class_id = PCI_CLASS_MEMORY_FLASH;
+    device_class_set_props(dc, q3n_pci_properties);
     set_bit(DEVICE_CATEGORY_STORAGE, dc->categories);
 }
 

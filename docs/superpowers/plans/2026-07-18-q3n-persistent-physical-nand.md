@@ -80,7 +80,7 @@ tests/test_scripts.sh
 - Produces: `q3n_media_read_page()`、`q3n_media_program_page()`、`q3n_media_erase_block()`、`q3n_media_inject_loss()`。
 - Produces CLI: `--fresh-nand`、`--nand-image PATH`，默认 `work/media/q3n-nand.raw`。
 
-- [ ] **Step 1: 添加失败的结构门禁**
+- [x] **Step 1: 添加失败的结构门禁**
 
 在 `tests/test_scripts.sh` 增加：
 
@@ -98,13 +98,13 @@ assert_contains scripts/run-qemu.sh '--nand-image'
 assert_contains scripts/run-qemu.sh 'q3n-nand-pci,drive=q3n-media'
 ```
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 Run: `./scripts/smoke-test.sh`
 
 Expected: exit 1，首先失败于缺少 `q3n-media.h`。
 
-- [ ] **Step 3: 定义镜像格式与 media API**
+- [x] **Step 3: 定义镜像格式与 media API**
 
 在 `q3n-media.h` 定义：
 
@@ -168,7 +168,7 @@ int q3n_media_inject_loss(Q3NMedia *m, uint32_t block, uint32_t page);
 QEMU_BUILD_BUG_ON(sizeof(Q3NMediaHeader) != Q3N_MEDIA_HEADER_SIZE);
 ```
 
-- [ ] **Step 4: 实现新建、校验和固定偏移读写**
+- [x] **Step 4: 实现新建、校验和固定偏移读写**
 
 `q3n_media_open()` 必须区分 `blk_getlength(blk) == 0` 与已有镜像。新镜像使用：
 
@@ -196,7 +196,7 @@ program 先写完整 main+OOB slot，再写 page state 和 block frontier，最�
 erase 只把对应 page-state 范围清零并把 frontier 写 0，不覆盖旧 slot。lost 把
 page state 从 PRESENT 写为 LOST。
 
-- [ ] **Step 5: 接入 q3n-nand 和 PCI drive**
+- [x] **Step 5: 接入 q3n-nand 和 PCI drive**
 
 删除 `Q3NPage` 哈希表以及 controller state 中重复的 `block_meta`、
 `page_valid`、`next_prog_page` 数组。`q3n_read_page()`、program、erase、
@@ -226,7 +226,7 @@ if (!sysbus_realize(SYS_BUS_DEVICE(nand_dev), errp)) {
 
 没有 backend 时内部 NAND realize 返回 `error_setg(errp, "q3n-nand requires a drive")`。
 
-- [ ] **Step 6: 更新 overlay 和 run-qemu CLI**
+- [x] **Step 6: 更新 overlay 和 run-qemu CLI**
 
 `apply-qemu-overlay.sh` 复制新 `.c/.h` 并让 meson 同时构建：
 
@@ -255,7 +255,7 @@ QEMU 参数增加：
 -device q3n-nand-pci,drive=q3n-media
 ```
 
-- [ ] **Step 7: GREEN 构建和空镜像重开**
+- [x] **Step 7: GREEN 构建和空镜像重开**
 
 Run:
 

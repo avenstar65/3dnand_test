@@ -8,8 +8,10 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/mtd/q3n-media.h"
 #include "hw/mtd/q3n-nand.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/core/sysbus.h"
 #include "qapi/error.h"
 #include "qemu/bitops.h"
@@ -17,22 +19,6 @@
 
 #define Q3N_ID_VALUE                  0x314e3351U /* "Q3N1" */
 #define Q3N_CAP_BASIC_FLASH           (1U << 0)
-
-typedef struct Q3NPage {
-    uint8_t data[Q3N_PAGE_SIZE];
-    uint8_t oob_storage[Q3N_OOB_SIZE];
-} Q3NPage;
-
-typedef struct Q3NPhysAddr {
-    uint8_t lane;
-    uint16_t block;
-    uint16_t page;
-} Q3NPhysAddr;
-
-typedef struct Q3NBlockMeta {
-    bool bad;
-    bool erased;
-} Q3NBlockMeta;
 
 typedef struct Q3NStats {
     uint64_t page_programs;
@@ -74,68 +60,11 @@ struct Q3NNandState {
     uint64_t physical_size;
     uint64_t erase_size;
 
-    Q3NBlockMeta *block_meta;
-    uint8_t *page_valid;
-    uint32_t *next_prog_page;
-
-    GHashTable *pages; /* uint64 page key -> Q3NPage */
+    BlockBackend *blk;
+    Q3NMedia *media;
 
     Q3NStats stats;
 };
-
-static uint64_t q3n_make_page_key(Q3NPhysAddr a)
-{
-    return ((uint64_t)a.lane << 48) |
-           ((uint64_t)a.block << 24) |
-           (uint64_t)a.page;
-}
-
-static uint64_t *q3n_u64_key_new(uint64_t value)
-{
-    uint64_t *key = g_new(uint64_t, 1);
-
-    *key = value;
-    return key;
-}
-
-static Q3NPage *q3n_lookup_page(Q3NNandState *s, Q3NPhysAddr addr)
-{
-    uint64_t key = q3n_make_page_key(addr);
-
-    return g_hash_table_lookup(s->pages, &key);
-}
-
-static Q3NPage *q3n_get_or_create_page(Q3NNandState *s, Q3NPhysAddr addr)
-{
-    uint64_t raw_key = q3n_make_page_key(addr);
-    Q3NPage *page = g_hash_table_lookup(s->pages, &raw_key);
-
-    if (page) {
-        return page;
-    }
-
-    page = g_new0(Q3NPage, 1);
-    memset(page->data, 0xff, sizeof(page->data));
-    memset(page->oob_storage, 0xff, sizeof(page->oob_storage));
-    g_hash_table_insert(s->pages, q3n_u64_key_new(raw_key), page);
-    return page;
-}
-
-static uint32_t q3n_page_index(Q3NNandState *s, uint32_t block, uint32_t page)
-{
-    return block * Q3N_PAGES_PER_BLOCK + page;
-}
-
-static bool q3n_page_is_valid(Q3NNandState *s, uint32_t block, uint32_t page)
-{
-    return s->page_valid[q3n_page_index(s, block, page)] != 0;
-}
-
-static void q3n_set_page_valid(Q3NNandState *s, uint32_t block,
-                               uint32_t page, bool valid)
-{
-    s->page_valid[q3n_page_index(s, block, page)] = valid ? 1 : 0;
-}
 
 static bool q3n_decode_addr(Q3NNandState *s, uint64_t byte_addr,
                             uint32_t *block, uint32_t *page,
@@ -150,46 +79,21 @@ static bool q3n_decode_addr(Q3NNandState *s, uint64_t byte_addr,
     return *block < s->physical_block_count;
 }
 
-static void q3n_phys_addr(uint32_t physical_block, uint32_t page,
-                          Q3NPhysAddr *addr)
-{
-    addr->lane = physical_block % Q3N_LANES;
-    addr->block = physical_block / Q3N_LANES;
-    addr->page = page;
-}
-
 static int q3n_read_page(Q3NNandState *s, uint32_t block, uint32_t page,
                          uint8_t *buf, uint8_t *oob)
 {
-    Q3NPhysAddr addr;
-    Q3NPage *stored;
+    int ret = q3n_media_read_page(s->media, block, page, buf, oob);
 
-    if (!q3n_page_is_valid(s, block, page)) {
-        memset(buf, 0xff, Q3N_PAGE_SIZE);
-        if (oob) {
-            memset(oob, 0xff, Q3N_OOB_SIZE);
-        }
-        return 0;
-    }
-
-    q3n_phys_addr(block, page, &addr);
-    stored = q3n_lookup_page(s, addr);
-    if (!stored) {
+    if (ret) {
         s->stats.page_read_errors++;
-        return -EIO;
     }
-
-    memcpy(buf, stored->data, Q3N_PAGE_SIZE);
-    if (oob) {
-        memcpy(oob, stored->oob_storage, Q3N_OOB_SIZE);
-    }
-    return 0;
+    return ret;
 }
 
 static bool q3n_check_program_order(Q3NNandState *s, uint32_t block,
                                     uint32_t page)
 {
-    if (page != s->next_prog_page[block]) {
+    if (page != q3n_media_next_prog_page(s->media, block)) {
         s->stats.stat_order_errors++;
         return false;
     }
@@ -201,27 +105,20 @@ static bool q3n_program_page(Q3NNandState *s, uint32_t block,
                              uint32_t page, const uint8_t *buf,
                              const uint8_t *oob)
 {
-    Q3NPhysAddr addr;
-    Q3NPage *stored;
+    int ret;
 
     if (block >= s->physical_block_count || page >= Q3N_PAGES_PER_BLOCK) {
         return false;
     }
-    if (s->block_meta[block].bad || q3n_page_is_valid(s, block, page) ||
-        !q3n_check_program_order(s, block, page)) {
+    if (!q3n_check_program_order(s, block, page)) {
         return false;
     }
 
-    q3n_phys_addr(block, page, &addr);
-    stored = q3n_get_or_create_page(s, addr);
-    memcpy(stored->data, buf, Q3N_PAGE_SIZE);
-    if (oob) {
-        memcpy(stored->oob_storage, oob, Q3N_OOB_SIZE);
+    ret = q3n_media_program_page(s->media, block, page, buf, oob);
+    if (ret) {
+        return false;
     }
-    q3n_set_page_valid(s, block, page, true);
-    s->block_meta[block].erased = false;
     s->stats.page_programs++;
-    s->next_prog_page[block]++;
     return true;
 }
 
@@ -230,17 +127,8 @@ static bool q3n_inject_data_loss(Q3NNandState *s, uint64_t byte_addr)
     uint32_t block;
     uint32_t page;
     uint32_t column;
-    Q3NPhysAddr phys;
-    uint64_t page_key;
-
-    if (!q3n_decode_addr(s, byte_addr, &block, &page, &column) ||
-        column != 0 || !q3n_page_is_valid(s, block, page)) {
-        return false;
-    }
-
-    q3n_phys_addr(block, page, &phys);
-    page_key = q3n_make_page_key(phys);
-    if (!g_hash_table_remove(s->pages, &page_key)) {
+    if (!q3n_decode_addr(s, byte_addr, &block, &page, &column) || column != 0 ||
+        q3n_media_inject_loss(s->media, block, page)) {
         return false;
     }
 
@@ -250,25 +138,10 @@ static bool q3n_inject_data_loss(Q3NNandState *s, uint64_t byte_addr)
 
 static bool q3n_erase_block(Q3NNandState *s, uint32_t block)
 {
-    uint32_t page;
-
-    if (block >= s->physical_block_count || s->block_meta[block].bad) {
+    if (block >= s->physical_block_count ||
+        q3n_media_erase_block(s->media, block)) {
         return false;
     }
-
-    memset(&s->page_valid[block * Q3N_PAGES_PER_BLOCK], 0,
-           Q3N_PAGES_PER_BLOCK);
-    for (page = 0; page < Q3N_PAGES_PER_BLOCK; page++) {
-        Q3NPhysAddr addr;
-        uint64_t key;
-
-        q3n_phys_addr(block, page, &addr);
-        key = q3n_make_page_key(addr);
-        g_hash_table_remove(s->pages, &key);
-    }
-
-    s->block_meta[block].erased = true;
-    s->next_prog_page[block] = 0;
     s->stats.block_erases++;
     return true;
 }
@@ -656,8 +529,6 @@ static void q3n_realize(DeviceState *dev, Error **errp)
                         s->parity_blocks_per_plane +
                         s->metadata_blocks_per_plane +
                         s->reserve_blocks_per_plane;
-    uint32_t i;
-
     if (pool_sum > Q3N_BLOCKS_PER_PLANE) {
         error_setg(errp, "q3n-nand block pools exceed %u blocks per plane",
                    Q3N_BLOCKS_PER_PLANE);
@@ -667,16 +538,12 @@ static void q3n_realize(DeviceState *dev, Error **errp)
     s->physical_block_count = Q3N_BLOCKS_PER_PLANE * Q3N_LANES;
     s->erase_size = (uint64_t)Q3N_PAGES_PER_BLOCK * Q3N_PAGE_SIZE;
     s->physical_size = (uint64_t)s->physical_block_count * s->erase_size;
-    s->block_meta = g_new0(Q3NBlockMeta, s->physical_block_count);
-    s->page_valid = g_new0(uint8_t, s->physical_block_count *
-                                    Q3N_PAGES_PER_BLOCK);
-    s->next_prog_page = g_new0(uint32_t, s->physical_block_count);
-    for (i = 0; i < s->physical_block_count; i++) {
-        s->block_meta[i].erased = true;
+    s->media = q3n_media_open(s->blk, s->physical_block_count,
+                              Q3N_PAGES_PER_BLOCK, Q3N_PAGE_SIZE,
+                              Q3N_OOB_SIZE, errp);
+    if (!s->media) {
+        return;
     }
-
-    s->pages = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free,
-                                     g_free);
     s->status = Q3N_STATUS_READY;
 }
 
@@ -684,10 +551,8 @@ static void q3n_unrealize(DeviceState *dev)
 {
     Q3NNandState *s = Q3N_NAND(dev);
 
-    g_clear_pointer(&s->pages, g_hash_table_destroy);
-    g_clear_pointer(&s->block_meta, g_free);
-    g_clear_pointer(&s->page_valid, g_free);
-    g_clear_pointer(&s->next_prog_page, g_free);
+    q3n_media_close(s->media);
+    s->media = NULL;
 }
 
 static void q3n_instance_init(Object *obj)
@@ -701,6 +566,7 @@ static void q3n_instance_init(Object *obj)
 }
 
 static const Property q3n_properties[] = {
+    DEFINE_PROP_DRIVE("drive", Q3NNandState, blk),
     DEFINE_PROP_UINT32("data-blocks-per-plane", Q3NNandState,
                        data_blocks_per_plane,
                        Q3N_DEFAULT_DATA_BLOCKS_PER_PLANE),

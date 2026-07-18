@@ -64,7 +64,9 @@ for file in \
   linux/drivers/mtd/nand/raw/Kconfig.qemu_3dnand \
   linux/drivers/mtd/nand/raw/Makefile.qemu_3dnand \
   qemu/README.md \
+  qemu/include/hw/mtd/q3n-media.h \
   qemu/include/hw/mtd/q3n-nand.h \
+  qemu/hw/mtd/q3n-media.c \
   qemu/hw/mtd/q3n-nand.c \
   qemu/hw/mtd/q3n-pci.c \
   qemu/hw/mtd/meson.build \
@@ -115,6 +117,9 @@ assert_contains scripts/fetch-linux.sh 'KERNEL_BASE_URL'
 assert_contains scripts/build-qemu.sh 'apply-qemu-overlay.sh'
 assert_contains scripts/build-qemu.sh 'x86_64-softmmu'
 assert_contains scripts/run-qemu.sh 'q3n-nand-pci'
+assert_contains scripts/run-qemu.sh '--fresh-nand'
+assert_contains scripts/run-qemu.sh '--nand-image'
+assert_contains scripts/run-qemu.sh 'q3n-nand-pci,drive=q3n-media'
 assert_contains scripts/fetch-linux.sh 'delay-directory-restore'
 assert_contains scripts/fetch-linux.sh 'redownload'
 assert_contains scripts/fetch-linux.sh 'continue-at'
@@ -183,7 +188,7 @@ done
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_erase_block'
 assert_contains qemu/hw/mtd/q3n-nand.c 'next_prog_page'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_check_program_order'
-assert_contains qemu/hw/mtd/q3n-nand.c 'oob_storage'
+assert_contains qemu/hw/mtd/q3n-media.c 'Q3N_MEDIA_BBM_GOOD'
 assert_contains qemu/hw/mtd/q3n-nand.c 'stat_order_errors'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_inject_data_loss'
 assert_contains qemu/hw/mtd/q3n-nand.c 'faults_injected'
@@ -192,6 +197,11 @@ assert_not_contains qemu/hw/mtd/q3n-nand.c 'q3n_recover_data_page'
 assert_not_contains qemu/hw/mtd/q3n-nand.c 'q3n_invalidate_group_parity'
 assert_contains qemu/hw/mtd/q3n-pci.c 'TYPE_Q3N_NAND_PCI'
 assert_contains qemu/hw/mtd/q3n-pci.c 'pci_register_bar'
+assert_contains qemu/hw/mtd/q3n-pci.c 'DEFINE_PROP_DRIVE\("drive"'
+assert_contains qemu/hw/mtd/q3n-media.c 'Q3NMEDIA'
+assert_contains qemu/hw/mtd/q3n-media.c 'blk_truncate'
+assert_contains qemu/hw/mtd/q3n-media.c 'blk_pread'
+assert_contains qemu/hw/mtd/q3n-media.c 'blk_pwrite'
 assert_contains qemu/hw/mtd/meson.build 'q3n-pci.c'
 assert_contains qemu/hw/mtd/meson.build 'CONFIG_Q3N_NAND'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'MODULE_DEVICE_TABLE\(pci, qemu_3dnand_id_table\)'
