@@ -667,7 +667,7 @@ git commit -m "feat: persist MTD bad-block markers"
 - Produces guest stages: `q3n-persist-prepare`、`q3n-persist-verify`。
 - Produces host acceptance: `./scripts/q3n-persistence-smoke.sh`。
 
-- [ ] **Step 1: 添加失败的命令门禁**
+- [x] **Step 1: 添加失败的命令门禁**
 
 ```sh
 assert_contains rootfs/profile.d/mtd.sh 'q3n-persist-prepare'
@@ -678,13 +678,13 @@ assert_contains scripts/q3n-persistence-smoke.sh 'q3n-persist-prepare'
 assert_contains scripts/q3n-persistence-smoke.sh 'q3n-persist-verify'
 ```
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 Run: `./scripts/smoke-test.sh`
 
 Expected: FAIL on missing `q3n-persist-prepare`。
 
-- [ ] **Step 3: 实现 prepare stage**
+- [x] **Step 3: 实现 prepare stage**
 
 `mtd_q3n_persist_prepare()`：
 
@@ -695,7 +695,7 @@ Expected: FAIL on missing `q3n-persist-prepare`。
 - 执行 sync/关闭 fd；
 - 输出 `q3n persistence prepare passed`。
 
-- [ ] **Step 4: 实现 verify stage**
+- [x] **Step 4: 实现 verify stage**
 
 `mtd_q3n_persist_verify()`：
 
@@ -708,7 +708,7 @@ Expected: FAIL on missing `q3n-persist-prepare`。
 不要在该 stage 内运行会先 erase block 0 的既有 serial smoke；回归 smoke 在独立
 fresh 镜像轮次运行。
 
-- [ ] **Step 5: init 支持命令行 stage 并自动关机**
+- [x] **Step 5: init 支持命令行 stage 并自动关机**
 
 在 `rootfs/init` 用明确 case 选择：
 
@@ -722,10 +722,10 @@ case "${MTD_SMOKE:-0}" in
 esac
 ```
 
-stage 成功时打印通过并 `poweroff -f`；失败时进入 shell，host script 依靠输出
-缺少 pass marker 判定失败。
+stage 成功时打印通过并 `poweroff -f`；persistence stage 失败时也自动关机，
+host script 依靠缺少 pass marker 判定失败，避免自动验收停在交互 shell。
 
-- [ ] **Step 6: 实现 host 两次启动脚本**
+- [x] **Step 6: 实现 host 两次启动脚本**
 
 ```sh
 #!/usr/bin/env sh
@@ -744,8 +744,11 @@ grep -q 'q3n persistence prepare passed' "$prepare_log"
 grep -q 'q3n persistence verify passed' "$verify_log"
 ```
 
-脚本最后检查镜像 magic 和 sparse 实际占用小于逻辑大小，然后打印
-`q3n persistence smoke passed`。
+脚本直接保存每轮 QEMU 输出并保留 QEMU 退出状态，随后检查镜像 magic 和
+sparse 实际占用小于逻辑大小。除正常 prepare/verify 外，还执行两组掉电尾部
+场景：完整 `D0..D6` 在重启 probe 时补写 parity；若其中一页已经 LOST 且 parity
+尚未落盘，则 probe 必须返回 `-EIO` 且不注册 MTD。最后篡改 page-state/frontier
+一致性并确认 QEMU 拒绝镜像，然后打印 `q3n persistence smoke passed`。
 
 使用可移植命令取得大小：
 
@@ -756,7 +759,7 @@ allocated_kib=$(du -k "$work_dir/media/q3n-nand.raw" | awk '{print $1}')
 [ "$(dd if="$work_dir/media/q3n-nand.raw" bs=8 count=1 2>/dev/null)" = Q3NMEDIA ]
 ```
 
-- [ ] **Step 7: 完整构建与双启动验收**
+- [x] **Step 7: 完整构建与双启动验收**
 
 ```bash
 ./scripts/smoke-test.sh
@@ -767,9 +770,10 @@ allocated_kib=$(du -k "$work_dir/media/q3n-nand.raw" | awk '{print $1}')
 ./scripts/q3n-persistence-smoke.sh
 ```
 
-Expected: prepare/verify 两轮均自动 poweroff，最终输出 persistence pass。
+Expected: 六轮 guest 均自动 poweroff，损坏镜像在 guest 启动前被拒绝，最终输出
+persistence pass。
 
-- [ ] **Step 8: 既有完整回归**
+- [x] **Step 8: 既有完整回归**
 
 用 `--fresh-nand` 启动 guest，依次执行：
 
@@ -782,13 +786,13 @@ modprobe qemu_3dnand_test
 
 Expected: KUnit fail 0；三项 smoke 均 pass；pending/reserved/pause 回到 0。
 
-- [ ] **Step 9: 更新文档和总计划**
+- [x] **Step 9: 更新文档和总计划**
 
 README 记录默认持久镜像、`--fresh-nand` 和两次启动命令；QEMU README 记录
 物理镜像 v1 与 OOB BBM，明确 QEMU 不管理 RAID 布局。总计划勾选 persistent
 controller-backed markbad，保留并行/FTL/GC 非目标状态。
 
-- [ ] **Step 10: 提交**
+- [x] **Step 10: 提交**
 
 ```bash
 git add scripts rootfs tests README.md qemu/README.md \
@@ -800,17 +804,19 @@ git commit -m "test: verify persistent NAND restart recovery"
 
 ## Final Acceptance Checklist
 
-- [ ] `git diff --check` 无输出，工作区干净。
-- [ ] QEMU 11.0.2 fresh build 退出 0。
-- [ ] Linux 7.0.12 和 rootfs fresh build 退出 0。
-- [ ] 镜像 magic/版本/几何校验和 sparse 行为通过。
-- [ ] 正常 QEMU 重启后 main/OOB/page state/frontier 恢复。
-- [ ] BBM 实际位于首 page `OOB[0]`，重启后仍 bad。
-- [ ] QEMU 不包含 `% 8`、stripe、parity 或 generation 解释。
-- [ ] Linux 重建 data-valid、parity index 和余数 7 尾部 parity。
-- [ ] `_block_markbad()` 幂等，所有 owner 路径正确 cancel_end。
-- [ ] bad block write/erase 拒绝，read 语义保留。
-- [ ] 两次 QEMU persistence smoke 通过。
-- [ ] KUnit、cancel、generation、serial smoke 全部通过。
-- [ ] 未修改 MTD/UBI/UBIFS core。
-- [ ] 分支复审无 Critical/Important，推送后与远端同步。
+- [x] `git diff --check` 无输出。
+- [x] QEMU 11.0.2 build 退出 0。
+- [x] Linux 7.0.12 和 rootfs build 退出 0。
+- [x] 镜像 magic/版本/几何校验和 sparse 行为通过。
+- [x] 正常 QEMU 重启后 main/OOB/page state/frontier 恢复。
+- [x] BBM 实际位于首 page `OOB[0]`，重启后仍 bad。
+- [x] QEMU 不包含 `% 8`、stripe、parity 或 generation 解释。
+- [x] Linux 重建 data-valid、parity index 和余数 7 尾部 parity。
+- [x] 不一致 page-state/frontier 镜像在 QEMU realize 阶段被拒绝。
+- [x] 缺失 parity 且一页 LOST 的余数 7 尾部拒绝注册 MTD。
+- [x] `_block_markbad()` 幂等，所有 owner 路径正确 cancel_end。
+- [x] bad block write/erase 拒绝，read 语义保留。
+- [x] 六轮 QEMU persistence/tail smoke 通过。
+- [x] KUnit 22/22、cancel、generation、serial smoke 全部通过。
+- [x] 未修改 MTD/UBI/UBIFS core。
+- [x] 分支复审无 Critical/Important，推送后与远端同步。

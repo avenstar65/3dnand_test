@@ -45,7 +45,7 @@ fi
 file "$busybox_path" | grep -Eq 'x86-64|x86_64' || die "busybox 不是 x86_64 ELF: $busybox_path"
 
 cp "$busybox_path" "$stage/bin/busybox"
-for applet in sh mount umount modprobe cat echo grep ls mkdir dmesg insmod rmmod sleep true false poweroff; do
+for applet in sh mount umount modprobe cat echo grep ls mkdir dmesg insmod rmmod sleep true false poweroff sync; do
   ln -sf busybox "$stage/bin/$applet"
 done
 

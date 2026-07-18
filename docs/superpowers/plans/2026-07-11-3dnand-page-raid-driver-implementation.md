@@ -8,7 +8,7 @@
 
 **Tech Stack:** Linux 7.0.12、MTD direct callbacks、PCI/MMIO、kernel kthread/completion/spinlock/mutex/mempool、QEMU 11.0.2、ONFI 5.1 capability model、POSIX shell smoke tests、QEMU guest fault injection。
 
-## 实施状态（2026-07-14）
+## 实施状态（2026-07-18）
 
 已完成并已提交：Task 1-5；Task 6 的纯 P0/P1/P2 选择器、P1 重排和
 KUnit；Task 7 的 16KiB direct MTD 串行布局；Task 10 的基础 guest
@@ -42,12 +42,20 @@ KUnit；Task 7 的 16KiB direct MTD 串行布局；Task 10 的基础 guest
   暂停的旧 parity、等待 pending 归零后再擦除。确定性 guest 验收观测到
   `parity_paused > 0`，且 erase 后 `parity_written`、`raid_failed` 均不变，
   `pending_parity=0`、`reserved_parity=0`；新 generation 的串行写和 RAID
-  恢复继续通过。MTD `_block_isbad` 已注册；由于控制器 ABI 仍无持久化
-  markbad 能力，`_block_markbad` 返回 `-EOPNOTSUPP`，持久化坏块仍未完成。
+  恢复继续通过。MTD `_block_isbad` 与 `_block_markbad` 已注册；新 QEMU
+  capability 通过专用命令把坏块标记写入物理 block 首页 `OOB[0]`，不要求
+  OOB-only 通用 program，也不推进物理页序前沿。旧 QEMU 缺少 capability 时
+  仍返回 `-EOPNOTSUPP`。
   Cancel barrier 由第一个 same-block erase 独占；该 owner 解锁等待期间若有
   后来的同 block erase，则后者设置 `fail_addr` 并返回 `-EBUSY`，不会清除
   第一个 owner 的 cancelling 状态。
 - 未开始：Task 11 ONFI backend、Task 12 并行 profile 计划。
+- 已完成物理 NAND 持久化：QEMU BlockBackend 使用 `Q3NMEDIA` v1 固定布局
+  sparse raw 镜像，保存 main/OOB、page state、lost state 和
+  `next_prog_page`。Linux probe 从物理状态重建串行 data/parity 索引，并在
+  前沿余数为 7 时同步补齐 parity 后才注册 MTD。两次 QEMU 自动验收已覆盖
+  data loss 恢复、坏块跨重启、坏块写擦拒绝和 page 9 连续编程；QEMU 不含
+  7+1/stripe/generation 解释。未扩展 FTL、GC、磨损均衡或并行 plane profile。
 
 ## Global Constraints
 
@@ -671,7 +679,7 @@ erase 返回后 `parity_written` 与 `raid_failed` 保持不变，
 `pending_parity=0`、`reserved_parity=0`。随后新 generation 写入和单页
 Page-RAID 恢复通过。
 
-- [ ] **后续：实现控制器持久化 markbad ABI 和掉电后坏块状态恢复**
+- [x] **后续：实现控制器持久化 markbad ABI 和正常 QEMU 重启后坏块状态恢复**
 
 ---
 

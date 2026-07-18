@@ -18,19 +18,28 @@ if [ -r /etc/profile.d/mtd.sh ]; then
   . /etc/profile.d/mtd.sh
 fi
 
-if [ "${MTD_SMOKE:-0}" = "1" ] || [ "${MTD_SMOKE:-0}" = "ubifs" ]; then
-  if [ "${MTD_SMOKE:-0}" = "ubifs" ]; then
-    mtd_test=mtd_ubifs
-  else
-    mtd_test=mtd_smoke
-  fi
+case "${MTD_SMOKE:-0}" in
+  q3n-persist-prepare) mtd_test=mtd_q3n_persist_prepare ;;
+  q3n-persist-verify) mtd_test=mtd_q3n_persist_verify ;;
+  q3n-tail-prepare) mtd_test='mtd_q3n_tail_prepare 0' ;;
+  q3n-tail-verify) mtd_test=mtd_q3n_tail_verify ;;
+  q3n-tail-fail-prepare) mtd_test='mtd_q3n_tail_prepare 1' ;;
+  q3n-tail-fail-verify) mtd_test=mtd_q3n_tail_fail_verify ;;
+  ubifs) mtd_test=mtd_ubifs ;;
+  1) mtd_test=mtd_smoke ;;
+  *) mtd_test= ;;
+esac
 
-  if "$mtd_test"; then
+if [ -n "$mtd_test" ]; then
+  if $mtd_test; then
     echo "MTD smoke 测试通过，关闭虚拟机"
     poweroff -f
   fi
 
   echo "MTD smoke 测试失败，进入 shell"
+  case "${MTD_SMOKE:-0}" in
+    q3n-persist-*|q3n-tail-*) poweroff -f ;;
+  esac
 fi
 
 exec /bin/sh

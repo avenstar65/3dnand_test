@@ -11,7 +11,9 @@ overlay manually, copy the files into a QEMU source tree:
 
 ```text
 qemu/include/hw/mtd/q3n-nand.h -> include/hw/mtd/q3n-nand.h
+qemu/include/hw/mtd/q3n-media.h -> include/hw/mtd/q3n-media.h
 qemu/hw/mtd/q3n-nand.c         -> hw/block/q3n-nand.c on QEMU 11.x
+qemu/hw/mtd/q3n-media.c        -> hw/block/q3n-media.c on QEMU 11.x
 qemu/hw/mtd/meson.build        -> merge the listed line into hw/block/meson.build
 qemu/hw/mtd/Kconfig            -> merge CONFIG_Q3N_NAND into hw/block/Kconfig
 ```
@@ -24,7 +26,9 @@ Implemented base functions:
 | PCI BAR0 wrapper for x86_64 discovery | Implemented as `q3n-nand-pci` |
 | 2 die x 4 plane geometry constants | Implemented |
 | 208/32/3/4 scheme D block-pool defaults | Implemented |
-| Sparse 16KiB page media | Implemented |
+| Versioned sparse physical NAND image | Implemented (`Q3NMEDIA`, v1) |
+| Normal QEMU restart persistence | Implemented through `BlockBackend` |
+| First-page `OOB[0]` bad-block marker | Implemented (`0xff` good, `0x00` bad) |
 | 25MiB data block erase | Implemented |
 | Basic page read/program/block erase commands | Implemented |
 | Combined main+OOB page read/program commands | Implemented |
@@ -33,7 +37,7 @@ Implemented base functions:
 | Basic media statistics | Implemented |
 | Page-raid/parity append/recovery | Not implemented in QEMU |
 | Parity log GC | Not implemented in QEMU |
-| Checkpoint/replay | Not implemented in QEMU |
+| Physical frontier/status replay ABI | Implemented; Linux rebuilds RAID state |
 | Linux PCI probe driver | Implemented |
 | Linux MTD registration | Implemented in the Linux overlay |
 | Linux driver-owned scheme D page-raid | Implemented in the Linux overlay |
@@ -56,6 +60,8 @@ The MMIO interface is intentionally simple for the first bring-up:
 | `Q3N_REG_FAULT_ADDR_LO/HI` | `0x0060/0x0064` | Physical byte address for fault injection |
 | `Q3N_REG_FAULT_CTRL` | `0x0068` | Write `Q3N_FAULT_INJECT_DATA_LOSS` to drop one stored data page |
 | `Q3N_REG_STAT_ORDER_ERRORS` | `0x007c` | Rejected out-of-order page programs |
+| `Q3N_REG_BLOCK_STATUS` | `0x0080` | Selected physical block bad/erased state |
+| `Q3N_REG_BLOCK_NEXT_PAGE` | `0x0084` | Selected block's persistent program frontier |
 | `Q3N_REG_DATA` | `0x1000` | PIO data window |
 
 The model exposes a flat physical flash address space:
@@ -67,6 +73,25 @@ physical byte address -> physical block -> page
 After erase, each block accepts page 0 first and advances `next_prog_page` only
 after a successful program. Programs that skip or move backward fail without
 advancing the block state.
+
+## Persistent physical media
+
+The PCI wrapper requires a writable BlockBackend. `scripts/run-qemu.sh` connects
+the default sparse raw image as `q3n-nand-pci,drive=q3n-media`; `--fresh-nand`
+removes that image before QEMU starts and `--nand-image` selects another path.
+
+Image v1 begins with a 4 KiB `Q3NMEDIA` header followed by fixed block-state and
+page-state arrays. Each physical page has a deterministic 16 KiB main + 1 KiB
+OOB slot. Erased slots remain sparse holes. The first physical page of every
+block reserves OOB byte 0 as the Linux-compatible bad-block marker. A dedicated
+mark-bad command programs only that byte and does not advance `next_prog_page`.
+
+This format contains no stripe, parity, generation, MTD, UBI, or FTL semantics.
+QEMU persists physical NAND facts only. On probe, the Linux driver queries each
+physical data block, rebuilds its serial Page-RAID index, and completes a tail
+whose frontier is exactly `D0..D6` before registering the MTD device. The current
+durability contract covers normal QEMU shutdown; crash/kill recovery is not
+claimed.
 
 For x86_64 bring-up, use the PCI wrapper:
 

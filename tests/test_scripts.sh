@@ -45,6 +45,7 @@ for file in \
   scripts/build-rootfs.sh \
   scripts/build-module.sh \
   scripts/run-qemu.sh \
+  scripts/q3n-persistence-smoke.sh \
   scripts/gdb-kernel.sh \
   scripts/smoke-test.sh \
   configs/linux/qemu-x86_64-debug.fragment \
@@ -88,6 +89,7 @@ for file in \
   scripts/build-rootfs.sh \
   scripts/build-module.sh \
   scripts/run-qemu.sh \
+  scripts/q3n-persistence-smoke.sh \
   scripts/gdb-kernel.sh \
   scripts/smoke-test.sh \
   rootfs/init \
@@ -134,7 +136,7 @@ assert_contains scripts/build-rootfs.sh 'flash_erase'
 assert_contains scripts/build-rootfs.sh 'ld-linux-x86-64.so.2'
 assert_contains rootfs/init 'poweroff -f'
 assert_contains rootfs/init 'debugfs'
-assert_contains rootfs/init 'MTD_SMOKE.*ubifs'
+assert_contains rootfs/init 'ubifs.*mtd_ubifs'
 assert_contains scripts/run-qemu.sh '-s -S'
 assert_contains configs/linux/mtd.fragment 'CONFIG_MTD_NAND_NANDSIM'
 assert_contains configs/linux/qemu-x86_64-lean.fragment 'CONFIG_DRM is not set'
@@ -155,6 +157,20 @@ assert_contains rootfs/profile.d/mtd.sh 'q3n-serial-smoke'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-generation-smoke'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-cancel-barrier-smoke'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-markbad-smoke'
+assert_contains rootfs/profile.d/mtd.sh 'q3n-persist-prepare'
+assert_contains rootfs/profile.d/mtd.sh 'q3n-persist-verify'
+assert_contains rootfs/profile.d/mtd.sh 'q3n-tail-prepare'
+assert_contains rootfs/profile.d/mtd.sh 'q3n-tail-verify'
+assert_contains rootfs/profile.d/mtd.sh 'q3n-tail-fail-verify'
+assert_contains rootfs/profile.d/mtd.sh 'error -EIO: failed to register MTD'
+assert_contains rootfs/init 'q3n-persist-prepare.*mtd_q3n_persist_prepare'
+assert_contains rootfs/init 'q3n-persist-verify.*mtd_q3n_persist_verify'
+assert_contains scripts/q3n-persistence-smoke.sh '--fresh-nand'
+assert_contains scripts/q3n-persistence-smoke.sh 'q3n-persist-prepare'
+assert_contains scripts/q3n-persistence-smoke.sh 'q3n-persist-verify'
+assert_contains scripts/q3n-persistence-smoke.sh 'q3n-tail-prepare'
+assert_contains scripts/q3n-persistence-smoke.sh 'q3n-tail-verify'
+assert_contains scripts/q3n-persistence-smoke.sh 'q3n-tail-fail-verify'
 assert_contains scripts/build-rootfs.sh 'mtd_badblock.c'
 assert_contains rootfs/profile.d/mtd.sh 'cancel_writer_pid=\$!'
 assert_contains rootfs/profile.d/mtd.sh 'wait "\$cancel_writer_pid"'
@@ -166,6 +182,10 @@ assert_contains rootfs/profile.d/mtd.sh 'parity_written'
 assert_contains README.md 'QEMU'
 assert_contains README.md 'MTD'
 assert_contains README.md 'MTD_SMOKE=ubifs'
+assert_contains README.md 'q3n-persistence-smoke.sh'
+assert_contains README.md '--fresh-nand'
+assert_contains qemu/README.md 'Q3NMEDIA'
+assert_contains qemu/README.md 'OOB byte 0'
 assert_contains qemu/include/hw/mtd/q3n-nand.h 'TYPE_Q3N_NAND'
 assert_contains qemu/include/hw/mtd/q3n-nand.h 'TYPE_Q3N_NAND_PCI'
 assert_contains qemu/include/hw/mtd/q3n-nand.h 'Q3N_PCI_VENDOR_ID'
@@ -217,6 +237,8 @@ assert_contains qemu/hw/mtd/q3n-media.c 'Q3NMEDIA'
 assert_contains qemu/hw/mtd/q3n-media.c 'blk_truncate'
 assert_contains qemu/hw/mtd/q3n-media.c 'blk_pread'
 assert_contains qemu/hw/mtd/q3n-media.c 'blk_pwrite'
+assert_contains qemu/hw/mtd/q3n-media.c 'inconsistent page state/frontier'
+assert_contains qemu/hw/mtd/q3n-media.c 'm->bad\[block\].*oob\[0\]'
 assert_contains qemu/hw/mtd/meson.build 'q3n-pci.c'
 assert_contains qemu/hw/mtd/meson.build 'CONFIG_Q3N_NAND'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'MODULE_DEVICE_TABLE\(pci, qemu_3dnand_id_table\)'

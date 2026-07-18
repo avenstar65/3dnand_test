@@ -98,6 +98,127 @@ mtd_q3n_markbad_smoke() {
   echo "q3n markbad smoke passed"
 }
 
+mtd_q3n_persist_prepare() {
+  mtd_load_q3n || return 1
+  mtd_num=$(mtd_find_q3n)
+  [ -n "$mtd_num" ] || return 1
+  mtd_dev="/dev/mtd${mtd_num}"
+  stats=/sys/kernel/debug/qemu_3dnand
+  erasesize=$(cat "/sys/class/mtd/mtd${mtd_num}/erasesize") || return 1
+  parity_before=$(cat "$stats/parity_written") || return 1
+
+  flash_erase -q "$mtd_dev" 0 1 || return 1
+  dd if=/dev/zero of=/tmp/q3n-persist.bin bs=16384 count=8 \
+    2>/dev/null || return 1
+  dd if=/tmp/q3n-persist.bin of="$mtd_dev" bs=16384 count=8 \
+    2>/dev/null || return 1
+  parity_after=$(cat "$stats/parity_written") || return 1
+  [ "$parity_after" -gt "$parity_before" ] || return 1
+  mtd_badblock set "$mtd_dev" "$erasesize" >/dev/null || return 1
+  [ "$(mtd_badblock get "$mtd_dev" "$erasesize")" = "1" ] || return 1
+  sync
+  echo "q3n persistence prepare passed"
+}
+
+mtd_q3n_persist_verify() {
+  mtd_load_q3n || return 1
+  mtd_num=$(mtd_find_q3n)
+  [ -n "$mtd_num" ] || return 1
+  mtd_dev="/dev/mtd${mtd_num}"
+  stats=/sys/kernel/debug/qemu_3dnand
+  erasesize=$(cat "/sys/class/mtd/mtd${mtd_num}/erasesize") || return 1
+  bad_page_seek=$((erasesize / 16384))
+
+  dd if=/dev/zero of=/tmp/q3n-persist-expected.bin bs=16384 count=8 \
+    2>/dev/null || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-persist-read.bin bs=16384 count=8 \
+    2>/dev/null || return 1
+  cmp /tmp/q3n-persist-expected.bin /tmp/q3n-persist-read.bin || return 1
+
+  recovered_before=$(cat "$stats/raid_recovered") || return 1
+  echo 0 > "$stats/inject_data_loss" || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-persist-recovered.bin bs=16384 count=1 \
+    2>/dev/null || return 1
+  cmp /dev/zero /tmp/q3n-persist-recovered.bin -n 16384 || return 1
+  recovered_after=$(cat "$stats/raid_recovered") || return 1
+  [ "$recovered_after" -gt "$recovered_before" ] || return 1
+
+  [ "$(mtd_badblock get "$mtd_dev" "$erasesize")" = "1" ] || return 1
+  if dd if=/dev/zero of="$mtd_dev" bs=16384 count=1 \
+       seek="$bad_page_seek" 2>/tmp/q3n-persist-bad-write.err; then
+    return 1
+  fi
+  flash_erase -q -N "$mtd_dev" "$erasesize" 1 \
+    >/tmp/q3n-persist-bad-erase.err 2>&1 || true
+  grep -q 'MTD Erase failure' /tmp/q3n-persist-bad-erase.err || return 1
+
+  dd if=/dev/zero of="$mtd_dev" bs=16384 count=1 seek=8 \
+    2>/dev/null || return 1
+  sync
+  echo "q3n persistence verify passed"
+}
+
+mtd_q3n_tail_prepare() {
+  inject_loss=${1:-0}
+  mtd_load_q3n || return 1
+  mtd_num=$(mtd_find_q3n)
+  [ -n "$mtd_num" ] || return 1
+  mtd_dev="/dev/mtd${mtd_num}"
+  stats=/sys/kernel/debug/qemu_3dnand
+
+  flash_erase -q "$mtd_dev" 0 1 || return 1
+  echo 0 > "$stats/parity_pause_block" || return 1
+  echo 1 > "$stats/parity_pause_enable" || return 1
+  dd if=/dev/zero of=/tmp/q3n-tail.bin bs=16384 count=7 \
+    2>/dev/null || return 1
+  dd if=/tmp/q3n-tail.bin of="$mtd_dev" bs=16384 count=7 \
+    2>/tmp/q3n-tail-write.err &
+
+  tries=0
+  while [ "$(cat "$stats/parity_paused")" -eq 0 ] && [ "$tries" -lt 20 ]; do
+    sleep 1
+    tries=$((tries + 1))
+  done
+  [ "$(cat "$stats/parity_paused")" -gt 0 ] || return 1
+  if [ "$inject_loss" -eq 1 ]; then
+    echo 0 > "$stats/inject_data_loss" || return 1
+    echo "q3n tail failure prepare passed"
+  else
+    echo "q3n tail prepare passed"
+  fi
+  poweroff -f
+}
+
+mtd_q3n_tail_verify() {
+  mtd_load_q3n || return 1
+  mtd_num=$(mtd_find_q3n)
+  [ -n "$mtd_num" ] || return 1
+  mtd_dev="/dev/mtd${mtd_num}"
+  stats=/sys/kernel/debug/qemu_3dnand
+
+  [ "$(cat "$stats/parity_written")" -eq 1 ] || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-tail-read.bin bs=16384 count=7 \
+    2>/dev/null || return 1
+  cmp /dev/zero /tmp/q3n-tail-read.bin -n 114688 || return 1
+  echo "q3n tail verify passed"
+}
+
+mtd_q3n_tail_fail_verify() {
+  # modprobe reports module insertion, not whether the already-present PCI
+  # device's probe succeeded.  The recovery contract is that no qemu-3dnand
+  # MTD is registered when the incomplete tail cannot be reconstructed.
+  modprobe qemu_3dnand 2>/dev/null || true
+  if ! dmesg | grep -q 'error -EIO: failed to register MTD'; then
+    echo "q3n tail failure: expected recovery -EIO missing"
+    return 1
+  fi
+  if grep -q '"qemu-3dnand"' /proc/mtd; then
+    echo "q3n tail failure: MTD unexpectedly registered"
+    return 1
+  fi
+  echo "q3n tail failure verify passed"
+}
+
 mtd_q3n_generation_smoke() {
   mtd_load_q3n || return 1
   mtd_num=$(mtd_find_q3n)
@@ -343,6 +464,12 @@ case "${1:-}" in
   q3n-generation-smoke) mtd_q3n_generation_smoke ;;
   q3n-cancel-barrier-smoke) mtd_q3n_cancel_barrier_smoke ;;
   q3n-markbad-smoke) mtd_q3n_markbad_smoke ;;
+  q3n-persist-prepare) mtd_q3n_persist_prepare ;;
+  q3n-persist-verify) mtd_q3n_persist_verify ;;
+  q3n-tail-prepare) mtd_q3n_tail_prepare 0 ;;
+  q3n-tail-verify) mtd_q3n_tail_verify ;;
+  q3n-tail-fail-prepare) mtd_q3n_tail_prepare 1 ;;
+  q3n-tail-fail-verify) mtd_q3n_tail_fail_verify ;;
   nandsim) mtd_load_simulators; cat /proc/mtd ;;
   ubifs) mtd_ubifs ;;
   clean) mtd_clean ;;

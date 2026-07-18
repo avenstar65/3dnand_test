@@ -10,6 +10,7 @@
 #include "hw/mtd/q3n-nand.h"
 #include "block/block_int-common.h"
 #include "qemu/bswap.h"
+#include "qemu/error-report.h"
 #include "system/block-backend.h"
 #include "system/block-backend-io.h"
 
@@ -170,7 +171,7 @@ static int q3n_media_load(Q3NMedia *m, int64_t length, Error **errp)
     Q3NMediaHeader h;
     uint8_t marker;
     uint32_t block;
-    uint64_t page;
+    uint32_t page;
     int ret;
 
     ret = blk_pread(m->blk, 0, sizeof(h), &h, 0);
@@ -198,6 +199,23 @@ static int q3n_media_load(Q3NMedia *m, int64_t length, Error **errp)
             error_setg(errp, "q3n NAND image has invalid program frontier");
             return -EINVAL;
         }
+        for (page = 0; page < m->pages_per_block; page++) {
+            uint8_t state = m->page_state[
+                q3n_media_page_index(m, block, page)];
+
+            if (state > Q3N_MEDIA_PAGE_LOST) {
+                error_setg(errp, "q3n NAND image has invalid page state");
+                return -EINVAL;
+            }
+            if ((page < m->next_prog_page[block] &&
+                 state == Q3N_MEDIA_PAGE_ERASED) ||
+                (page >= m->next_prog_page[block] &&
+                 state != Q3N_MEDIA_PAGE_ERASED)) {
+                error_setg(errp,
+                           "q3n NAND image has inconsistent page state/frontier");
+                return -EINVAL;
+            }
+        }
         ret = blk_pread(m->blk,
                         q3n_media_slot_offset(m, block, 0) + m->page_size,
                         1, &marker, 0);
@@ -205,12 +223,6 @@ static int q3n_media_load(Q3NMedia *m, int64_t length, Error **errp)
             return ret;
         }
         m->bad[block] = marker != Q3N_BBM_GOOD;
-    }
-    for (page = 0; page < m->page_count; page++) {
-        if (m->page_state[page] > Q3N_MEDIA_PAGE_LOST) {
-            error_setg(errp, "q3n NAND image has invalid page state");
-            return -EINVAL;
-        }
     }
     return 0;
 }
@@ -268,11 +280,17 @@ fail:
 
 void q3n_media_close(Q3NMedia *m)
 {
+    int ret;
+
     if (!m) {
         return;
     }
     if (m->blk) {
-        blk_flush(m->blk);
+        ret = blk_flush(m->blk);
+        if (ret < 0) {
+            error_report("cannot flush q3n NAND image: %s",
+                         strerror(-ret));
+        }
     }
     g_free(m->bad);
     g_free(m->page_state);
@@ -370,6 +388,9 @@ int q3n_media_program_page(Q3NMedia *m, uint32_t block, uint32_t page,
     }
     m->page_state[index] = present;
     m->next_prog_page[block] = next;
+    if (page == 0) {
+        m->bad[block] = oob && oob[0] != Q3N_BBM_GOOD;
+    }
     return 0;
 }
 
