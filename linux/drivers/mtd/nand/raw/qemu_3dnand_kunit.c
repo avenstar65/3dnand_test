@@ -57,6 +57,41 @@ static void q3n_map_rejects_invalid_input_test(struct kunit *test)
 			-EINVAL);
 }
 
+static void q3n_replay_serial_frontier_test(struct kunit *test)
+{
+	u8 data_valid[16] = {};
+	u8 parity_valid[2] = {};
+	bool needs_tail;
+
+	KUNIT_ASSERT_EQ(test, q3n_replay_serial_frontier(16, 10,
+						 data_valid, parity_valid,
+						 &needs_tail), 0);
+	KUNIT_EXPECT_EQ(test, data_valid[0], 1);
+	KUNIT_EXPECT_EQ(test, data_valid[6], 1);
+	KUNIT_EXPECT_EQ(test, data_valid[7], 0);
+	KUNIT_EXPECT_EQ(test, data_valid[8], 1);
+	KUNIT_EXPECT_EQ(test, data_valid[9], 1);
+	KUNIT_EXPECT_EQ(test, parity_valid[0], 1);
+	KUNIT_EXPECT_EQ(test, parity_valid[1], 0);
+	KUNIT_EXPECT_FALSE(test, needs_tail);
+
+	memset(data_valid, 0, sizeof(data_valid));
+	memset(parity_valid, 0, sizeof(parity_valid));
+	KUNIT_ASSERT_EQ(test, q3n_replay_serial_frontier(16, 7,
+						 data_valid, parity_valid,
+						 &needs_tail), 0);
+	KUNIT_EXPECT_TRUE(test, needs_tail);
+	KUNIT_EXPECT_EQ(test, q3n_replay_serial_frontier(16, 17,
+						 data_valid, parity_valid,
+						 &needs_tail), -EINVAL);
+	KUNIT_EXPECT_EQ(test, q3n_replay_serial_frontier(15, 0,
+						 data_valid, parity_valid,
+						 &needs_tail), -EINVAL);
+	KUNIT_EXPECT_EQ(test, q3n_replay_serial_frontier(16, 0, NULL,
+						 parity_valid, &needs_tail),
+			-EINVAL);
+}
+
 static void q3n_program_order_test(struct kunit *test)
 {
 	struct q3n_block_state state = { .next_prog_page = 17 };
@@ -341,6 +376,7 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_map_separate_parity_block_test),
 	KUNIT_CASE(q3n_map_non_power_of_two_geometry_test),
 	KUNIT_CASE(q3n_map_rejects_invalid_input_test),
+	KUNIT_CASE(q3n_replay_serial_frontier_test),
 	KUNIT_CASE(q3n_program_order_test),
 	KUNIT_CASE(q3n_serial_same_block_mapping_test),
 	KUNIT_CASE(q3n_incremental_xor_test),

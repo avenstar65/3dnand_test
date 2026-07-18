@@ -71,6 +71,7 @@ struct qemu_3dnand {
 	u32 parity_blocks_per_plane;
 	u32 metadata_blocks_per_plane;
 	u32 reserve_blocks_per_plane;
+	u32 cap;
 	u32 data_block_count;
 	u32 parity_block_count;
 	u32 raid_group_count;
@@ -236,6 +237,25 @@ static int qemu_3dnand_erase_phys_block_locked(struct qemu_3dnand *q3n,
 	return qemu_3dnand_wait_ready(q3n);
 }
 
+static int qemu_3dnand_get_phys_block_status_locked(
+		struct qemu_3dnand *q3n, u32 block, u32 *status, u32 *next_page)
+{
+	int ret;
+
+	if (block >= q3n->data_block_count || !status || !next_page)
+		return -EINVAL;
+
+	qemu_3dnand_set_addr(q3n, qemu_3dnand_phys_addr(q3n, block, 0));
+	qemu_3dnand_writel(q3n, Q3N_REG_CMD, Q3N_CMD_GET_BLOCK_STATUS);
+	ret = qemu_3dnand_wait_ready(q3n);
+	if (ret)
+		return ret;
+
+	*status = qemu_3dnand_readl(q3n, Q3N_REG_BLOCK_STATUS);
+	*next_page = qemu_3dnand_readl(q3n, Q3N_REG_BLOCK_NEXT_PAGE);
+	return 0;
+}
+
 static void qemu_3dnand_decode_logical(struct qemu_3dnand *q3n, loff_t addr,
 				       u32 *data_block, u32 *page,
 				       u32 *column)
@@ -325,7 +345,7 @@ static int qemu_3dnand_commit_parity_locked(struct qemu_3dnand *q3n,
 	return 0;
 }
 
-static int __maybe_unused qemu_3dnand_append_parity_locked(struct qemu_3dnand *q3n,
+static int qemu_3dnand_append_parity_locked(struct qemu_3dnand *q3n,
 					    u32 block, u32 stripe)
 {
 	struct qemu_3dnand_parity_entry *entry;
@@ -350,6 +370,86 @@ static int __maybe_unused qemu_3dnand_append_parity_locked(struct qemu_3dnand *q
 
 	return qemu_3dnand_commit_parity_locked(q3n, block, stripe, entry,
 						q3n->raid_buf);
+}
+
+static int qemu_3dnand_restore_media_locked(struct qemu_3dnand *q3n)
+{
+	u32 stripes_per_block = q3n->pages_per_block / Q3N_STRIPE_PAGES;
+	u8 *parity_valid;
+	u32 block;
+	int ret = 0;
+
+	parity_valid = kcalloc(stripes_per_block, sizeof(*parity_valid),
+			       GFP_KERNEL);
+	if (!parity_valid)
+		return -ENOMEM;
+
+	for (block = 0; block < q3n->data_block_count; block++) {
+		struct qemu_3dnand_data_block_meta *meta =
+			&q3n->data_meta[block];
+		u8 *data_valid = &q3n->data_page_valid[
+			qemu_3dnand_data_page_index(q3n, block, 0)];
+		u32 status;
+		u32 next_page;
+		u32 stripe;
+		bool needs_tail_parity;
+
+		ret = qemu_3dnand_get_phys_block_status_locked(q3n, block,
+							     &status, &next_page);
+		if (ret)
+			break;
+
+		meta->bad = status & Q3N_BLOCK_STATUS_BAD;
+		meta->erased = status & Q3N_BLOCK_STATUS_ERASED;
+		q3n->program_state[block].next_prog_page = next_page;
+		if (meta->bad)
+			continue;
+
+		ret = q3n_replay_serial_frontier(q3n->pages_per_block,
+						 next_page, data_valid,
+						 parity_valid,
+						 &needs_tail_parity);
+		if (ret)
+			break;
+
+		for (stripe = 0; stripe < stripes_per_block; stripe++) {
+			struct qemu_3dnand_parity_entry *entry;
+
+			if (!parity_valid[stripe])
+				continue;
+			entry = &q3n->parity_index[
+				qemu_3dnand_parity_index(q3n, block, stripe)];
+			entry->physical_block = block;
+			entry->page = stripe * Q3N_STRIPE_PAGES +
+				      Q3N_DATA_PAGES;
+			entry->data_block_generation[0] = meta->generation;
+			entry->parity_version = 1;
+			entry->sequence = ++q3n->parity_sequence;
+			entry->valid = true;
+		}
+
+		if (needs_tail_parity) {
+			u32 restored_status;
+			u32 restored_next;
+
+			ret = qemu_3dnand_append_parity_locked(q3n, block,
+							  next_page /
+							  Q3N_STRIPE_PAGES);
+			if (ret)
+				break;
+			ret = qemu_3dnand_get_phys_block_status_locked(
+				q3n, block, &restored_status, &restored_next);
+			if (ret)
+				break;
+			if (restored_next != next_page + 1) {
+				ret = -EIO;
+				break;
+			}
+		}
+	}
+
+	kfree(parity_valid);
+	return ret;
 }
 
 static void qemu_3dnand_parity_worker(struct work_struct *work)
@@ -1079,6 +1179,7 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 				     "unexpected q3n id 0x%08x\n", ident);
 
 	cap = qemu_3dnand_readl(q3n, Q3N_REG_CAP);
+	q3n->cap = cap;
 	geom0 = qemu_3dnand_readl(q3n, Q3N_REG_GEOM0);
 	geom1 = qemu_3dnand_readl(q3n, Q3N_REG_GEOM1);
 	pool0 = qemu_3dnand_readl(q3n, Q3N_REG_POOL0);
@@ -1106,7 +1207,9 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 				      sizeof(*q3n->data_meta), GFP_KERNEL);
 	q3n->program_state = devm_kcalloc(dev, q3n->data_block_count,
 					  sizeof(*q3n->program_state), GFP_KERNEL);
-	q3n->parity_index = kvcalloc(q3n->raid_group_count * q3n->pages_per_block,
+	q3n->parity_index = kvcalloc(q3n->data_block_count *
+					     (q3n->pages_per_block /
+					      Q3N_STRIPE_PAGES),
 					     sizeof(*q3n->parity_index),
 					     GFP_KERNEL);
 	if (!q3n->page_buf || !q3n->raid_buf || !q3n->data_page_valid ||
@@ -1118,6 +1221,13 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 		q3n->data_meta[ret].generation = 1;
 		q3n->data_meta[ret].erased = true;
 		q3n_block_barrier_init(&q3n->data_meta[ret].parity_barrier);
+	}
+	if (q3n->cap & Q3N_CAP_PERSISTENT_MEDIA) {
+		mutex_lock(&q3n->mtd_lock);
+		ret = qemu_3dnand_restore_media_locked(q3n);
+		mutex_unlock(&q3n->mtd_lock);
+		if (ret)
+			goto err_free_metadata;
 	}
 
 	ret = qemu_3dnand_register_mtd(q3n);

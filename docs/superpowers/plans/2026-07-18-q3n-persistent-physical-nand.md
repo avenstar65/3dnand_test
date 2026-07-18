@@ -407,7 +407,7 @@ git commit -m "feat: expose persistent NAND block status"
 - Produces: `qemu_3dnand_get_phys_block_status_locked()`。
 - Produces: `qemu_3dnand_restore_media_locked()`，在 MTD 注册前调用。
 
-- [ ] **Step 1: 写失败的 KUnit**
+- [x] **Step 1: 写失败的 KUnit**
 
 接口：
 
@@ -447,13 +447,13 @@ static void q3n_replay_serial_frontier_test(struct kunit *test)
 }
 ```
 
-- [ ] **Step 2: 构建并确认 RED**
+- [x] **Step 2: 构建并确认 RED**
 
 Run: Task 2 的 raw NAND module build。
 
 Expected: compile/link 失败，缺少 `q3n_replay_serial_frontier`。
 
-- [ ] **Step 3: 实现 pure replay helper**
+- [x] **Step 3: 实现 pure replay helper**
 
 helper 先清空 `pages_per_block` 个 data-valid byte 和
 `pages_per_block / 8` 个 parity-valid byte，然后遍历 `[0,next_prog_page)`：
@@ -469,7 +469,7 @@ else
 拒绝 `pages_per_block == 0`、非 8 整除、`next_prog_page > pages_per_block` 或
 NULL 参数。
 
-- [ ] **Step 4: 实现 status query 和 probe 重放**
+- [x] **Step 4: 实现 status query 和 probe 重放**
 
 status helper 设置 block 首 page 物理地址，执行 GET 命令并读取：
 
@@ -492,14 +492,14 @@ bad block 只恢复 bad cache 和物理 frontier，用于诊断；不得尝试�
 调用点必须位于 buffers、metadata、workqueue 和 mutex 初始化之后，
 `mtd_device_register()` 之前。
 
-- [ ] **Step 5: 完成余数 7 的 parity**
+- [x] **Step 5: 完成余数 7 的 parity**
 
 若 helper 返回 `needs_tail_parity=true`，在 probe 单线程上下文调用现有同步
 `qemu_3dnand_append_parity_locked(q3n, block, next_page / 8)`。成功后 frontier
 必须为 `next_page + 1` 且 parity entry valid；失败时 probe 返回错误并清理资源。
 该函数从本任务起是 probe 恢复路径的正式入口，移除其 `__maybe_unused` 标记。
 
-- [ ] **Step 6: GREEN 验证**
+- [x] **Step 6: GREEN 验证**
 
 ```bash
 ./scripts/smoke-test.sh

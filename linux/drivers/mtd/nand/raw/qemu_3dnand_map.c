@@ -108,5 +108,28 @@ bool q3n_program_order_ready(const struct q3n_block_state *state, u32 page)
 	return state && page == state->next_prog_page;
 }
 
+int q3n_replay_serial_frontier(u32 pages_per_block, u32 next_prog_page,
+			       u8 *data_valid, u8 *parity_valid,
+			       bool *needs_tail_parity)
+{
+	u32 page;
+
+	if (!pages_per_block || pages_per_block % 8 ||
+	    next_prog_page > pages_per_block || !data_valid || !parity_valid ||
+	    !needs_tail_parity)
+		return -EINVAL;
+
+	memset(data_valid, 0, pages_per_block);
+	memset(parity_valid, 0, pages_per_block / 8);
+	for (page = 0; page < next_prog_page; page++) {
+		if (page % 8 == 7)
+			parity_valid[page / 8] = 1;
+		else
+			data_valid[page] = 1;
+	}
+	*needs_tail_parity = next_prog_page % 8 == 7;
+	return 0;
+}
+
 MODULE_DESCRIPTION("QEMU 3D NAND pure address mapper");
 MODULE_LICENSE("GPL");
