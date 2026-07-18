@@ -185,10 +185,22 @@ for symbol in \
   assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h "$symbol"
   assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
 done
+for symbol in \
+  Q3N_CAP_PERSISTENT_MEDIA \
+  Q3N_CAP_BAD_BLOCK_MARKER \
+  Q3N_CMD_GET_BLOCK_STATUS \
+  Q3N_CMD_MARK_BAD_BLOCK \
+  Q3N_REG_BLOCK_STATUS \
+  Q3N_REG_BLOCK_NEXT_PAGE; do
+  assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h "$symbol"
+  assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
+done
+assert_contains qemu/include/hw/mtd/q3n-media.h 'Q3N_BBM_GOOD.*0xff'
+assert_contains qemu/include/hw/mtd/q3n-media.h 'Q3N_BBM_BAD.*0x00'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_erase_block'
 assert_contains qemu/hw/mtd/q3n-nand.c 'next_prog_page'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_check_program_order'
-assert_contains qemu/hw/mtd/q3n-media.c 'Q3N_MEDIA_BBM_GOOD'
+assert_contains qemu/hw/mtd/q3n-media.c 'Q3N_BBM_GOOD'
 assert_contains qemu/hw/mtd/q3n-nand.c 'stat_order_errors'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_inject_data_loss'
 assert_contains qemu/hw/mtd/q3n-nand.c 'faults_injected'

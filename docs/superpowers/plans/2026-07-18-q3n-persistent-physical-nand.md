@@ -306,7 +306,7 @@ git commit -m "feat: persist physical NAND media"
 - Produces ABI: `Q3N_CMD_GET_BLOCK_STATUS=8`、`Q3N_CMD_MARK_BAD_BLOCK=9`。
 - Produces registers: `Q3N_REG_BLOCK_STATUS=0x0080`、`Q3N_REG_BLOCK_NEXT_PAGE=0x0084`。
 
-- [ ] **Step 1: 添加失败的 ABI 同步门禁**
+- [x] **Step 1: 添加失败的 ABI 同步门禁**
 
 ```sh
 for symbol in Q3N_CAP_PERSISTENT_MEDIA Q3N_CAP_BAD_BLOCK_MARKER \
@@ -319,13 +319,13 @@ assert_contains qemu/include/hw/mtd/q3n-media.h 'Q3N_BBM_GOOD.*0xff'
 assert_contains qemu/include/hw/mtd/q3n-media.h 'Q3N_BBM_BAD.*0x00'
 ```
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 Run: `./scripts/smoke-test.sh`
 
 Expected: FAIL on `Q3N_CAP_PERSISTENT_MEDIA`。
 
-- [ ] **Step 3: 定义完全一致的 ABI**
+- [x] **Step 3: 定义完全一致的 ABI**
 
 双方头文件增加：
 
@@ -346,7 +346,7 @@ Q3N_CMD_GET_BLOCK_STATUS = 8,
 Q3N_CMD_MARK_BAD_BLOCK = 9,
 ```
 
-- [ ] **Step 4: 实现物理状态和专用 BBM program**
+- [x] **Step 4: 实现物理状态和专用 BBM program**
 
 media 接口：
 
@@ -371,7 +371,7 @@ read 不因 bad 被拒绝。
 controller 命令要求 `addr` 对齐 `erase_size`，把结果锁存在两个新 MMIO
 register 中。非法地址或 media error 进入 `q3n_finish_error()`。
 
-- [ ] **Step 5: GREEN 验证**
+- [x] **Step 5: GREEN 验证**
 
 ```bash
 ./scripts/smoke-test.sh

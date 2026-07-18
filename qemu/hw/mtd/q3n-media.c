@@ -7,6 +7,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/mtd/q3n-media.h"
+#include "hw/mtd/q3n-nand.h"
 #include "block/block_int-common.h"
 #include "qemu/bswap.h"
 #include "system/block-backend.h"
@@ -18,7 +19,6 @@
 #define Q3N_MEDIA_PAGE_ERASED       0
 #define Q3N_MEDIA_PAGE_PRESENT      1
 #define Q3N_MEDIA_PAGE_LOST         2
-#define Q3N_MEDIA_BBM_GOOD          0xff
 
 typedef struct Q3NMediaHeader {
     uint8_t magic[8];
@@ -110,7 +110,7 @@ static void q3n_media_calculate_layout(Q3NMedia *m)
 
 static int q3n_media_create(Q3NMedia *m, Error **errp)
 {
-    uint8_t marker = Q3N_MEDIA_BBM_GOOD;
+    uint8_t marker = Q3N_BBM_GOOD;
     uint32_t block;
     int ret;
 
@@ -204,7 +204,7 @@ static int q3n_media_load(Q3NMedia *m, int64_t length, Error **errp)
         if (ret < 0) {
             return ret;
         }
-        m->bad[block] = marker != Q3N_MEDIA_BBM_GOOD;
+        m->bad[block] = marker != Q3N_BBM_GOOD;
     }
     for (page = 0; page < m->page_count; page++) {
         if (m->page_state[page] > Q3N_MEDIA_PAGE_LOST) {
@@ -328,9 +328,11 @@ int q3n_media_program_page(Q3NMedia *m, uint32_t block, uint32_t page,
     uint32_t next_le;
     int ret;
 
-    if (block >= m->block_count || page >= m->pages_per_block ||
-        m->bad[block]) {
+    if (block >= m->block_count || page >= m->pages_per_block) {
         return -EINVAL;
+    }
+    if (m->bad[block]) {
+        return -EIO;
     }
     index = q3n_media_page_index(m, block, page);
     if (page != m->next_prog_page[block]) {
@@ -378,8 +380,11 @@ int q3n_media_erase_block(Q3NMedia *m, uint32_t block)
     uint32_t next_le = 0;
     int ret;
 
-    if (block >= m->block_count || m->bad[block]) {
+    if (block >= m->block_count) {
         return -EINVAL;
+    }
+    if (m->bad[block]) {
+        return -EIO;
     }
     first = q3n_media_page_index(m, block, 0);
     erased = g_new0(uint8_t, m->pages_per_block);
@@ -425,4 +430,55 @@ int q3n_media_inject_loss(Q3NMedia *m, uint32_t block, uint32_t page)
 uint32_t q3n_media_next_prog_page(const Q3NMedia *m, uint32_t block)
 {
     return block < m->block_count ? m->next_prog_page[block] : UINT32_MAX;
+}
+
+int q3n_media_get_block_status(Q3NMedia *m, uint32_t block,
+                               uint32_t *status, uint32_t *next_page)
+{
+    uint8_t marker;
+    int ret;
+
+    if (block >= m->block_count || !status || !next_page) {
+        return -EINVAL;
+    }
+    ret = blk_pread(m->blk,
+                    q3n_media_slot_offset(m, block, 0) + m->page_size,
+                    1, &marker, 0);
+    if (ret < 0) {
+        return ret;
+    }
+    m->bad[block] = marker != Q3N_BBM_GOOD;
+    *status = m->bad[block] ? Q3N_BLOCK_STATUS_BAD : 0;
+    if (m->next_prog_page[block] == 0) {
+        *status |= Q3N_BLOCK_STATUS_ERASED;
+    }
+    *next_page = m->next_prog_page[block];
+    return 0;
+}
+
+int q3n_media_mark_bad(Q3NMedia *m, uint32_t block)
+{
+    uint64_t marker_offset;
+    uint8_t marker;
+    int ret;
+
+    if (block >= m->block_count) {
+        return -EINVAL;
+    }
+    marker_offset = q3n_media_slot_offset(m, block, 0) + m->page_size;
+    ret = blk_pread(m->blk, marker_offset, 1, &marker, 0);
+    if (ret < 0) {
+        return ret;
+    }
+    if (marker != Q3N_BBM_GOOD) {
+        m->bad[block] = true;
+        return 0;
+    }
+    marker = Q3N_BBM_BAD;
+    ret = blk_pwrite(m->blk, marker_offset, 1, &marker, 0);
+    if (ret < 0) {
+        return ret;
+    }
+    m->bad[block] = true;
+    return 0;
 }

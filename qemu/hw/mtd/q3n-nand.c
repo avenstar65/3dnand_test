@@ -18,7 +18,6 @@
 #include "qemu/module.h"
 
 #define Q3N_ID_VALUE                  0x314e3351U /* "Q3N1" */
-#define Q3N_CAP_BASIC_FLASH           (1U << 0)
 
 typedef struct Q3NStats {
     uint64_t page_programs;
@@ -51,6 +50,8 @@ struct Q3NNandState {
     uint64_t addr;
     uint64_t fault_addr;
     uint32_t fault_ctrl;
+    uint32_t block_status;
+    uint32_t block_next_page;
 
     uint8_t data_buf[Q3N_PAGE_SIZE + Q3N_OOB_SIZE];
     uint32_t data_pos;
@@ -272,6 +273,40 @@ static void q3n_cmd_erase_block(Q3NNandState *s)
     q3n_finish_ok(s);
 }
 
+static bool q3n_decode_block_addr(Q3NNandState *s, uint32_t *block)
+{
+    if (s->addr >= s->physical_size || s->addr % s->erase_size) {
+        return false;
+    }
+    *block = s->addr / s->erase_size;
+    return true;
+}
+
+static void q3n_cmd_get_block_status(Q3NNandState *s)
+{
+    uint32_t block;
+
+    if (!q3n_decode_block_addr(s, &block) ||
+        q3n_media_get_block_status(s->media, block, &s->block_status,
+                                   &s->block_next_page)) {
+        q3n_finish_error(s);
+        return;
+    }
+    q3n_finish_ok(s);
+}
+
+static void q3n_cmd_mark_bad_block(Q3NNandState *s)
+{
+    uint32_t block;
+
+    if (!q3n_decode_block_addr(s, &block) ||
+        q3n_media_mark_bad(s->media, block)) {
+        q3n_finish_error(s);
+        return;
+    }
+    q3n_finish_ok(s);
+}
+
 static void q3n_cmd_reset(Q3NNandState *s)
 {
     q3n_clear_error(s);
@@ -310,6 +345,12 @@ static void q3n_execute_cmd(Q3NNandState *s, uint32_t cmd)
         break;
     case Q3N_CMD_ERASE_BLOCK:
         q3n_cmd_erase_block(s);
+        break;
+    case Q3N_CMD_GET_BLOCK_STATUS:
+        q3n_cmd_get_block_status(s);
+        break;
+    case Q3N_CMD_MARK_BAD_BLOCK:
+        q3n_cmd_mark_bad_block(s);
         break;
     case Q3N_CMD_RESET:
         q3n_cmd_reset(s);
@@ -373,7 +414,8 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
     case Q3N_REG_ID:
         return Q3N_ID_VALUE;
     case Q3N_REG_CAP:
-        return Q3N_CAP_BASIC_FLASH;
+        return Q3N_CAP_BASIC_FLASH | Q3N_CAP_PERSISTENT_MEDIA |
+               Q3N_CAP_BAD_BLOCK_MARKER;
     case Q3N_REG_STATUS:
         return s->status;
     case Q3N_REG_CMD:
@@ -417,6 +459,10 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
         return (uint32_t)s->stats.parity_writes;
     case Q3N_REG_STAT_ORDER_ERRORS:
         return (uint32_t)s->stats.stat_order_errors;
+    case Q3N_REG_BLOCK_STATUS:
+        return s->block_status;
+    case Q3N_REG_BLOCK_NEXT_PAGE:
+        return s->block_next_page;
     case Q3N_REG_FAULT_ADDR_LO:
         return (uint32_t)s->fault_addr;
     case Q3N_REG_FAULT_ADDR_HI:

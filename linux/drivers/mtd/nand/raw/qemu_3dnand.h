@@ -34,9 +34,17 @@
 #define Q3N_REG_STAT_PARITY_READS      0x0074
 #define Q3N_REG_STAT_PARITY_WRITES     0x0078
 #define Q3N_REG_STAT_ORDER_ERRORS      0x007c
+#define Q3N_REG_BLOCK_STATUS           0x0080
+#define Q3N_REG_BLOCK_NEXT_PAGE        0x0084
 #define Q3N_REG_DATA                   0x1000
 
-#define Q3N_CAP_SCHEME_D               BIT(0)
+#define Q3N_CAP_BASIC_FLASH            BIT(0)
+#define Q3N_CAP_SCHEME_D               Q3N_CAP_BASIC_FLASH
+#define Q3N_CAP_PERSISTENT_MEDIA       BIT(1)
+#define Q3N_CAP_BAD_BLOCK_MARKER       BIT(2)
+
+#define Q3N_BLOCK_STATUS_BAD           BIT(0)
+#define Q3N_BLOCK_STATUS_ERASED        BIT(1)
 
 #define Q3N_STATUS_READY               BIT(0)
 #define Q3N_STATUS_ERROR               BIT(1)
@@ -46,6 +54,8 @@
 #define Q3N_CMD_ERASE_BLOCK            4
 #define Q3N_CMD_READ_PAGE_OOB          6
 #define Q3N_CMD_PROGRAM_PAGE_OOB       7
+#define Q3N_CMD_GET_BLOCK_STATUS       8
+#define Q3N_CMD_MARK_BAD_BLOCK         9
 
 #define Q3N_FAULT_INJECT_DATA_LOSS     BIT(0)
 

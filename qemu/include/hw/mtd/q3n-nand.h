@@ -36,6 +36,13 @@ OBJECT_DECLARE_SIMPLE_TYPE(Q3NNandState, Q3N_NAND)
 #define Q3N_DEFAULT_METADATA_BLOCKS_PER_PLANE     3
 #define Q3N_DEFAULT_RESERVE_BLOCKS_PER_PLANE      4
 
+#define Q3N_CAP_BASIC_FLASH             (1U << 0)
+#define Q3N_CAP_PERSISTENT_MEDIA        (1U << 1)
+#define Q3N_CAP_BAD_BLOCK_MARKER        (1U << 2)
+
+#define Q3N_BLOCK_STATUS_BAD            (1U << 0)
+#define Q3N_BLOCK_STATUS_ERASED         (1U << 1)
+
 enum q3n_reg {
     Q3N_REG_ID                 = 0x0000,
     Q3N_REG_CAP                = 0x0004,
@@ -63,6 +70,8 @@ enum q3n_reg {
     Q3N_REG_STAT_PARITY_READS  = 0x0074,
     Q3N_REG_STAT_PARITY_WRITES = 0x0078,
     Q3N_REG_STAT_ORDER_ERRORS  = 0x007c,
+    Q3N_REG_BLOCK_STATUS       = 0x0080,
+    Q3N_REG_BLOCK_NEXT_PAGE    = 0x0084,
     Q3N_REG_DATA               = 0x1000,
 };
 
@@ -75,6 +84,8 @@ enum q3n_cmd {
     Q3N_CMD_RESET      = 5,
     Q3N_CMD_READ_PAGE_OOB = 6,
     Q3N_CMD_PROGRAM_PAGE_OOB = 7,
+    Q3N_CMD_GET_BLOCK_STATUS = 8,
+    Q3N_CMD_MARK_BAD_BLOCK = 9,
 };
 
 enum q3n_status {
