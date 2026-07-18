@@ -237,6 +237,14 @@ static int qemu_3dnand_erase_phys_block_locked(struct qemu_3dnand *q3n,
 	return qemu_3dnand_wait_ready(q3n);
 }
 
+static int qemu_3dnand_mark_phys_block_bad_locked(struct qemu_3dnand *q3n,
+						   u32 block)
+{
+	qemu_3dnand_set_addr(q3n, qemu_3dnand_phys_addr(q3n, block, 0));
+	qemu_3dnand_writel(q3n, Q3N_REG_CMD, Q3N_CMD_MARK_BAD_BLOCK);
+	return qemu_3dnand_wait_ready(q3n);
+}
+
 static int qemu_3dnand_get_phys_block_status_locked(
 		struct qemu_3dnand *q3n, u32 block, u32 *status, u32 *next_page)
 {
@@ -738,6 +746,12 @@ static int qemu_3dnand_mtd_write(struct mtd_info *mtd, loff_t to, size_t len,
 
 		qemu_3dnand_decode_logical(q3n, to + done, &block, &page,
 					   &column);
+		mutex_lock(&q3n->mtd_lock);
+		if (q3n->data_meta[block].bad)
+			ret = -EIO;
+		mutex_unlock(&q3n->mtd_lock);
+		if (ret)
+			break;
 		if (page % Q3N_STRIPE_PAGES == Q3N_DATA_PAGES - 1) {
 			ret = qemu_3dnand_reserve_parity(q3n);
 			if (ret)
@@ -758,6 +772,13 @@ static int qemu_3dnand_mtd_write(struct mtd_info *mtd, loff_t to, size_t len,
 			if (parity_reserved)
 				q3n_sched_release_parity(&q3n->sched);
 			ret = -EBUSY;
+			break;
+		}
+		if (q3n->data_meta[block].bad) {
+			mutex_unlock(&q3n->mtd_lock);
+			if (parity_reserved)
+				q3n_sched_release_parity(&q3n->sched);
+			ret = -EIO;
 			break;
 		}
 		ret = qemu_3dnand_program_phys_page_locked(q3n, block, page,
@@ -844,6 +865,11 @@ static int qemu_3dnand_mtd_erase(struct mtd_info *mtd,
 
 		qemu_3dnand_decode_logical(q3n, instr->addr + done, &block,
 					   &page, &column);
+		if (q3n->data_meta[block].bad) {
+			instr->fail_addr = instr->addr + done;
+			ret = -EIO;
+			break;
+		}
 		ret = qemu_3dnand_cancel_block_parity(q3n, block);
 		if (ret) {
 			instr->fail_addr = instr->addr + done;
@@ -903,10 +929,35 @@ static int qemu_3dnand_mtd_block_isbad(struct mtd_info *mtd, loff_t ofs)
 
 static int qemu_3dnand_mtd_block_markbad(struct mtd_info *mtd, loff_t ofs)
 {
+	struct qemu_3dnand *q3n = mtd->priv;
+	u64 block;
+	int ret;
+
 	if (ofs < 0 || ofs >= mtd->size)
 		return -EINVAL;
+	if (!(q3n->cap & Q3N_CAP_BAD_BLOCK_MARKER))
+		return -EOPNOTSUPP;
+	block = div64_u64(ofs, mtd->erasesize);
+	if (block >= q3n->data_block_count)
+		return -EINVAL;
 
-	return -EOPNOTSUPP;
+	mutex_lock(&q3n->mtd_lock);
+	if (q3n->data_meta[block].bad) {
+		ret = 0;
+		goto out_unlock;
+	}
+	ret = qemu_3dnand_cancel_block_parity(q3n, block);
+	if (ret)
+		goto out_unlock;
+
+	ret = qemu_3dnand_mark_phys_block_bad_locked(q3n, block);
+	if (!ret)
+		q3n->data_meta[block].bad = true;
+	q3n_block_cancel_end(&q3n->data_meta[block].parity_barrier);
+
+out_unlock:
+	mutex_unlock(&q3n->mtd_lock);
+	return ret;
 }
 
 static int qemu_3dnand_register_mtd(struct qemu_3dnand *q3n)

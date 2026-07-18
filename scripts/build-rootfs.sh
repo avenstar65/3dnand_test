@@ -69,6 +69,13 @@ for tool in flash_erase ubiformat ubiattach ubidetach ubimkvol ubinfo; do
   cp "$tool_path" "$stage/usr/sbin/$tool"
 done
 
+rootfs_cc=${ROOTFS_CC:-x86_64-linux-gnu-gcc}
+need_cmd "$rootfs_cc"
+"$rootfs_cc" -O2 -Wall -Wextra -o "$stage/usr/sbin/mtd_badblock" \
+  "$repo_root/rootfs/helpers/mtd_badblock.c"
+file "$stage/usr/sbin/mtd_badblock" | grep -Eq 'x86-64|x86_64' || \
+  die "mtd_badblock 不是 x86_64 ELF"
+
 cp "$repo_root/rootfs/init" "$stage/init"
 cp "$repo_root/rootfs/profile.d/mtd.sh" "$stage/etc/profile.d/mtd.sh"
 chmod +x "$stage/init" "$stage/etc/profile.d/mtd.sh"

@@ -69,6 +69,35 @@ mtd_q3n_serial_smoke() {
   echo "q3n serial smoke passed: parity=$parity_written_after recovered=$raid_recovered_after"
 }
 
+mtd_q3n_markbad_smoke() {
+  mtd_load_q3n || return 1
+  mtd_num=$(mtd_find_q3n)
+  [ -n "$mtd_num" ] || return 1
+  mtd_dev="/dev/mtd${mtd_num}"
+  erasesize=$(cat "/sys/class/mtd/mtd${mtd_num}/erasesize") || return 1
+  offset=$erasesize
+  page_seek=$((erasesize / 16384))
+
+  mtd_badblock set "$mtd_dev" "$offset" >/dev/null || return 1
+  [ "$(mtd_badblock get "$mtd_dev" "$offset")" = "1" ] || return 1
+  dd if=/dev/zero of=/tmp/q3n-bad-page.bin bs=16384 count=1 \
+    2>/dev/null || return 1
+  if dd if=/tmp/q3n-bad-page.bin of="$mtd_dev" bs=16384 count=1 \
+       seek="$page_seek" 2>/tmp/q3n-bad-write.err; then
+    echo "q3n markbad smoke: write to bad block unexpectedly succeeded"
+    return 1
+  fi
+  flash_erase -q -N "$mtd_dev" "$offset" 1 \
+    >/tmp/q3n-bad-erase.err 2>&1 || true
+  grep -q 'MTD Erase failure' /tmp/q3n-bad-erase.err || {
+    echo "q3n markbad smoke: erase of bad block unexpectedly succeeded"
+    return 1
+  }
+  mtd_badblock set "$mtd_dev" "$offset" >/dev/null || return 1
+  [ "$(mtd_badblock get "$mtd_dev" "$offset")" = "1" ] || return 1
+  echo "q3n markbad smoke passed"
+}
+
 mtd_q3n_generation_smoke() {
   mtd_load_q3n || return 1
   mtd_num=$(mtd_find_q3n)
@@ -313,6 +342,7 @@ case "${1:-}" in
   q3n-serial-smoke) mtd_q3n_serial_smoke ;;
   q3n-generation-smoke) mtd_q3n_generation_smoke ;;
   q3n-cancel-barrier-smoke) mtd_q3n_cancel_barrier_smoke ;;
+  q3n-markbad-smoke) mtd_q3n_markbad_smoke ;;
   nandsim) mtd_load_simulators; cat /proc/mtd ;;
   ubifs) mtd_ubifs ;;
   clean) mtd_clean ;;

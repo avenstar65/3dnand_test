@@ -537,22 +537,22 @@ git commit -m "feat: replay serial RAID state from NAND"
 - Produces guest tool: `/usr/sbin/mtd_badblock get|set DEVICE OFFSET`。
 - Produces guest command: `q3n-markbad-smoke`。
 
-- [ ] **Step 1: 添加失败的结构门禁**
+- [x] **Step 1: 添加失败的结构门禁**
 
 ```sh
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_MARK_BAD_BLOCK'
-assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'return -EOPNOTSUPP;'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CAP_BAD_BLOCK_MARKER'
 assert_contains scripts/build-rootfs.sh 'mtd_badblock.c'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-markbad-smoke'
 ```
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 Run: `./scripts/smoke-test.sh`
 
 Expected: FAIL on `Q3N_CMD_MARK_BAD_BLOCK` in the driver。
 
-- [ ] **Step 3: 实现 markbad owner 路径**
+- [x] **Step 3: 实现 markbad owner 路径**
 
 增加物理 helper：
 
@@ -578,7 +578,7 @@ static int qemu_3dnand_mark_phys_block_bad_locked(struct qemu_3dnand *q3n,
 
 write/erase 在物理命令前检查 cache bad 并返回 `-EIO`。read 不增加 bad 拒绝。
 
-- [ ] **Step 4: 实现最小 ioctl 工具**
+- [x] **Step 4: 实现最小 ioctl 工具**
 
 `mtd_badblock.c` 使用：
 
@@ -606,11 +606,12 @@ else
 `build-rootfs.sh` 在生成 cpio 前执行：
 
 ```sh
-${CC:-cc} -O2 -Wall -Wextra -o "$stage/usr/sbin/mtd_badblock" \
+${ROOTFS_CC:-x86_64-linux-gnu-gcc} -O2 -Wall -Wextra \
+  -o "$stage/usr/sbin/mtd_badblock" \
   "$repo_root/rootfs/helpers/mtd_badblock.c"
 ```
 
-- [ ] **Step 5: 实现单次启动 markbad smoke**
+- [x] **Step 5: 实现单次启动 markbad smoke**
 
 `mtd_q3n_markbad_smoke()`：
 
@@ -618,11 +619,12 @@ ${CC:-cc} -O2 -Wall -Wextra -o "$stage/usr/sbin/mtd_badblock" \
 2. 使用 block 1 offset 调 `mtd_badblock set`；
 3. `get` 必须输出 1；
 4. 对该 block 的一页 dd write 必须失败；
-5. `flash_erase -q "$mtd_dev" 1 1` 必须失败；
+5. `flash_erase -q -N "$mtd_dev" "$erasesize" 1` 输出必须包含
+   `MTD Erase failure`（当前 mtd-utils 即使 ioctl 返回 EIO 仍可能 exit 0）；
 6. 再次 set 必须幂等成功；
 7. 输出 `q3n markbad smoke passed`。
 
-- [ ] **Step 6: GREEN 验证**
+- [x] **Step 6: GREEN 验证**
 
 ```bash
 ./scripts/smoke-test.sh

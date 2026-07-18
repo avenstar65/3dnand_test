@@ -52,6 +52,7 @@ for file in \
   configs/linux/mtd.fragment \
   configs/qemu/x86_64.env \
   rootfs/init \
+  rootfs/helpers/mtd_badblock.c \
   rootfs/profile.d/mtd.sh \
   drivers/mtd_demo/Makefile \
   drivers/mtd_demo/mtd_demo.c \
@@ -153,6 +154,8 @@ assert_contains rootfs/profile.d/mtd.sh 'q3n-stats'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-serial-smoke'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-generation-smoke'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-cancel-barrier-smoke'
+assert_contains rootfs/profile.d/mtd.sh 'q3n-markbad-smoke'
+assert_contains scripts/build-rootfs.sh 'mtd_badblock.c'
 assert_contains rootfs/profile.d/mtd.sh 'cancel_writer_pid=\$!'
 assert_contains rootfs/profile.d/mtd.sh 'wait "\$cancel_writer_pid"'
 assert_contains rootfs/profile.d/mtd.sh 'dd if=/tmp/q3n-cancel\.bin of="\$mtd_dev" bs=16384 count=7 2>/tmp/q3n-cancel-dd\.err[[:space:]]*&[[:space:]]*$'
@@ -259,6 +262,8 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_map.c 'div_u64_rem'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_map.c 'q3n_replay_serial_frontier'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_restore_media_locked'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_GET_BLOCK_STATUS'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_MARK_BAD_BLOCK'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CAP_BAD_BLOCK_MARKER'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_validate_manifest'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'Q3N_STRIPE_UNPROTECTED'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'q3n->parity_index = kvcalloc'
