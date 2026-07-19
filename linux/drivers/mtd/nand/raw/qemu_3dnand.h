@@ -11,6 +11,30 @@
 
 #define Q3N_ID_VALUE                   0x314e3351U
 
+#define Q3N_PAGE_SIZE                  (16 * 1024)
+#define Q3N_PHYSICAL_OOB_SIZE          1664U
+#define Q3N_LOGICAL_OOB_SIZE           128U
+#define Q3N_BBM_OOB_OFFSET             0U
+#define Q3N_LDPC_OOB_OFFSET            1U
+#define Q3N_LDPC_BYTES_PER_STEP        96U
+#define Q3N_LDPC_STEPS                 16U
+#define Q3N_LDPC_TOTAL_BYTES           1536U
+#define Q3N_METADATA_OOB_OFFSET        1537U
+#define Q3N_ECC_STEP_SIZE              1024U
+#define Q3N_ECC_STRENGTH               40U
+
+#if Q3N_PAGE_SIZE / Q3N_ECC_STEP_SIZE != Q3N_LDPC_STEPS
+#error "Q3N page must contain one LDPC step per ECC step"
+#endif
+
+#if 1U + Q3N_LDPC_TOTAL_BYTES + 127U != Q3N_PHYSICAL_OOB_SIZE
+#error "Q3N physical OOB layout must be BBM + LDPC + metadata"
+#endif
+
+#if Q3N_LOGICAL_OOB_SIZE != 1U + 127U
+#error "Q3N logical OOB layout must be BBM + metadata"
+#endif
+
 #define Q3N_REG_ID                     0x0000
 #define Q3N_REG_CAP                    0x0004
 #define Q3N_REG_STATUS                 0x000c
@@ -37,6 +61,19 @@
 #define Q3N_REG_STAT_ORDER_ERRORS      0x007c
 #define Q3N_REG_BLOCK_STATUS           0x0080
 #define Q3N_REG_BLOCK_NEXT_PAGE        0x0084
+#define Q3N_REG_ECC_GEOM0               0x0088
+#define Q3N_REG_ECC_GEOM1               0x008c
+#define Q3N_REG_ECC_STATUS              0x0090
+#define Q3N_REG_ECC_MAX_BITFLIPS        0x0094
+#define Q3N_REG_ECC_CORRECTED_BITS      0x0098
+#define Q3N_REG_ECC_FAILED_STEP         0x009c
+#define Q3N_REG_FAULT_STEP              0x00a0
+#define Q3N_REG_FAULT_FIRST_BIT         0x00a4
+#define Q3N_REG_FAULT_COUNT             0x00a8
+#define Q3N_REG_FAULT_REGION            0x00ac
+#define Q3N_REG_STAT_LDPC_CORRECTED     0x00b0
+#define Q3N_REG_STAT_LDPC_UNCORRECTABLE 0x00b4
+#define Q3N_REG_STAT_LDPC_FAILED_STEPS  0x00b8
 #define Q3N_REG_DATA                   0x1000
 
 #define Q3N_CAP_BASIC_FLASH            BIT(0)
@@ -49,6 +86,15 @@
 
 #define Q3N_STATUS_READY               BIT(0)
 #define Q3N_STATUS_ERROR               BIT(1)
+#define Q3N_STATUS_ECC_UNCORRECTABLE   BIT(2)
+
+#define Q3N_ECC_STATUS_CLEAN           0U
+#define Q3N_ECC_STATUS_CORRECTED       BIT(0)
+#define Q3N_ECC_STATUS_UNCORRECTABLE   BIT(1)
+#define Q3N_ECC_NO_FAILED_STEP         0xffffffffU
+
+#define Q3N_FAULT_REGION_MAIN          0U
+#define Q3N_FAULT_REGION_LDPC          1U
 
 #define Q3N_CMD_READ_PAGE              2
 #define Q3N_CMD_PROGRAM_PAGE           3
@@ -61,6 +107,7 @@
 
 #define Q3N_FAULT_INJECT_DATA_LOSS     BIT(0)
 #define Q3N_FAULT_FAIL_NEXT_PROGRAM    BIT(1)
+#define Q3N_FAULT_INJECT_BITFLIPS      BIT(2)
 
 #define Q3N_OP_FOREGROUND              0
 #define Q3N_OP_PARITY_READ             1

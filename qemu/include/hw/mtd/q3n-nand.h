@@ -29,7 +29,29 @@ OBJECT_DECLARE_SIMPLE_TYPE(Q3NNandState, Q3N_NAND)
 #define Q3N_BLOCKS_PER_PLANE          247
 #define Q3N_PAGES_PER_BLOCK           1600
 #define Q3N_PAGE_SIZE                 (16 * 1024)
-#define Q3N_OOB_SIZE                  1024
+#define Q3N_PHYSICAL_OOB_SIZE         1664U
+#define Q3N_LOGICAL_OOB_SIZE          128U
+#define Q3N_BBM_OOB_OFFSET            0U
+#define Q3N_LDPC_OOB_OFFSET           1U
+#define Q3N_LDPC_BYTES_PER_STEP       96U
+#define Q3N_LDPC_STEPS                16U
+#define Q3N_LDPC_TOTAL_BYTES          1536U
+#define Q3N_METADATA_OOB_OFFSET       1537U
+#define Q3N_ECC_STEP_SIZE             1024U
+#define Q3N_ECC_STRENGTH              40U
+#define Q3N_OOB_SIZE                  Q3N_PHYSICAL_OOB_SIZE
+
+#if Q3N_PAGE_SIZE / Q3N_ECC_STEP_SIZE != Q3N_LDPC_STEPS
+#error "Q3N page must contain one LDPC step per ECC step"
+#endif
+
+#if 1U + Q3N_LDPC_TOTAL_BYTES + 127U != Q3N_PHYSICAL_OOB_SIZE
+#error "Q3N physical OOB layout must be BBM + LDPC + metadata"
+#endif
+
+#if Q3N_LOGICAL_OOB_SIZE != 1U + 127U
+#error "Q3N logical OOB layout must be BBM + metadata"
+#endif
 
 #define Q3N_DEFAULT_DATA_BLOCKS_PER_PLANE       208
 #define Q3N_DEFAULT_PARITY_BLOCKS_PER_PLANE      32
@@ -73,6 +95,19 @@ enum q3n_reg {
     Q3N_REG_STAT_ORDER_ERRORS  = 0x007c,
     Q3N_REG_BLOCK_STATUS       = 0x0080,
     Q3N_REG_BLOCK_NEXT_PAGE    = 0x0084,
+    Q3N_REG_ECC_GEOM0          = 0x0088,
+    Q3N_REG_ECC_GEOM1          = 0x008c,
+    Q3N_REG_ECC_STATUS         = 0x0090,
+    Q3N_REG_ECC_MAX_BITFLIPS   = 0x0094,
+    Q3N_REG_ECC_CORRECTED_BITS = 0x0098,
+    Q3N_REG_ECC_FAILED_STEP    = 0x009c,
+    Q3N_REG_FAULT_STEP         = 0x00a0,
+    Q3N_REG_FAULT_FIRST_BIT    = 0x00a4,
+    Q3N_REG_FAULT_COUNT        = 0x00a8,
+    Q3N_REG_FAULT_REGION       = 0x00ac,
+    Q3N_REG_STAT_LDPC_CORRECTED = 0x00b0,
+    Q3N_REG_STAT_LDPC_UNCORRECTABLE = 0x00b4,
+    Q3N_REG_STAT_LDPC_FAILED_STEPS = 0x00b8,
     Q3N_REG_DATA               = 0x1000,
 };
 
@@ -92,6 +127,20 @@ enum q3n_cmd {
 enum q3n_status {
     Q3N_STATUS_READY          = 1U << 0,
     Q3N_STATUS_ERROR          = 1U << 1,
+    Q3N_STATUS_ECC_UNCORRECTABLE = 1U << 2,
+};
+
+enum q3n_ecc_status {
+    Q3N_ECC_STATUS_CLEAN          = 0,
+    Q3N_ECC_STATUS_CORRECTED      = 1U << 0,
+    Q3N_ECC_STATUS_UNCORRECTABLE  = 1U << 1,
+};
+
+#define Q3N_ECC_NO_FAILED_STEP         0xffffffffU
+
+enum q3n_fault_region {
+    Q3N_FAULT_REGION_MAIN = 0,
+    Q3N_FAULT_REGION_LDPC = 1,
 };
 
 enum q3n_irq {
@@ -102,6 +151,7 @@ enum q3n_irq {
 enum q3n_fault {
     Q3N_FAULT_INJECT_DATA_LOSS = 1U << 0,
     Q3N_FAULT_FAIL_NEXT_PROGRAM = 1U << 1,
+    Q3N_FAULT_INJECT_BITFLIPS = 1U << 2,
 };
 
 enum q3n_op_class {

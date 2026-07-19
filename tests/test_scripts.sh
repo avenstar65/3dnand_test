@@ -255,6 +255,18 @@ for symbol in \
   assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h "$symbol"
   assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
 done
+for symbol in \
+  Q3N_PHYSICAL_OOB_SIZE Q3N_LOGICAL_OOB_SIZE Q3N_BBM_OOB_OFFSET \
+  Q3N_LDPC_OOB_OFFSET Q3N_LDPC_BYTES_PER_STEP Q3N_LDPC_STEPS \
+  Q3N_METADATA_OOB_OFFSET Q3N_REG_ECC_GEOM0 Q3N_REG_ECC_GEOM1 \
+  Q3N_REG_ECC_STATUS Q3N_REG_ECC_MAX_BITFLIPS \
+  Q3N_REG_ECC_CORRECTED_BITS Q3N_REG_ECC_FAILED_STEP \
+  Q3N_REG_FAULT_STEP Q3N_REG_FAULT_FIRST_BIT \
+  Q3N_REG_FAULT_COUNT Q3N_REG_FAULT_REGION \
+  Q3N_FAULT_INJECT_BITFLIPS; do
+  assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
+  assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h "$symbol"
+done
 assert_contains qemu/include/hw/mtd/q3n-media.h 'Q3N_BBM_GOOD.*0xff'
 assert_contains qemu/include/hw/mtd/q3n-media.h 'Q3N_BBM_BAD.*0x00'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_erase_block'
