@@ -80,6 +80,7 @@ done
 
 assert_file tests/test_q3n_overlay.c
 assert_file tests/test_q3n_overlay.sh
+assert_file tests/test_q3n_controller.c
 
 for file in \
   scripts/build-image.sh \
@@ -286,6 +287,11 @@ assert_contains qemu/hw/mtd/q3n-nand.c 'stats\.parity_reads\+\+'
 assert_contains qemu/hw/mtd/q3n-nand.c 'stats\.parity_writes\+\+'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_inject_data_loss'
 assert_contains qemu/hw/mtd/q3n-nand.c 'faults_injected'
+assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_logical_to_physical_oob'
+assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_physical_to_logical_oob'
+assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_generate_ldpc_step'
+assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_decode_ldpc'
+assert_contains qemu/hw/mtd/q3n-nand.c 'ecc_max_bitflips'
 assert_not_contains qemu/hw/mtd/q3n-nand.c 'q3n_append_parity_record'
 assert_not_contains qemu/hw/mtd/q3n-nand.c 'q3n_recover_data_page'
 assert_not_contains qemu/hw/mtd/q3n-nand.c 'q3n_invalidate_group_parity'
@@ -383,5 +389,16 @@ assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'IS_ALIGNED\(i
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_map_non_power_of_two_geometry_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_program_order_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_scheduler_tracks_max_pending_test'
+
+controller_tmp=$(mktemp -d "${TMPDIR:-/tmp}/q3n-controller.XXXXXX")
+trap 'rm -rf "$controller_tmp"' EXIT HUP INT TERM
+sed -n '/Q3N_CONTROLLER_HELPERS_BEGIN/,/Q3N_CONTROLLER_HELPERS_END/p' \
+  "$repo_root/qemu/hw/mtd/q3n-nand.c" > \
+  "$controller_tmp/q3n-controller-helpers.inc"
+${CC:-cc} -std=c11 -Wall -Wextra -Werror \
+  -I "$controller_tmp" \
+  "$repo_root/tests/test_q3n_controller.c" \
+  -o "$controller_tmp/test_q3n_controller"
+"$controller_tmp/test_q3n_controller"
 
 printf 'ok: script structure verified\n'

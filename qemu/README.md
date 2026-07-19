@@ -54,15 +54,19 @@ The MMIO interface is intentionally simple for the first bring-up:
 | `Q3N_REG_CMD` | `0x0010` | Execute base commands and combined main+OOB page commands |
 | `Q3N_REG_ADDR_LO/HI` | `0x0014/0x0018` | Physical byte address in the simulated media |
 | `Q3N_REG_LEN` | `0x001c` | Resets PIO buffer for a transfer |
-| `Q3N_REG_GEOM0/1` | `0x0020/0x0024` | Page/OOB and pages/block geometry |
+| `Q3N_REG_GEOM0/1` | `0x0020/0x0024` | 16 KiB page/128 B logical OOB and pages/block geometry |
 | `Q3N_REG_POOL0/1` | `0x0028/0x002c` | Data/parity/meta/reserve pool sizes |
-| `Q3N_REG_OOB_LEN` | `0x0030` | OOB bytes transferred by a combined page command |
+| `Q3N_REG_OOB_LEN` | `0x0030` | Logical OOB bytes transferred by a combined page command (must be 128) |
 | `Q3N_REG_STAT_*` | `0x0040..0x005c` | Page program/block erase/read-error/fault counters |
 | `Q3N_REG_FAULT_ADDR_LO/HI` | `0x0060/0x0064` | Physical byte address for fault injection |
-| `Q3N_REG_FAULT_CTRL` | `0x0068` | Write `Q3N_FAULT_INJECT_DATA_LOSS` to drop one stored data page |
+| `Q3N_REG_FAULT_CTRL` | `0x0068` | Trigger data loss, next-program failure, or persistent bitflip injection |
 | `Q3N_REG_STAT_ORDER_ERRORS` | `0x007c` | Rejected out-of-order page programs |
 | `Q3N_REG_BLOCK_STATUS` | `0x0080` | Selected physical block bad/erased state |
 | `Q3N_REG_BLOCK_NEXT_PAGE` | `0x0084` | Selected block's persistent program frontier |
+| `Q3N_REG_ECC_GEOM0/1` | `0x0088/0x008c` | 1024 B/40 bit ECC and 96 B/16 step LDPC profile |
+| `Q3N_REG_ECC_STATUS..FAILED_STEP` | `0x0090..0x009c` | Latched result of the latest page read |
+| `Q3N_REG_FAULT_STEP..REGION` | `0x00a0..0x00ac` | Step, first bit, count, and main/LDPC region for bitflip injection |
+| `Q3N_REG_STAT_LDPC_*` | `0x00b0..0x00b8` | Corrected bits, uncorrectable pages, and failed steps |
 | `Q3N_REG_DATA` | `0x1000` | PIO data window |
 
 The model exposes a flat physical flash address space:
@@ -95,6 +99,19 @@ these persistent overlays, so injecting the same range twice restores it;
 erasing a block clears all of its overlays. Version 1 images are intentionally
 rejected because their physical-page stride and OOB semantics are incompatible
 with version 2.
+
+The controller exposes only a 128 B logical OOB: byte 0 maps to the physical
+bad-block marker and bytes 1..127 map to physical bytes 1537..1663. Programming
+a page fills the raw OOB with `0xff`, applies that mapping, and deterministically
+generates all 16 simulated LDPC steps from the physical page key, profile,
+step, and 1024 B main-data step. The physical LDPC bytes are never reachable
+through the PIO OOB window.
+
+Reads combine the persistent main and LDPC overlay popcounts per step. Up to 40
+flipped bits are corrected and return the original main data; 41 or more bits,
+or an LDPC value that does not match the stored main, latch an uncorrectable
+result and failed-step index. Erased pages use implicit all-`0xff` data and do
+not require generated LDPC, but their overlays use the same thresholds.
 
 This format contains no stripe, parity, generation, MTD, UBI, or FTL semantics.
 QEMU persists physical NAND facts only. On probe, the Linux driver queries each

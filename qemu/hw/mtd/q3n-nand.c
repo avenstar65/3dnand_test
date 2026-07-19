@@ -15,9 +15,132 @@
 #include "hw/core/sysbus.h"
 #include "qapi/error.h"
 #include "qemu/bitops.h"
+#include "qemu/crc32c.h"
+#include "qemu/host-utils.h"
 #include "qemu/module.h"
 
 #define Q3N_ID_VALUE                  0x314e3351U /* "Q3N1" */
+
+/* Q3N_CONTROLLER_HELPERS_BEGIN */
+#define Q3N_LDPC_PROFILE_VERSION      1U
+typedef struct Q3NEccResult {
+    uint32_t status;
+    uint32_t ecc_max_bitflips;
+    uint32_t ecc_corrected_bits;
+    uint32_t failed_step;
+    uint32_t failed_steps;
+} Q3NEccResult;
+
+static void q3n_physical_to_logical_oob(const uint8_t *physical,
+                                         uint8_t *logical)
+{
+    logical[0] = physical[Q3N_BBM_OOB_OFFSET];
+    memcpy(logical + 1, physical + Q3N_METADATA_OOB_OFFSET,
+           Q3N_LOGICAL_OOB_SIZE - 1);
+}
+
+static void q3n_logical_to_physical_oob(const uint8_t *logical,
+                                         uint8_t *physical)
+{
+    physical[Q3N_BBM_OOB_OFFSET] = logical[0];
+    memcpy(physical + Q3N_METADATA_OOB_OFFSET, logical + 1,
+           Q3N_LOGICAL_OOB_SIZE - 1);
+}
+
+static void q3n_generate_ldpc_step(uint64_t page_key, uint32_t step,
+                                   const uint8_t *data, uint8_t *ldpc)
+{
+    uint64_t page_key_le = cpu_to_le64(page_key);
+    uint32_t step_le = cpu_to_le32(step);
+    uint32_t profile_le = cpu_to_le32(Q3N_LDPC_PROFILE_VERSION);
+    uint32_t crc;
+
+    crc = crc32c(UINT32_MAX, (const uint8_t *)&page_key_le,
+                 sizeof(page_key_le));
+    crc = crc32c(crc ^ UINT32_MAX, (const uint8_t *)&step_le,
+                 sizeof(step_le));
+    crc = crc32c(crc ^ UINT32_MAX, (const uint8_t *)&profile_le,
+                 sizeof(profile_le));
+    crc = crc32c(crc ^ UINT32_MAX, data, Q3N_ECC_STEP_SIZE);
+
+    for (uint32_t word = 0;
+         word < Q3N_LDPC_BYTES_PER_STEP / sizeof(uint32_t); word++) {
+        uint32_t counter_le = cpu_to_le32(word);
+        uint32_t output_le;
+
+        crc = crc32c(crc ^ UINT32_MAX, (const uint8_t *)&counter_le,
+                     sizeof(counter_le));
+        output_le = cpu_to_le32(crc);
+        memcpy(ldpc + word * sizeof(output_le), &output_le,
+               sizeof(output_le));
+    }
+}
+
+static uint32_t q3n_overlay_popcount(const uint8_t *overlay, uint32_t size)
+{
+    uint32_t count = 0;
+
+    for (uint32_t i = 0; i < size; i++) {
+        count += ctpop8(overlay[i]);
+    }
+    return count;
+}
+
+static Q3NEccResult q3n_decode_ldpc(uint64_t page_key, const uint8_t *data,
+                                    const uint8_t *physical_oob,
+                                    const uint8_t *main_overlay,
+                                    const uint8_t *ldpc_overlay, bool erased)
+{
+    Q3NEccResult result = {
+        .status = Q3N_ECC_STATUS_CLEAN,
+        .failed_step = Q3N_ECC_NO_FAILED_STEP,
+    };
+
+    for (uint32_t step = 0; step < Q3N_LDPC_STEPS; step++) {
+        const uint8_t *main_errors =
+            main_overlay + step * Q3N_ECC_STEP_SIZE;
+        const uint8_t *ldpc_errors =
+            ldpc_overlay + step * Q3N_LDPC_BYTES_PER_STEP;
+        const uint8_t *stored_ldpc =
+            physical_oob + Q3N_LDPC_OOB_OFFSET +
+            step * Q3N_LDPC_BYTES_PER_STEP;
+        uint8_t expected_ldpc[Q3N_LDPC_BYTES_PER_STEP];
+        uint32_t bitflips;
+        bool ldpc_matches = true;
+
+        bitflips = q3n_overlay_popcount(main_errors, Q3N_ECC_STEP_SIZE) +
+                   q3n_overlay_popcount(ldpc_errors,
+                                        Q3N_LDPC_BYTES_PER_STEP);
+        if (!erased) {
+            q3n_generate_ldpc_step(page_key, step,
+                                   data + step * Q3N_ECC_STEP_SIZE,
+                                   expected_ldpc);
+            ldpc_matches = !memcmp(stored_ldpc, expected_ldpc,
+                                   sizeof(expected_ldpc));
+        }
+        if (!ldpc_matches || bitflips > Q3N_ECC_STRENGTH) {
+            if (result.failed_step == Q3N_ECC_NO_FAILED_STEP) {
+                result.failed_step = step;
+            }
+            result.failed_steps++;
+            continue;
+        }
+        if (bitflips) {
+            result.ecc_corrected_bits += bitflips;
+            if (bitflips > result.ecc_max_bitflips) {
+                result.ecc_max_bitflips = bitflips;
+            }
+        }
+    }
+
+    if (result.failed_steps) {
+        result.status = Q3N_ECC_STATUS_UNCORRECTABLE;
+    } else if (result.ecc_corrected_bits) {
+        result.status = Q3N_ECC_STATUS_CORRECTED;
+    }
+    return result;
+}
+/* Q3N_CONTROLLER_HELPERS_END */
 
 typedef struct Q3NStats {
     uint64_t page_programs;
@@ -28,6 +151,9 @@ typedef struct Q3NStats {
     uint64_t parity_reads;
     uint64_t parity_writes;
     uint64_t stat_order_errors;
+    uint64_t ldpc_corrected_bits;
+    uint64_t ldpc_uncorrectable_pages;
+    uint64_t ldpc_failed_steps;
 } Q3NStats;
 
 struct Q3NNandState {
@@ -50,13 +176,24 @@ struct Q3NNandState {
     uint64_t addr;
     uint64_t fault_addr;
     uint32_t fault_ctrl;
+    uint32_t fault_step;
+    uint32_t fault_first_bit;
+    uint32_t fault_count;
+    uint32_t fault_region;
     uint32_t op_class;
     uint64_t fail_program_addr;
     bool fail_next_program;
     uint32_t block_status;
     uint32_t block_next_page;
+    uint32_t ecc_status;
+    uint32_t ecc_max_bitflips;
+    uint32_t ecc_corrected_bits;
+    uint32_t ecc_failed_step;
 
-    uint8_t data_buf[Q3N_PAGE_SIZE + Q3N_OOB_SIZE];
+    uint8_t data_buf[Q3N_PAGE_SIZE + Q3N_LOGICAL_OOB_SIZE];
+    uint8_t physical_oob[Q3N_PHYSICAL_OOB_SIZE];
+    uint8_t main_overlay[Q3N_PAGE_SIZE];
+    uint8_t ldpc_overlay[Q3N_LDPC_TOTAL_BYTES];
     uint32_t data_pos;
     uint32_t data_count;
 
@@ -86,13 +223,38 @@ static bool q3n_decode_addr(Q3NNandState *s, uint64_t byte_addr,
 static int q3n_read_page(Q3NNandState *s, uint32_t block, uint32_t page,
                          uint8_t *buf, uint8_t *oob)
 {
-    int ret = q3n_media_read_page(s->media, block, page, buf, oob,
-                                  NULL, NULL);
+    uint64_t page_key = (uint64_t)block * Q3N_PAGES_PER_BLOCK + page;
+    bool erased = page >= q3n_media_next_prog_page(s->media, block);
+    Q3NEccResult result;
+    int ret;
+
+    ret = q3n_media_read_page(s->media, block, page, buf, s->physical_oob,
+                              s->main_overlay, s->ldpc_overlay);
 
     if (ret) {
         s->stats.page_read_errors++;
+        return ret;
     }
-    return ret;
+
+    result = q3n_decode_ldpc(page_key, buf, s->physical_oob,
+                             s->main_overlay, s->ldpc_overlay, erased);
+    s->ecc_status = result.status;
+    s->ecc_max_bitflips = result.ecc_max_bitflips;
+    s->ecc_corrected_bits = result.ecc_corrected_bits;
+    s->ecc_failed_step = result.failed_step;
+    s->stats.ldpc_corrected_bits += result.ecc_corrected_bits;
+    if (result.status == Q3N_ECC_STATUS_UNCORRECTABLE) {
+        s->status |= Q3N_STATUS_ECC_UNCORRECTABLE;
+        s->stats.ldpc_uncorrectable_pages++;
+        s->stats.ldpc_failed_steps += result.failed_steps;
+        for (uint32_t i = 0; i < Q3N_PAGE_SIZE; i++) {
+            buf[i] ^= s->main_overlay[i];
+        }
+    }
+    if (oob) {
+        q3n_physical_to_logical_oob(s->physical_oob, oob);
+    }
+    return 0;
 }
 
 static bool q3n_check_program_order(Q3NNandState *s, uint32_t block,
@@ -117,6 +279,9 @@ static bool q3n_program_page(Q3NNandState *s, uint32_t block,
                              uint32_t page, const uint8_t *buf,
                              const uint8_t *oob)
 {
+    uint8_t logical_oob[Q3N_LOGICAL_OOB_SIZE];
+    uint8_t physical_oob[Q3N_PHYSICAL_OOB_SIZE];
+    uint64_t page_key = (uint64_t)block * Q3N_PAGES_PER_BLOCK + page;
     int ret;
 
     if (block >= s->physical_block_count || page >= Q3N_PAGES_PER_BLOCK) {
@@ -131,7 +296,20 @@ static bool q3n_program_page(Q3NNandState *s, uint32_t block,
         return false;
     }
 
-    ret = q3n_media_program_page(s->media, block, page, buf, oob);
+    memset(logical_oob, 0xff, sizeof(logical_oob));
+    if (oob) {
+        memcpy(logical_oob, oob, sizeof(logical_oob));
+    }
+    memset(physical_oob, 0xff, sizeof(physical_oob));
+    q3n_logical_to_physical_oob(logical_oob, physical_oob);
+    for (uint32_t step = 0; step < Q3N_LDPC_STEPS; step++) {
+        q3n_generate_ldpc_step(page_key, step,
+                               buf + step * Q3N_ECC_STEP_SIZE,
+                               physical_oob + Q3N_LDPC_OOB_OFFSET +
+                               step * Q3N_LDPC_BYTES_PER_STEP);
+    }
+
+    ret = q3n_media_program_page(s->media, block, page, buf, physical_oob);
     if (ret) {
         return false;
     }
@@ -146,6 +324,23 @@ static bool q3n_inject_data_loss(Q3NNandState *s, uint64_t byte_addr)
     uint32_t column;
     if (!q3n_decode_addr(s, byte_addr, &block, &page, &column) || column != 0 ||
         q3n_media_inject_loss(s->media, block, page)) {
+        return false;
+    }
+
+    s->stats.faults_injected++;
+    return true;
+}
+
+static bool q3n_inject_bitflips(Q3NNandState *s, uint64_t byte_addr)
+{
+    uint32_t block;
+    uint32_t page;
+    uint32_t column;
+
+    if (!q3n_decode_addr(s, byte_addr, &block, &page, &column) || column != 0 ||
+        q3n_media_inject_bitflips(s->media, block, page, s->fault_step,
+                                 s->fault_region, s->fault_first_bit,
+                                 s->fault_count)) {
         return false;
     }
 
@@ -174,6 +369,15 @@ static void q3n_raise_irq(Q3NNandState *s, uint32_t bits)
 static void q3n_clear_error(Q3NNandState *s)
 {
     s->status &= ~Q3N_STATUS_ERROR;
+}
+
+static void q3n_clear_ecc_result(Q3NNandState *s)
+{
+    s->status &= ~Q3N_STATUS_ECC_UNCORRECTABLE;
+    s->ecc_status = Q3N_ECC_STATUS_CLEAN;
+    s->ecc_max_bitflips = 0;
+    s->ecc_corrected_bits = 0;
+    s->ecc_failed_step = Q3N_ECC_NO_FAILED_STEP;
 }
 
 static void q3n_finish_ok(Q3NNandState *s)
@@ -205,6 +409,7 @@ static void q3n_cmd_read_page(Q3NNandState *s)
     uint32_t page;
     uint32_t column;
 
+    q3n_clear_ecc_result(s);
     if (!q3n_decode_addr(s, s->addr, &block, &page, &column) || column != 0) {
         q3n_finish_error(s);
         return;
@@ -258,8 +463,9 @@ static void q3n_cmd_read_page_oob(Q3NNandState *s)
     uint32_t page;
     uint32_t column;
 
+    q3n_clear_ecc_result(s);
     if (!q3n_decode_addr(s, s->addr, &block, &page, &column) || column != 0 ||
-        s->oob_len != Q3N_OOB_SIZE ||
+        s->oob_len != Q3N_LOGICAL_OOB_SIZE ||
         q3n_read_page(s, block, page, s->data_buf,
                       s->data_buf + Q3N_PAGE_SIZE)) {
         q3n_finish_error(s);
@@ -272,7 +478,7 @@ static void q3n_cmd_read_page_oob(Q3NNandState *s)
         s->stats.fg_ops++;
     }
 
-    s->data_count = Q3N_PAGE_SIZE + Q3N_OOB_SIZE;
+    s->data_count = Q3N_PAGE_SIZE + Q3N_LOGICAL_OOB_SIZE;
     s->data_pos = 0;
     q3n_finish_ok(s);
 }
@@ -283,8 +489,8 @@ static void q3n_cmd_program_page_oob(Q3NNandState *s)
     uint32_t page;
     uint32_t column;
 
-    if (s->data_count < Q3N_PAGE_SIZE + Q3N_OOB_SIZE ||
-        s->oob_len != Q3N_OOB_SIZE ||
+    if (s->data_count < Q3N_PAGE_SIZE + Q3N_LOGICAL_OOB_SIZE ||
+        s->oob_len != Q3N_LOGICAL_OOB_SIZE ||
         !q3n_decode_addr(s, s->addr, &block, &page, &column) || column != 0) {
         q3n_finish_error(s);
         return;
@@ -362,6 +568,7 @@ static void q3n_cmd_reset(Q3NNandState *s)
     s->data_count = 0;
     s->irq_status = 0;
     qemu_irq_lower(s->irq);
+    q3n_clear_ecc_result(s);
     q3n_finish_ok(s);
 }
 
@@ -453,7 +660,7 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
     Q3NNandState *s = opaque;
 
     if (offset >= Q3N_REG_DATA &&
-        offset < Q3N_REG_DATA + Q3N_PAGE_SIZE + Q3N_OOB_SIZE) {
+        offset < Q3N_REG_DATA + Q3N_PAGE_SIZE + Q3N_LOGICAL_OOB_SIZE) {
         return q3n_read_data_window(s, size);
     }
 
@@ -478,7 +685,8 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
     case Q3N_REG_OP_CLASS:
         return s->op_class;
     case Q3N_REG_GEOM0:
-        return (Q3N_PAGE_SIZE & 0xffffU) | (Q3N_OOB_SIZE << 16);
+        return (Q3N_PAGE_SIZE & 0xffffU) |
+               (Q3N_LOGICAL_OOB_SIZE << 16);
     case Q3N_REG_GEOM1:
         return (Q3N_PAGES_PER_BLOCK & 0xffffU) |
                (Q3N_BLOCKS_PER_PLANE << 16);
@@ -518,6 +726,34 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
         return (uint32_t)(s->fault_addr >> 32);
     case Q3N_REG_FAULT_CTRL:
         return s->fault_ctrl;
+    case Q3N_REG_ECC_GEOM0:
+        return (Q3N_ECC_STEP_SIZE & 0xffffU) |
+               (Q3N_ECC_STRENGTH << 16);
+    case Q3N_REG_ECC_GEOM1:
+        return (Q3N_LDPC_BYTES_PER_STEP & 0xffffU) |
+               (Q3N_LDPC_STEPS << 16);
+    case Q3N_REG_ECC_STATUS:
+        return s->ecc_status;
+    case Q3N_REG_ECC_MAX_BITFLIPS:
+        return s->ecc_max_bitflips;
+    case Q3N_REG_ECC_CORRECTED_BITS:
+        return s->ecc_corrected_bits;
+    case Q3N_REG_ECC_FAILED_STEP:
+        return s->ecc_failed_step;
+    case Q3N_REG_FAULT_STEP:
+        return s->fault_step;
+    case Q3N_REG_FAULT_FIRST_BIT:
+        return s->fault_first_bit;
+    case Q3N_REG_FAULT_COUNT:
+        return s->fault_count;
+    case Q3N_REG_FAULT_REGION:
+        return s->fault_region;
+    case Q3N_REG_STAT_LDPC_CORRECTED:
+        return (uint32_t)s->stats.ldpc_corrected_bits;
+    case Q3N_REG_STAT_LDPC_UNCORRECTABLE:
+        return (uint32_t)s->stats.ldpc_uncorrectable_pages;
+    case Q3N_REG_STAT_LDPC_FAILED_STEPS:
+        return (uint32_t)s->stats.ldpc_failed_steps;
     default:
         return 0;
     }
@@ -529,7 +765,7 @@ static void q3n_mmio_write(void *opaque, hwaddr offset, uint64_t value,
     Q3NNandState *s = opaque;
 
     if (offset >= Q3N_REG_DATA &&
-        offset < Q3N_REG_DATA + Q3N_PAGE_SIZE + Q3N_OOB_SIZE) {
+        offset < Q3N_REG_DATA + Q3N_PAGE_SIZE + Q3N_LOGICAL_OOB_SIZE) {
         q3n_write_data_window(s, value, size);
         return;
     }
@@ -570,12 +806,28 @@ static void q3n_mmio_write(void *opaque, hwaddr offset, uint64_t value,
         s->fault_addr = ((uint64_t)(uint32_t)value << 32) |
                         (uint32_t)s->fault_addr;
         break;
+    case Q3N_REG_FAULT_STEP:
+        s->fault_step = value;
+        break;
+    case Q3N_REG_FAULT_FIRST_BIT:
+        s->fault_first_bit = value;
+        break;
+    case Q3N_REG_FAULT_COUNT:
+        s->fault_count = value;
+        break;
+    case Q3N_REG_FAULT_REGION:
+        s->fault_region = value;
+        break;
     case Q3N_REG_FAULT_CTRL:
         q3n_disarm_program_fault(s);
         s->fault_ctrl = 0;
         q3n_clear_error(s);
         if ((value & Q3N_FAULT_INJECT_DATA_LOSS) &&
             !q3n_inject_data_loss(s, s->fault_addr)) {
+            s->status |= Q3N_STATUS_ERROR;
+        }
+        if ((value & Q3N_FAULT_INJECT_BITFLIPS) &&
+            !q3n_inject_bitflips(s, s->fault_addr)) {
             s->status |= Q3N_STATUS_ERROR;
         }
         if (value & Q3N_FAULT_FAIL_NEXT_PROGRAM) {
@@ -659,6 +911,7 @@ static void q3n_realize(DeviceState *dev, Error **errp)
         return;
     }
     s->status = Q3N_STATUS_READY;
+    q3n_clear_ecc_result(s);
 }
 
 static void q3n_unrealize(DeviceState *dev)
