@@ -14,6 +14,8 @@ info "应用 q3n-nand overlay 到: $qemu_dir"
 cp "$overlay_dir/hw/mtd/q3n-nand.c" "$qemu_dir/hw/block/q3n-nand.c"
 cp "$overlay_dir/hw/mtd/q3n-pci.c" "$qemu_dir/hw/block/q3n-pci.c"
 cp "$overlay_dir/hw/mtd/q3n-media.c" "$qemu_dir/hw/block/q3n-media.c"
+cp "$overlay_dir/hw/mtd/q3n-media-overlay.h" \
+   "$qemu_dir/hw/block/q3n-media-overlay.h"
 cp "$overlay_dir/include/hw/mtd/q3n-nand.h" "$qemu_dir/include/hw/mtd/q3n-nand.h"
 cp "$overlay_dir/include/hw/mtd/q3n-media.h" "$qemu_dir/include/hw/mtd/q3n-media.h"
 

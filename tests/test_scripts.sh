@@ -70,12 +70,16 @@ for file in \
   qemu/include/hw/mtd/q3n-media.h \
   qemu/include/hw/mtd/q3n-nand.h \
   qemu/hw/mtd/q3n-media.c \
+  qemu/hw/mtd/q3n-media-overlay.h \
   qemu/hw/mtd/q3n-nand.c \
   qemu/hw/mtd/q3n-pci.c \
   qemu/hw/mtd/meson.build \
   qemu/hw/mtd/Kconfig; do
   assert_file "$file"
 done
+
+assert_file tests/test_q3n_overlay.c
+assert_file tests/test_q3n_overlay.sh
 
 for file in \
   scripts/build-image.sh \
@@ -293,6 +297,7 @@ assert_contains qemu/hw/mtd/q3n-media.c 'Q3N_MEDIA_VERSION[[:space:]]+2'
 assert_contains qemu/hw/mtd/q3n-media.c 'physical_oob_size'
 assert_contains qemu/hw/mtd/q3n-media.c 'overlay_slots_offset'
 assert_contains qemu/hw/mtd/q3n-media.c 'q3n_media_inject_bitflips'
+assert_contains qemu/hw/mtd/q3n-media-overlay.h 'Q3N_MEDIA_OVERLAY_STRIDE'
 assert_contains qemu/hw/mtd/q3n-media.c 'Q3N_METADATA_OOB_OFFSET'
 assert_contains qemu/hw/mtd/q3n-media.c 'blk_truncate'
 assert_contains qemu/hw/mtd/q3n-media.c 'blk_pread'

@@ -14,6 +14,7 @@ qemu/include/hw/mtd/q3n-nand.h -> include/hw/mtd/q3n-nand.h
 qemu/include/hw/mtd/q3n-media.h -> include/hw/mtd/q3n-media.h
 qemu/hw/mtd/q3n-nand.c         -> hw/block/q3n-nand.c on QEMU 11.x
 qemu/hw/mtd/q3n-media.c        -> hw/block/q3n-media.c on QEMU 11.x
+qemu/hw/mtd/q3n-media-overlay.h -> hw/block/q3n-media-overlay.h on QEMU 11.x
 qemu/hw/mtd/meson.build        -> merge the listed line into hw/block/meson.build
 qemu/hw/mtd/Kconfig            -> merge CONFIG_Q3N_NAND into hw/block/Kconfig
 ```
@@ -89,7 +90,7 @@ Linux-compatible bad-block marker. A dedicated mark-bad command
 programs only that byte and does not advance `next_prog_page`.
 
 The page slots are followed by sparse, fixed-size error-overlay slots. Each page
-has a 2048 B main bitmap and a 192 B LDPC bitmap. Fault injection XORs bits in
+has a 16384 B main bitmap and a 1536 B LDPC bitmap. Fault injection XORs bits in
 these persistent overlays, so injecting the same range twice restores it;
 erasing a block clears all of its overlays. Version 1 images are intentionally
 rejected because their physical-page stride and OOB semantics are incompatible

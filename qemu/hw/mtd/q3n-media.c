@@ -8,6 +8,7 @@
 #include "qemu/osdep.h"
 #include "hw/mtd/q3n-media.h"
 #include "hw/mtd/q3n-nand.h"
+#include "q3n-media-overlay.h"
 #include "block/block_int-common.h"
 #include "qemu/bswap.h"
 #include "qemu/error-report.h"
@@ -161,7 +162,8 @@ static bool q3n_media_calculate_layout(Q3NMedia *m)
                         &page_slots_end) ||
         !q3n_media_align_up(page_slots_end, Q3N_MEDIA_HEADER_SIZE,
                             &m->overlay_slots_offset) ||
-        uadd64_overflow(Q3N_PAGE_SIZE / 8, Q3N_LDPC_TOTAL_BYTES / 8,
+        uadd64_overflow(Q3N_MEDIA_MAIN_OVERLAY_BYTES,
+                        Q3N_MEDIA_LDPC_OVERLAY_BYTES,
                         &m->overlay_stride) ||
         umul64_overflow(m->page_count, m->overlay_stride,
                         &m->overlay_slots_length) ||
@@ -432,15 +434,17 @@ int q3n_media_read_page(Q3NMedia *m, uint32_t block, uint32_t page,
 
     overlay_slot = q3n_media_overlay_slot_offset(m, block, page);
     if (main_overlay) {
-        ret = blk_pread(m->blk, overlay_slot, m->page_size / 8,
+        ret = blk_pread(m->blk, overlay_slot,
+                        Q3N_MEDIA_MAIN_OVERLAY_BYTES,
                         main_overlay, 0);
         if (ret < 0) {
             return ret;
         }
     }
     if (ldpc_overlay) {
-        ret = blk_pread(m->blk, overlay_slot + m->page_size / 8,
-                        Q3N_LDPC_TOTAL_BYTES / 8, ldpc_overlay, 0);
+        ret = blk_pread(m->blk,
+                        overlay_slot + Q3N_MEDIA_MAIN_OVERLAY_BYTES,
+                        Q3N_MEDIA_LDPC_OVERLAY_BYTES, ldpc_overlay, 0);
         if (ret < 0) {
             return ret;
         }
@@ -583,30 +587,11 @@ int q3n_media_inject_bitflips(Q3NMedia *m, uint32_t block, uint32_t page,
                               uint32_t first_bit, uint32_t count)
 {
     uint64_t overlay_slot;
-    uint32_t bit;
-    uint32_t limit;
-    uint32_t region_offset;
-    uint32_t step_bit;
     uint8_t *overlay;
     int ret;
 
     if (block >= m->block_count || page >= m->pages_per_block ||
-        step >= Q3N_LDPC_STEPS) {
-        return -EINVAL;
-    }
-    switch (region) {
-    case Q3N_FAULT_REGION_MAIN:
-        limit = Q3N_ECC_STEP_SIZE * 8;
-        region_offset = 0;
-        break;
-    case Q3N_FAULT_REGION_LDPC:
-        limit = Q3N_LDPC_BYTES_PER_STEP * 8;
-        region_offset = m->page_size / 8;
-        break;
-    default:
-        return -EINVAL;
-    }
-    if (first_bit > limit || count > limit - first_bit) {
+        !q3n_media_overlay_range(step, region, first_bit, count, NULL)) {
         return -EINVAL;
     }
     if (count == 0) {
@@ -620,12 +605,9 @@ int q3n_media_inject_bitflips(Q3NMedia *m, uint32_t block, uint32_t page,
         g_free(overlay);
         return ret;
     }
-    step_bit = step * limit + first_bit;
-    for (bit = 0; bit < count; bit++) {
-        uint32_t overlay_bit = step_bit + bit;
-
-        overlay[region_offset + overlay_bit / 8] ^=
-            1U << (overlay_bit % 8);
+    if (!q3n_media_overlay_xor(overlay, step, region, first_bit, count)) {
+        g_free(overlay);
+        return -EINVAL;
     }
     ret = blk_pwrite(m->blk, overlay_slot, m->overlay_stride, overlay, 0);
     g_free(overlay);
