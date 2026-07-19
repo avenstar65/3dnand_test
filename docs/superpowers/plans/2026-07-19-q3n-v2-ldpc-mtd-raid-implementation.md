@@ -185,7 +185,7 @@ uint64_t overlay_slots_length;
 
 ```c
 m->page_stride = (uint64_t)m->page_size + Q3N_PHYSICAL_OOB_SIZE;
-m->overlay_stride = Q3N_PAGE_SIZE / 8 + Q3N_LDPC_TOTAL_BYTES / 8;
+m->overlay_stride = Q3N_PAGE_SIZE + Q3N_LDPC_TOTAL_BYTES;
 m->overlay_slots_offset = QEMU_ALIGN_UP(
     m->page_slots_offset + m->page_count * m->page_stride,
     Q3N_MEDIA_HEADER_SIZE);
@@ -194,6 +194,8 @@ m->image_size = m->overlay_slots_offset + m->overlay_slots_length;
 ```
 
 每次乘加前使用 QEMU overflow helper；超出 `INT64_MAX` 时 realize 失败。保持 sparse truncate，不写满 page/overlay slots。
+
+一个overlay bitmap bit对应一个介质bit，因此16 KiB main需要16384 B bitmap，1536 B LDPC需要1536 B bitmap，固定stride为17920 B；不得再次对介质字节数除以8。
 
 - [ ] **Step 4: 改造 raw page API**
 
@@ -228,6 +230,8 @@ int q3n_media_inject_bitflips(Q3NMedia *m, uint32_t block, uint32_t page,
 ```
 
 MAIN 每 step 8192 bit，LDPC 每 step 768 bit。读取对应 overlay slot、逐 bit XOR、写回并 flush；重复注入相同范围恢复。erase block 把该块全部 overlay slot 写零。参数验证使用 `count <= limit - first_bit`，拒绝溢出。
+
+增加覆盖MAIN和LDPC的step 0、1、2、15边界行为测试或可重复的focused harness，确认每个合法step只修改17920 B slot内对应bitmap区域，step 15末bit不越界，重复注入恢复原值。
 
 - [ ] **Step 7: 验证构建和提交**
 
@@ -653,7 +657,7 @@ Expected: final worktree clean.
 
 ## Plan Self-Review Result
 
-- Spec coverage: v2 image、18048 B page、BBM可写logical OOB[0]、96 B/step LDPC、persistent overlay、MTD ECC语义、后台统计隔离、manifest持久化、CRC恢复和重启测试均有明确任务。
+- Spec coverage: v2 image、18048 B page、BBM可写logical OOB[0]、96 B/step LDPC、17920 B/page persistent overlay、MTD ECC语义、后台统计隔离、manifest持久化、CRC恢复和重启测试均有明确任务。
 - Existing-code correction: 当前manifest仅有结构/KUnit而未接入主路径，Task 4明确完成真实OOB持久化，不再假设其已经存在。
 - Placeholder scan: 每个错误路径、offset、接口、命令和期望结果均已确定，无延后实现项。
 - Type consistency: QEMU内部使用`Q3NEccResult`；Linux跨文件统一使用`struct q3n_ecc_result`；所有ABI名称在Task 1定义后复用。

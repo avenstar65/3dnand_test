@@ -102,13 +102,14 @@ controller 负责：
 采用错误覆盖层，不直接覆写 main 或 LDPC 原始内容。每个存在错误的物理页保存两个稀疏 bitmap：
 
 ```text
-main overlay:  16 KiB / 8 = 2048 B
-LDPC overlay: 1536 B / 8 =  192 B
+main overlay:  16384 B（每个main data bit对应一个bitmap bit）
+LDPC overlay:   1536 B（每个LDPC bit对应一个bitmap bit）
+overlay stride: 17920 B
 ```
 
 注入参数包含：物理 main 地址、step、区域（main/LDPC）、step 内首 bit 和数量。同一 bit 再次注入等价于再次翻转，因此两次注入恢复原状态。
 
-overlay 必须随 v2 镜像持久化，以便现有“重启后恢复”测试覆盖 ECC 场景。v2 header 增加 overlay state/slot 区的 offset 和 length；每页 overlay slot 固定 2240 B，后端继续依赖 sparse allocation，不做全量预分配。erase block 将对应 overlay slots 写零并清除内存状态。
+overlay 必须随 v2 镜像持久化，以便现有“重启后恢复”测试覆盖 ECC 场景。v2 header 增加 overlay state/slot 区的 offset 和 length；每页 overlay slot 固定 17920 B，后端继续依赖 sparse allocation，不做全量预分配。这里 bitmap 的字节数等于被覆盖区域的字节数，因为每个介质字节包含8个物理bit，而bitmap也用一个字节保存对应的8个翻转状态。erase block 将对应 overlay slots 写零并清除内存状态。
 
 精确边界验证采用减法式检查，拒绝 step、region、first bit、count 越界和整数溢出。
 
