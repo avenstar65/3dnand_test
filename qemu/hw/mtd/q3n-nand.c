@@ -86,7 +86,8 @@ static bool q3n_decode_addr(Q3NNandState *s, uint64_t byte_addr,
 static int q3n_read_page(Q3NNandState *s, uint32_t block, uint32_t page,
                          uint8_t *buf, uint8_t *oob)
 {
-    int ret = q3n_media_read_page(s->media, block, page, buf, oob);
+    int ret = q3n_media_read_page(s->media, block, page, buf, oob,
+                                  NULL, NULL);
 
     if (ret) {
         s->stats.page_read_errors++;

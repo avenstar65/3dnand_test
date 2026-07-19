@@ -26,7 +26,7 @@ Implemented base functions:
 | PCI BAR0 wrapper for x86_64 discovery | Implemented as `q3n-nand-pci` |
 | 2 die x 4 plane geometry constants | Implemented |
 | 208/32/3/4 scheme D block-pool defaults | Implemented |
-| Versioned sparse physical NAND image | Implemented (`Q3NMEDIA`, v1) |
+| Versioned sparse physical NAND image | Implemented (`Q3NMEDIA`, v2) |
 | Normal QEMU restart persistence | Implemented through `BlockBackend` |
 | First-page `OOB[0]` bad-block marker | Implemented (`0xff` good, `0x00` bad) |
 | 25MiB data block erase | Implemented |
@@ -80,11 +80,20 @@ The PCI wrapper requires a writable BlockBackend. `scripts/run-qemu.sh` connects
 the default sparse raw image as `q3n-nand-pci,drive=q3n-media`; `--fresh-nand`
 removes that image before QEMU starts and `--nand-image` selects another path.
 
-Image v1 begins with a 4 KiB `Q3NMEDIA` header followed by fixed block-state and
-page-state arrays. Each physical page has a deterministic 16 KiB main + 1 KiB
-OOB slot. Erased slots remain sparse holes. The first physical page of every
-block reserves OOB byte 0 as the Linux-compatible bad-block marker. A dedicated
-mark-bad command programs only that byte and does not advance `next_prog_page`.
+Image v2 begins with a 4 KiB `Q3NMEDIA` header followed by fixed block-state and
+page-state arrays. Each physical page has a deterministic 16 KiB main + 1664 B
+physical OOB slot: byte 0 is the bad-block marker, bytes 1..1536 hold 16 LDPC
+steps of 96 B each, and bytes 1537..1663 hold metadata. Erased page slots remain
+sparse holes. The first physical page of every block reserves OOB byte 0 as the
+Linux-compatible bad-block marker. A dedicated mark-bad command
+programs only that byte and does not advance `next_prog_page`.
+
+The page slots are followed by sparse, fixed-size error-overlay slots. Each page
+has a 2048 B main bitmap and a 192 B LDPC bitmap. Fault injection XORs bits in
+these persistent overlays, so injecting the same range twice restores it;
+erasing a block clears all of its overlays. Version 1 images are intentionally
+rejected because their physical-page stride and OOB semantics are incompatible
+with version 2.
 
 This format contains no stripe, parity, generation, MTD, UBI, or FTL semantics.
 QEMU persists physical NAND facts only. On probe, the Linux driver queries each
