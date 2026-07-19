@@ -105,6 +105,13 @@ static bool q3n_check_program_order(Q3NNandState *s, uint32_t block,
     return true;
 }
 
+static void q3n_disarm_program_fault(Q3NNandState *s)
+{
+    s->fail_next_program = false;
+    s->fail_program_addr = 0;
+    s->fault_ctrl &= ~Q3N_FAULT_FAIL_NEXT_PROGRAM;
+}
+
 static bool q3n_program_page(Q3NNandState *s, uint32_t block,
                              uint32_t page, const uint8_t *buf,
                              const uint8_t *oob)
@@ -118,8 +125,7 @@ static bool q3n_program_page(Q3NNandState *s, uint32_t block,
         return false;
     }
     if (s->fail_next_program && s->addr == s->fail_program_addr) {
-        s->fail_next_program = false;
-        s->fault_ctrl &= ~Q3N_FAULT_FAIL_NEXT_PROGRAM;
+        q3n_disarm_program_fault(s);
         s->stats.faults_injected++;
         return false;
     }
@@ -348,6 +354,7 @@ static void q3n_cmd_mark_bad_block(Q3NNandState *s)
 
 static void q3n_cmd_reset(Q3NNandState *s)
 {
+    q3n_disarm_program_fault(s);
     q3n_clear_error(s);
     s->cmd = Q3N_CMD_NOP;
     s->data_pos = 0;
@@ -563,7 +570,8 @@ static void q3n_mmio_write(void *opaque, hwaddr offset, uint64_t value,
                         (uint32_t)s->fault_addr;
         break;
     case Q3N_REG_FAULT_CTRL:
-        s->fault_ctrl = value;
+        q3n_disarm_program_fault(s);
+        s->fault_ctrl = 0;
         q3n_clear_error(s);
         if ((value & Q3N_FAULT_INJECT_DATA_LOSS) &&
             !q3n_inject_data_loss(s, s->fault_addr)) {
@@ -577,13 +585,12 @@ static void q3n_mmio_write(void *opaque, hwaddr offset, uint64_t value,
             if (!q3n_decode_addr(s, s->fault_addr, &block, &page,
                                  &column) || column != 0) {
                 s->status |= Q3N_STATUS_ERROR;
-                s->fault_ctrl &= ~Q3N_FAULT_FAIL_NEXT_PROGRAM;
             } else {
                 s->fail_program_addr = s->fault_addr;
                 s->fail_next_program = true;
+                s->fault_ctrl |= Q3N_FAULT_FAIL_NEXT_PROGRAM;
             }
         }
-        s->fault_ctrl &= Q3N_FAULT_FAIL_NEXT_PROGRAM;
         break;
     case Q3N_REG_IRQ_STATUS:
         s->irq_status &= ~(uint32_t)value;

@@ -53,6 +53,7 @@
 #define Q3N_CMD_READ_PAGE              2
 #define Q3N_CMD_PROGRAM_PAGE           3
 #define Q3N_CMD_ERASE_BLOCK            4
+#define Q3N_CMD_RESET                  5
 #define Q3N_CMD_READ_PAGE_OOB          6
 #define Q3N_CMD_PROGRAM_PAGE_OOB       7
 #define Q3N_CMD_GET_BLOCK_STATUS       8

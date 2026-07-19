@@ -45,6 +45,7 @@ for file in \
   scripts/build-rootfs.sh \
   scripts/build-module.sh \
   scripts/run-qemu.sh \
+  scripts/q3n-serial-smoke.sh \
   scripts/q3n-persistence-smoke.sh \
   scripts/gdb-kernel.sh \
   scripts/smoke-test.sh \
@@ -89,6 +90,7 @@ for file in \
   scripts/build-rootfs.sh \
   scripts/build-module.sh \
   scripts/run-qemu.sh \
+  scripts/q3n-serial-smoke.sh \
   scripts/q3n-persistence-smoke.sh \
   scripts/gdb-kernel.sh \
   scripts/smoke-test.sh \
@@ -114,6 +116,9 @@ assert_contains scripts/configure-kernel.sh 'merge_config.sh'
 assert_contains scripts/configure-kernel.sh 'apply-linux-overlay.sh'
 assert_contains scripts/configure-kernel.sh '"\$merge" -m'
 assert_contains scripts/build-kernel.sh 'CROSS_COMPILE'
+assert_contains scripts/build-kernel.sh 'DEPMOD=true'
+assert_contains scripts/build-kernel.sh 'depmod -b'
+assert_contains scripts/build-kernel.sh 'build\*'
 assert_contains scripts/fetch-linux.sh 'kernel.org'
 assert_contains scripts/fetch-qemu.sh 'download.qemu.org'
 assert_contains scripts/fetch-linux.sh 'KERNEL_BASE_URL'
@@ -123,6 +128,10 @@ assert_contains scripts/run-qemu.sh 'q3n-nand-pci'
 assert_contains scripts/run-qemu.sh '--fresh-nand'
 assert_contains scripts/run-qemu.sh '--nand-image'
 assert_contains scripts/run-qemu.sh 'q3n-nand-pci,drive=q3n-media'
+assert_contains scripts/q3n-serial-smoke.sh '--fresh-nand'
+assert_contains scripts/q3n-serial-smoke.sh 'q3n serial smoke passed'
+assert_contains scripts/q3n-serial-smoke.sh 'MTD smoke .*'
+assert_contains scripts/q3n-serial-smoke.sh 'marker missing'
 assert_contains scripts/fetch-linux.sh 'delay-directory-restore'
 assert_contains scripts/fetch-linux.sh 'redownload'
 assert_contains scripts/fetch-linux.sh 'continue-at'
@@ -161,6 +170,22 @@ for counter in foreground_ops parity_reads parity_writes order_errors \
 	assert_contains rootfs/profile.d/mtd.sh "$counter"
 done
 assert_contains rootfs/profile.d/mtd.sh 'inject_parity_program_fail'
+assert_contains rootfs/profile.d/mtd.sh 'cancel_parity_program_fail'
+assert_contains rootfs/profile.d/mtd.sh 'reset_controller'
+assert_contains rootfs/profile.d/mtd.sh 'inject_invalid_program_fail'
+assert_contains rootfs/profile.d/mtd.sh 'inject_parity_queue_fail'
+assert_contains rootfs/profile.d/mtd.sh 'faults_after.*-eq.*faults_before.*\+ 1'
+assert_contains rootfs/profile.d/mtd.sh 'failed_after.*-eq.*failed_before.*\+ 1'
+assert_contains rootfs/profile.d/mtd.sh 'unprotected_after.*-eq.*unprotected_before.*\+ 1'
+assert_contains rootfs/profile.d/mtd.sh 'protected_failed.*-eq.*protected_before_fail'
+assert_contains rootfs/profile.d/mtd.sh 'pending_parity.*-eq 0'
+assert_contains rootfs/profile.d/mtd.sh 'reserved_parity.*-eq 0'
+assert_contains rootfs/profile.d/mtd.sh 'protected_later.*-eq.*protected_failed.*\+ 1'
+assert_contains rootfs/profile.d/mtd.sh 'q3n-serial-page-%04d'
+assert_contains rootfs/profile.d/mtd.sh 'parity_continuation_pause_enable'
+assert_contains rootfs/profile.d/mtd.sh 'parity_continuation_paused'
+assert_contains rootfs/profile.d/mtd.sh 'p0 continuation acceptance passed'
+assert_contains rootfs/profile.d/mtd.sh 'p1 over p2 acceptance passed'
 assert_contains rootfs/profile.d/mtd.sh 'while.*page.*-lt 7'
 assert_contains rootfs/profile.d/mtd.sh 'cmp.*q3n-serial-page'
 assert_contains rootfs/init 'q3n-serial-smoke.*mtd_q3n_serial_smoke'
@@ -194,6 +219,7 @@ assert_contains README.md 'MTD'
 assert_contains README.md 'MTD_SMOKE=ubifs'
 assert_contains README.md 'q3n-persistence-smoke.sh'
 assert_contains README.md '--fresh-nand'
+assert_contains README.md 'q3n-serial-smoke.sh'
 assert_contains qemu/README.md 'Q3NMEDIA'
 assert_contains qemu/README.md 'OOB byte 0'
 assert_contains qemu/include/hw/mtd/q3n-nand.h 'TYPE_Q3N_NAND'
@@ -237,6 +263,8 @@ assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_check_program_order'
 assert_contains qemu/hw/mtd/q3n-media.c 'Q3N_BBM_GOOD'
 assert_contains qemu/hw/mtd/q3n-nand.c 'stat_order_errors'
 assert_contains qemu/hw/mtd/q3n-nand.c 'fail_next_program'
+assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_disarm_program_fault'
+assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_disarm_program_fault\(s\);'
 assert_contains qemu/hw/mtd/q3n-nand.c 'stats\.fg_ops\+\+'
 assert_contains qemu/hw/mtd/q3n-nand.c 'stats\.parity_reads\+\+'
 assert_contains qemu/hw/mtd/q3n-nand.c 'stats\.parity_writes\+\+'
@@ -317,6 +345,16 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'q3n_sched_try_sta
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'q3n_sched_requeue_p1\(&parity->q3n->sched'
 assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'queue_work\(parity->q3n->parity_wq, &parity->work\)'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'cond_resched\(\)'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'atomic64_t protected_stripes'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'atomic64_t unprotected_stripes'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'atomic64_t failed_stripes'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'atomic64_inc\(&q3n->protected_stripes\)'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'atomic64_read\(&q3n->protected_stripes\)'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'parity_continuation_pause_enable'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'parity_continuation_paused'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'alloc_workqueue\("q3n-parity"'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_MAX_PENDING_PARITY'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'done \+= q3n->page_size;'
 assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'IS_ALIGNED\(instr->addr, mtd->erasesize\)'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_map_non_power_of_two_geometry_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_program_order_test'

@@ -199,13 +199,15 @@ dmesg
 串行同块 `D0..D6,P` Page-RAID 的确定性端到端验收可直接运行：
 
 ```sh
-./scripts/shell.sh ./scripts/run-qemu.sh --fresh-nand \
-  --append "MTD_SMOKE=q3n-serial-smoke"
+./scripts/q3n-serial-smoke.sh
 ```
 
-该命令逐个写入并立即读回 7 个 16 KiB data page，观察异步 parity
-queued/protected 转换，再对目标物理 parity page 注入一次 program failure，
-确认已写 data 仍可读。guest 内可单独查看从启动以来的累计统计：
+该 host wrapper 每次使用 fresh NAND，并严格要求 guest 同时输出串行验收和
+通用 MTD 成功 marker；单凭 QEMU 正常退出不会判定成功。测试逐页使用不同的
+确定性内容，验证真实 worker 的 P0>P1>P2 continuation、parity queue setup
+失败、one-shot program failure 及其 clear/invalid/reset disarm 路径，并确认
+失败后已写 data 仍可读、后续 stripe 可正常保护。guest 内可单独查看从启动
+以来的累计统计：
 
 ```sh
 /etc/profile.d/mtd.sh q3n-parity-stats

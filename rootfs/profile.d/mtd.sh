@@ -56,20 +56,74 @@ mtd_find_q3n() {
 
 mtd_q3n_serial_cleanup() {
   echo 0 > "$stats/parity_pause_enable" 2>/dev/null || true
-  if [ "${serial_writer_owned:-0}" -eq 1 ] &&
-     [ -n "${serial_writer_pid:-}" ]; then
+  echo 0 > "$stats/parity_continuation_pause_enable" 2>/dev/null || true
+  if [ -n "${serial_writer_pid:-}" ]; then
     wait "$serial_writer_pid" 2>/dev/null || true
   fi
-  serial_writer_owned=0 serial_writer_pid=
+  if [ -n "${serial_writer2_pid:-}" ]; then
+    wait "$serial_writer2_pid" 2>/dev/null || true
+  fi
+  serial_writer_pid= serial_writer2_pid=
+}
+
+mtd_q3n_serial_make_pattern() {
+  pattern_page=$1
+  dd if=/dev/zero of=/tmp/q3n-serial-page.bin bs=16384 count=1 \
+    2>/dev/null || return 1
+  printf 'q3n-serial-page-%04d\n' "$pattern_page" | \
+    dd of=/tmp/q3n-serial-page.bin conv=notrunc 2>/dev/null || return 1
+}
+
+mtd_q3n_serial_write_page() {
+  write_page=$1
+  mtd_q3n_serial_make_pattern "$write_page" || return 1
+  dd if=/tmp/q3n-serial-page.bin of="$mtd_dev" bs=16384 count=1 \
+    seek="$write_page" 2>/dev/null || return 1
+}
+
+mtd_q3n_serial_read_page() {
+  read_page=$1
+  mtd_q3n_serial_make_pattern "$read_page" || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-serial-read.bin bs=16384 count=1 \
+    skip="$read_page" 2>/dev/null || return 1
+  cmp /tmp/q3n-serial-page.bin /tmp/q3n-serial-read.bin || return 1
 }
 
 mtd_q3n_serial_write_read_page() {
-  page=$1
-  dd if=/tmp/q3n-serial-page.bin of="$mtd_dev" bs=16384 count=1 \
-    seek="$page" 2>/dev/null || return 1
-  dd if="$mtd_dev" of=/tmp/q3n-serial-read.bin bs=16384 count=1 \
-    skip="$page" 2>/dev/null || return 1
-  cmp /tmp/q3n-serial-page.bin /tmp/q3n-serial-read.bin || return 1
+  mtd_q3n_serial_write_page "$1" || return 1
+  mtd_q3n_serial_read_page "$1"
+}
+
+mtd_q3n_wait_eq() {
+  file=$1 expected=$2 label=$3 tries=0
+  while [ "$(cat "$file")" -ne "$expected" ] && [ "$tries" -lt 20 ]; do
+    sleep 1
+    tries=$((tries + 1))
+  done
+  [ "$(cat "$file")" -eq "$expected" ] || {
+    echo "q3n serial smoke: $label did not reach $expected"
+    return 1
+  }
+}
+
+mtd_q3n_wait_gt() {
+  file=$1 baseline=$2 label=$3 tries=0
+  while [ "$(cat "$file")" -le "$baseline" ] && [ "$tries" -lt 20 ]; do
+    sleep 1
+    tries=$((tries + 1))
+  done
+  [ "$(cat "$file")" -gt "$baseline" ] || {
+    echo "q3n serial smoke: $label did not advance past $baseline"
+    return 1
+  }
+}
+
+mtd_q3n_write_stripe() {
+  stripe_base=$1 stripe_slot=0
+  while [ "$stripe_slot" -lt 7 ]; do
+    mtd_q3n_serial_write_read_page $((stripe_base + stripe_slot)) || return 1
+    stripe_slot=$((stripe_slot + 1))
+  done
 }
 
 mtd_q3n_serial_smoke() {
@@ -80,9 +134,16 @@ mtd_q3n_serial_smoke() {
   stats=/sys/kernel/debug/qemu_3dnand
   for counter in foreground_ops parity_reads parity_writes order_errors \
                  protected_stripes unprotected_stripes failed_stripes \
-                 pending_parity max_pending_parity parity_paused \
+                 pending_parity reserved_parity max_pending_parity parity_paused \
                  parity_pause_block parity_pause_enable \
-                 inject_parity_program_fail; do
+                 parity_continuation_pause_block \
+                 parity_continuation_pause_class \
+                 parity_continuation_pause_enable \
+                 parity_continuation_paused p1_over_p2 \
+                 inject_parity_program_fail cancel_parity_program_fail \
+                 inject_invalid_program_fail reset_controller \
+                 inject_parity_queue_fail \
+                 faults_injected; do
     [ -e "$stats/$counter" ] || {
       echo "q3n serial smoke: missing $stats/$counter"
       return 1
@@ -95,86 +156,220 @@ mtd_q3n_serial_smoke() {
   protected_before=$(cat "$stats/protected_stripes") || return 1
   unprotected_before=$(cat "$stats/unprotected_stripes") || return 1
   failed_before=$(cat "$stats/failed_stripes") || return 1
-  dd if=/dev/zero of=/tmp/q3n-serial-page.bin bs=16384 count=1 \
-    2>/dev/null || return 1
+  faults_before=$(cat "$stats/faults_injected") || return 1
+  erasesize=$(cat "/sys/class/mtd/mtd${mtd_num}/erasesize") || return 1
+  block_pages=$((erasesize / 16384))
 
-  serial_writer_pid= serial_writer_owned=0
   trap 'mtd_q3n_serial_cleanup' 0
   trap 'exit 1' HUP INT TERM
+  serial_writer_pid= serial_writer2_pid=
 
-  flash_erase -q "$mtd_dev" 0 1 || return 1
-  page=0
-  while [ "$page" -lt 7 ]; do
-    if [ "$page" -lt 6 ]; then
-      mtd_q3n_serial_write_read_page "$page" || return 1
-    fi
-    page=$((page + 1))
-  done
-
-  echo 0 > "$stats/parity_pause_block" || return 1
-  echo 1 > "$stats/parity_pause_enable" || return 1
-  dd if=/tmp/q3n-serial-page.bin of="$mtd_dev" bs=16384 count=1 \
-    seek=6 2>/tmp/q3n-serial-write.err &
-  serial_writer_pid=$! serial_writer_owned=1
-
-  tries=0
-  while [ "$(cat "$stats/parity_paused")" -eq 0 ] && [ "$tries" -lt 20 ]; do
-    sleep 1
-    tries=$((tries + 1))
-  done
-  [ "$(cat "$stats/parity_paused")" -gt 0 ] || {
-    echo "q3n serial smoke: parity was not queued"
-    return 1
-  }
-  [ "$(cat "$stats/pending_parity")" -gt 0 ] || return 1
-  unprotected_queued=$(cat "$stats/unprotected_stripes") || return 1
-  [ "$unprotected_queued" -gt "$unprotected_before" ] || return 1
-
-  echo 0 > "$stats/parity_pause_enable" || return 1
-  if ! wait "$serial_writer_pid"; then
-    serial_writer_owned=0 serial_writer_pid=
-    cat /tmp/q3n-serial-write.err 2>/dev/null || true
-    return 1
-  fi
-  serial_writer_owned=0 serial_writer_pid=
-  dd if="$mtd_dev" of=/tmp/q3n-serial-read.bin bs=16384 count=1 \
-    skip=6 2>/dev/null || return 1
-  cmp /tmp/q3n-serial-page.bin /tmp/q3n-serial-read.bin || return 1
-  protected_after=$(cat "$stats/protected_stripes") || return 1
-  tries=0
-  while [ "$protected_after" -le "$protected_before" ] && [ "$tries" -lt 20 ]; do
-    sleep 1
-    tries=$((tries + 1))
-    protected_after=$(cat "$stats/protected_stripes") || return 1
-  done
-  [ "$protected_after" -gt "$protected_before" ] || return 1
-
-  # A one-shot physical program fault targets P for logical stripe zero.
-  # D0..D6 remain readable even though that stripe never becomes protected.
+  # Pause a real rebuild exactly after it requeues P1. A foreground read must
+  # complete while that continuation is waiting, without another P1 command.
+  echo "q3n serial stage: p0 continuation"
   flash_erase -q "$mtd_dev" 0 1 || return 1
   page=0
   while [ "$page" -lt 6 ]; do
     mtd_q3n_serial_write_read_page "$page" || return 1
     page=$((page + 1))
   done
+  echo 0 > "$stats/parity_continuation_pause_block" || return 1
+  echo 1 > "$stats/parity_continuation_pause_class" || return 1
+  echo 1 > "$stats/parity_continuation_pause_enable" || return 1
+  mtd_q3n_serial_make_pattern 6 || return 1
+  cp /tmp/q3n-serial-page.bin /tmp/q3n-p0-writer.bin || return 1
+  dd if=/tmp/q3n-p0-writer.bin of="$mtd_dev" bs=16384 count=1 \
+    seek=6 2>/tmp/q3n-p0-writer.err &
+  serial_writer_pid=$!
+  mtd_q3n_wait_gt "$stats/parity_continuation_paused" 0 \
+    "P1 continuation pause" || return 1
+  [ "$(cat "$stats/pending_parity")" -gt 0 ] || return 1
+  unprotected_queued=$(cat "$stats/unprotected_stripes") || return 1
+  [ "$unprotected_queued" -gt "$unprotected_before" ] || return 1
+  p0_foreground_before=$(cat "$stats/foreground_ops") || return 1
+  p0_parity_before=$(cat "$stats/parity_reads") || return 1
+  mtd_q3n_serial_read_page 0 || return 1
+  p0_foreground_after=$(cat "$stats/foreground_ops") || return 1
+  p0_parity_after=$(cat "$stats/parity_reads") || return 1
+  [ "$p0_foreground_after" -eq $((p0_foreground_before + 1)) ] || return 1
+  [ "$p0_parity_after" -eq "$p0_parity_before" ] || return 1
+  echo "p0 continuation acceptance passed"
+  echo 0 > "$stats/parity_continuation_pause_enable" || return 1
+  if ! wait "$serial_writer_pid"; then
+    serial_writer_pid=
+    cat /tmp/q3n-p0-writer.err 2>/dev/null || true
+    return 1
+  fi
+  serial_writer_pid=
+  mtd_q3n_wait_eq "$stats/pending_parity" 0 "initial pending parity" || return 1
+  mtd_q3n_serial_read_page 6 || return 1
+  protected_after=$(cat "$stats/protected_stripes") || return 1
+  [ "$protected_after" -eq $((protected_before + 1)) ] || return 1
+
+  # A queue/setup failure happens after D6 is physically durable. The MTD
+  # write and retlen must still succeed, while health records failed/unprotected.
+  echo "q3n serial stage: queue failure"
+  queue_base=$((7 * block_pages))
+  flash_erase -q "$mtd_dev" $((7 * erasesize)) 1 || return 1
+  page=0
+  while [ "$page" -lt 6 ]; do
+    mtd_q3n_serial_write_read_page $((queue_base + page)) || return 1
+    page=$((page + 1))
+  done
+  queue_failed_before=$(cat "$stats/failed_stripes") || return 1
+  queue_unprotected_before=$(cat "$stats/unprotected_stripes") || return 1
+  queue_protected_before=$(cat "$stats/protected_stripes") || return 1
+  queue_reserved_before=$(cat "$stats/reserved_parity") || return 1
+  echo 1 > "$stats/inject_parity_queue_fail" || return 1
+  mtd_q3n_serial_write_read_page $((queue_base + 6)) || return 1
+  [ "$(cat "$stats/pending_parity")" -eq 0 ] || return 1
+  [ "$(cat "$stats/failed_stripes")" -eq \
+    $((queue_failed_before + 1)) ] || return 1
+  [ "$(cat "$stats/unprotected_stripes")" -eq \
+    $((queue_unprotected_before + 1)) ] || return 1
+  [ "$(cat "$stats/protected_stripes")" -eq "$queue_protected_before" ] || \
+    return 1
+  [ "$(cat "$stats/reserved_parity")" -eq "$queue_reserved_before" ] || \
+    return 1
+  echo "queue failure acceptance passed"
+
+  # A one-shot physical program fault targets P for logical stripe zero.
+  # D0..D6 remain readable even though that stripe never becomes protected.
+  echo "q3n serial stage: one-shot program fault"
+  flash_erase -q "$mtd_dev" 0 1 || return 1
+  page=0
+  while [ "$page" -lt 6 ]; do
+    mtd_q3n_serial_write_read_page "$page" || return 1
+    page=$((page + 1))
+  done
+  faults_before=$(cat "$stats/faults_injected") || return 1
+  failed_before=$(cat "$stats/failed_stripes") || return 1
+  unprotected_before=$(cat "$stats/unprotected_stripes") || return 1
+  protected_before_fail=$(cat "$stats/protected_stripes") || return 1
   echo 0 > "$stats/inject_parity_program_fail" || return 1
   mtd_q3n_serial_write_read_page 6 || return 1
+  mtd_q3n_wait_eq "$stats/pending_parity" 0 "failed pending parity" || return 1
+  faults_after=$(cat "$stats/faults_injected") || return 1
   failed_after=$(cat "$stats/failed_stripes") || return 1
-  tries=0
-  while [ "$failed_after" -le "$failed_before" ] && [ "$tries" -lt 20 ]; do
-    sleep 1
-    tries=$((tries + 1))
-    failed_after=$(cat "$stats/failed_stripes") || return 1
-  done
-  [ "$failed_after" -gt "$failed_before" ] || return 1
+  unprotected_after=$(cat "$stats/unprotected_stripes") || return 1
+  protected_failed=$(cat "$stats/protected_stripes") || return 1
+  [ "$faults_after" -eq $((faults_before + 1)) ] || return 1
+  [ "$failed_after" -eq $((failed_before + 1)) ] || return 1
+  [ "$unprotected_after" -eq $((unprotected_before + 1)) ] || return 1
+  [ "$protected_failed" -eq "$protected_before_fail" ] || return 1
+  echo "one-shot fault acceptance passed"
 
   page=0
   while [ "$page" -lt 7 ]; do
-    dd if="$mtd_dev" of=/tmp/q3n-serial-read.bin bs=16384 count=1 \
-      skip="$page" 2>/dev/null || return 1
-    cmp /tmp/q3n-serial-page.bin /tmp/q3n-serial-read.bin || return 1
+    mtd_q3n_serial_read_page "$page" || return 1
     page=$((page + 1))
   done
+
+  # The one-shot was consumed: an independent later stripe protects normally.
+  echo "q3n serial stage: later protected stripe"
+  flash_erase -q "$mtd_dev" "$erasesize" 1 || return 1
+  mtd_q3n_write_stripe "$block_pages" || return 1
+  mtd_q3n_wait_eq "$stats/pending_parity" 0 "later pending parity" || return 1
+  protected_later=$(cat "$stats/protected_stripes") || return 1
+  [ "$protected_later" -eq $((protected_failed + 1)) ] || return 1
+  [ "$(cat "$stats/faults_injected")" -eq "$faults_after" ] || return 1
+  echo "later protected stripe acceptance passed"
+
+  # Every QEMU disarm path must clear both the visible bit and target latch.
+  echo "q3n serial stage: fault disarm paths"
+  disarm_block=2
+  while [ "$disarm_block" -le 4 ]; do
+    disarm_base=$((disarm_block * block_pages))
+    flash_erase -q "$mtd_dev" $((disarm_block * erasesize)) 1 || return 1
+    page=0
+    while [ "$page" -lt 6 ]; do
+      mtd_q3n_serial_write_read_page $((disarm_base + page)) || return 1
+      page=$((page + 1))
+    done
+    echo $((disarm_base * 16384)) > "$stats/inject_parity_program_fail" || \
+      return 1
+    case "$disarm_block" in
+      2)
+        disarm_name=cancel
+        echo 1 > "$stats/cancel_parity_program_fail" || return 1
+        ;;
+      3)
+        disarm_name=invalid
+        if echo 1 > "$stats/inject_invalid_program_fail" 2>/dev/null; then
+          echo "q3n serial smoke: invalid fault arm unexpectedly succeeded"
+          return 1
+        fi
+        ;;
+      4)
+        disarm_name=reset
+        echo 1 > "$stats/reset_controller" || return 1
+        ;;
+    esac
+    protected_disarm_before=$(cat "$stats/protected_stripes") || return 1
+    mtd_q3n_serial_write_read_page $((disarm_base + 6)) || return 1
+    mtd_q3n_wait_eq "$stats/pending_parity" 0 "disarm pending parity" || return 1
+    [ "$(cat "$stats/protected_stripes")" -eq \
+      $((protected_disarm_before + 1)) ] || return 1
+    [ "$(cat "$stats/faults_injected")" -eq "$faults_after" ] || return 1
+    echo "fault disarm acceptance passed: $disarm_name"
+    disarm_block=$((disarm_block + 1))
+  done
+
+  # Real-worker P1>P2: pause block 5 after its seventh P1 has queued P2,
+  # then hold block 6 at entry with P1 queued. The actual P2 claim must yield.
+  echo "q3n serial stage: p1 over p2"
+  block5_base=$((5 * block_pages))
+  block6_base=$((6 * block_pages))
+  flash_erase -q "$mtd_dev" $((5 * erasesize)) 2 || return 1
+  # Program D0..D5 of block 6 before pausing block 5: closing any writable
+  # MTD fd performs a global sync, so these foreground writes must come first.
+  stripe_slot=0
+  while [ "$stripe_slot" -lt 6 ]; do
+    mtd_q3n_serial_write_read_page $((block6_base + stripe_slot)) || return 1
+    stripe_slot=$((stripe_slot + 1))
+  done
+  echo 5 > "$stats/parity_continuation_pause_block" || return 1
+  echo 2 > "$stats/parity_continuation_pause_class" || return 1
+  echo 1 > "$stats/parity_continuation_pause_enable" || return 1
+  stripe_slot=0
+  while [ "$stripe_slot" -lt 6 ]; do
+    mtd_q3n_serial_write_read_page $((block5_base + stripe_slot)) || return 1
+    stripe_slot=$((stripe_slot + 1))
+  done
+  mtd_q3n_serial_make_pattern $((block5_base + 6)) || return 1
+  cp /tmp/q3n-serial-page.bin /tmp/q3n-p2-writer.bin || return 1
+  dd if=/tmp/q3n-p2-writer.bin of="$mtd_dev" bs=16384 count=1 \
+    seek=$((block5_base + 6)) 2>/tmp/q3n-p2-writer.err &
+  serial_writer_pid=$!
+  mtd_q3n_wait_gt "$stats/parity_continuation_paused" 0 \
+    "P2 continuation pause" || return 1
+  echo 6 > "$stats/parity_pause_block" || return 1
+  echo 1 > "$stats/parity_pause_enable" || return 1
+  mtd_q3n_serial_make_pattern $((block6_base + 6)) || return 1
+  cp /tmp/q3n-serial-page.bin /tmp/q3n-p1-writer.bin || return 1
+  dd if=/tmp/q3n-p1-writer.bin of="$mtd_dev" bs=16384 count=1 \
+    seek=$((block6_base + 6)) 2>/tmp/q3n-p1-writer.err &
+  serial_writer2_pid=$!
+  mtd_q3n_wait_gt "$stats/parity_paused" 0 "P1 entry pause" || return 1
+  p1_over_p2_before=$(cat "$stats/p1_over_p2") || return 1
+  echo 0 > "$stats/parity_continuation_pause_enable" || return 1
+  mtd_q3n_wait_gt "$stats/p1_over_p2" "$p1_over_p2_before" \
+    "P1 over P2 arbitration" || return 1
+  echo "p1 over p2 acceptance passed"
+  echo 0 > "$stats/parity_pause_enable" || return 1
+  if ! wait "$serial_writer2_pid"; then
+    serial_writer2_pid=
+    cat /tmp/q3n-p1-writer.err 2>/dev/null || true
+    return 1
+  fi
+  serial_writer2_pid=
+  if ! wait "$serial_writer_pid"; then
+    serial_writer_pid=
+    cat /tmp/q3n-p2-writer.err 2>/dev/null || true
+    return 1
+  fi
+  serial_writer_pid=
+  mtd_q3n_wait_eq "$stats/pending_parity" 0 "arbitration pending parity" || return 1
 
   foreground_after=$(cat "$stats/foreground_ops") || return 1
   parity_reads_after=$(cat "$stats/parity_reads") || return 1
@@ -186,10 +381,11 @@ mtd_q3n_serial_smoke() {
   [ "$parity_writes_after" -gt "$parity_writes_before" ] || return 1
   [ "$order_errors" -eq 0 ] || return 1
   [ "$max_pending" -gt 0 ] || return 1
+  [ "$(cat "$stats/reserved_parity")" -eq 0 ] || return 1
 
   trap - 0 HUP INT TERM
   mtd_q3n_parity_stats || return 1
-  echo "q3n serial smoke passed: protected=$protected_after unprotected=$unprotected_queued failed=$failed_after order_errors=$order_errors max_pending=$max_pending"
+  echo "q3n serial smoke passed: protected=$protected_later unprotected=$unprotected_after failed=$failed_after faults=$faults_after order_errors=$order_errors max_pending=$max_pending"
 }
 
 mtd_q3n_markbad_smoke() {

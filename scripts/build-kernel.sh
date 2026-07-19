@@ -17,7 +17,23 @@ cross_compile=${CROSS_COMPILE:-x86_64-linux-gnu-}
 
 info "编译 Linux $version，jobs=$jobs"
 make -C "$linux_dir" O="$out_dir" ARCH="$kernel_arch" CROSS_COMPILE="$cross_compile" -j"$jobs"
-make -C "$linux_dir" O="$out_dir" ARCH="$kernel_arch" CROSS_COMPILE="$cross_compile" modules_install INSTALL_MOD_PATH="$out_dir/modules"
+kernel_release=$(make -s -C "$linux_dir" O="$out_dir" ARCH="$kernel_arch" \
+  CROSS_COMPILE="$cross_compile" kernelrelease)
+module_tree="$out_dir/modules/lib/modules/$kernel_release"
+make -C "$linux_dir" O="$out_dir" ARCH="$kernel_arch" \
+  CROSS_COMPILE="$cross_compile" modules_install \
+  INSTALL_MOD_PATH="$out_dir/modules" DEPMOD=true
+
+# Docker Desktop/FileProvider can duplicate the kernel's `build` symlink as
+# `build 2`, `build 3`, ... on a bind mount. depmod follows those links back
+# into the output tree (and its modules directory), recursively opening FDs.
+# Generate dependency metadata without build-tree links, then restore the
+# canonical link required for out-of-tree module builds.
+find "$module_tree" -maxdepth 1 -type l -name 'build*' -exec rm -f {} +
+if command -v depmod >/dev/null 2>&1; then
+  depmod -b "$out_dir/modules" "$kernel_release"
+fi
+ln -sfn "$out_dir" "$module_tree/build"
 
 [ -f "$out_dir/arch/x86/boot/bzImage" ] || die "未生成 bzImage"
 [ -f "$out_dir/vmlinux" ] || die "未生成 vmlinux"

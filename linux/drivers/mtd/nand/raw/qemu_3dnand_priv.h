@@ -113,6 +113,7 @@ struct q3n_sched {
 	u32 pending_parity;
 	u32 reserved_parity;
 	u32 max_pending_parity;
+	u64 p1_over_p2;
 };
 
 int q3n_map_data_page(const struct q3n_geometry *geometry, u64 stripe,
@@ -154,6 +155,7 @@ int q3n_sched_reserve_parity(struct q3n_sched *sched);
 void q3n_sched_release_parity(struct q3n_sched *sched);
 void q3n_sched_get_counts(struct q3n_sched *sched, u32 *pending,
 			  u32 *reserved, u32 *max_pending);
+u64 q3n_sched_get_p1_over_p2(struct q3n_sched *sched);
 int q3n_sched_try_start(struct q3n_sched *sched, struct q3n_request *req);
 struct q3n_request *q3n_sched_pick_next(struct q3n_sched *sched);
 void q3n_sched_drain(struct q3n_sched *sched);
