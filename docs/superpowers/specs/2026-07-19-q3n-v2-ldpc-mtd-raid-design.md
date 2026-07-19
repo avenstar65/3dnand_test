@@ -6,9 +6,8 @@
 
 - 同一物理 block 内 `D0..D6,P` 的串行 Page-RAID；
 - 前台优先、后台 parity read/write 调度；
-- main+OOB 同次 program；
-- OOB 中持久化的 data metadata 和 parity manifest；
-- 每个 data page CRC、parity CRC、manifest header CRC；
+- main+OOB controller 命令；
+- data metadata、parity manifest 和 CRC 的结构定义及 KUnit 覆盖；
 - Q3NMEDIA v1 持久化物理 NAND 镜像；
 - 坏块标记、program frontier、重启 replay 和故障 smoke tests。
 
@@ -24,33 +23,51 @@
 | ECC step | 1 KiB |
 | steps/page | 16 |
 | strength | 每 step 40 bit |
-| LDPC bytes/step | 128 B |
-| LDPC bytes/page | 2 KiB |
+| LDPC bytes/step | 96 B |
+| LDPC bytes/page | 1536 B |
+| physical OOB/page | 1664 B |
+| controller logical OOB/page | 128 B |
 | MTD bitflip threshold | 40 bit |
 
-本实现模拟纠错能力和结果，不实现真实 LDPC 校验矩阵、编码或迭代译码。每个 step 仍生成确定性的 128 B 模拟 LDPC 内容，使介质容量、持久化格式和校验码损坏可以真实建模。
+本实现模拟纠错能力和结果，不实现真实 LDPC 校验矩阵、编码或迭代译码。每个 step 仍生成确定性的 96 B 模拟 LDPC 内容，使介质容量、持久化格式和校验码损坏可以真实建模。
 
 ## 3. Q3NMEDIA v2 物理布局
 
-Q3NMEDIA 从版本 1 升级为版本 2。每个 page slot 固定为：
+Q3NMEDIA 从版本 1 升级为版本 2。每个物理 page 固定为 18048 B：
 
 ```text
-main 16 KiB | controller LDPC 2 KiB | OOB 1 KiB
+physical page
+├── main[0..16383]                     16384 B
+└── physical OOB[0..1663]              1664 B
+    ├── physical OOB[0]                   1 B  BBM
+    ├── physical OOB[1..1536]           1536 B  16 × 96 B LDPC
+    └── physical OOB[1537..1663]         127 B  metadata
 ```
 
-v2 header 增加 `ldpc_size` 字段，布局计算变为：
+v2 header 明确保存 `physical_oob_size=1664`、`ldpc_bytes_per_step=96`、`ldpc_steps=16` 和 `logical_oob_size=128`。介质布局计算为：
 
 ```text
-page_stride = page_size + ldpc_size + oob_size
-ldpc_offset = slot_offset + page_size
-oob_offset  = slot_offset + page_size + ldpc_size
+page_stride              = 16384 + 1664 = 18048
+physical_oob_offset      = slot_offset + 16384
+bbm_offset               = physical_oob_offset
+ldpc_step_offset(step)   = physical_oob_offset + 1 + step * 96
+metadata_offset          = physical_oob_offset + 1537
 ```
 
-坏块标记仍为第一页 `OOB[0]`，因此所有创建、加载、查询和 markbad 路径必须改用新的 OOB offset。main-addressable MMIO 地址仍以 16 KiB page 为单位，Linux 逻辑和物理页号映射不变。
+controller 向软件映射一个非连续的 128 B logical OOB：
 
-v1 镜像与 v2 的 page stride 不兼容。加载 v1 时明确返回不兼容错误并提示重新创建，不实现隐式或原地迁移。这样避免将旧 OOB 误判为 LDPC 数据。空后端自动创建 v2 镜像。
+```text
+logical OOB[0]      <-> physical OOB[0]       BBM
+logical OOB[1..127] <-> physical OOB[1537..1663]
+```
 
-program page 的原子介质单元为 main+LDPC+OOB。QEMU controller 根据 main、物理 page key、step 和 profile version 生成 LDPC 内容，再调用 media 层一次写入完整 page slot。erase 后 page state 恢复为 erased；读取 erased page时main、LDPC和OOB均表现为全`0xff`，但第一页OOB坏块标记除外。
+LDPC 区 `physical OOB[1..1536]` 不进入 logical OOB 地址空间。软件读取 logical OOB 第 0 字节必须得到 BBM；软件写 logical OOB 第 0 字节必须真实编程 BBM，不设置写保护。第一页 logical OOB[0] 从 `0xff` 编程为任意非 `0xff` 值后，该 block 被识别为坏块。其他页仍按相同映射保存 OOB[0]，但坏块扫描和 block status 以第一页 BBM 为准。
+
+data metadata 和 parity manifest 必须从 logical OOB[1] 开始，不能覆盖 BBM。现有主路径尚未真正持久化这些结构；本次实现必须把 `q3n_data_meta` 和 `q3n_parity_manifest` 接入 `PROGRAM_PAGE_OOB`/`READ_PAGE_OOB`。main-addressable MMIO 地址仍以 16 KiB page 为单位，Linux 逻辑和物理页号映射不变。
+
+v1 镜像与 v2 的 page stride 和 OOB 语义不兼容。加载 v1 时明确返回不兼容错误并提示重新创建，不实现隐式或原地迁移。空后端自动创建 v2 镜像。
+
+program page 的原子介质单元为 main+physical OOB。QEMU controller 根据 main、物理 page key、step 和 profile version生成LDPC，将logical OOB反向映射到BBM和metadata位置，再调用media层一次写入完整page slot。erase后page state恢复为erased；读取erased page时main和physical OOB均表现为全`0xff`。
 
 ## 4. QEMU 层职责划分
 
@@ -58,7 +75,7 @@ program page 的原子介质单元为 main+LDPC+OOB。QEMU controller 根据 mai
 
 media 层只负责 v2 持久化布局和原始区域 I/O：
 
-- 保存和读取 main、LDPC、OOB；
+- 保存和读取 main 与 1664 B raw physical OOB；
 - 校验 v2 header 和镜像长度；
 - 维护 page state、program frontier 和坏块标记；
 - erase block；
@@ -70,8 +87,8 @@ LDPC 是否可纠、最大 bitflips 和译码结果属于 controller 语义，�
 
 controller 负责：
 
-- program 时生成确定性模拟 LDPC 码；
-- read 时取得 main、LDPC 和 OOB；
+- program 时生成确定性模拟 LDPC 码并完成 logical/physical OOB 反向映射；
+- read 时取得 main 和 physical OOB，再映射出 logical OOB；
 - 应用 main/LDPC bitflip overlay；
 - 按 step 合并统计 main 和 LDPC 区错误数；
 - 返回纠正后的 main/OOB 或 uncorrectable；
@@ -86,18 +103,18 @@ controller 负责：
 
 ```text
 main overlay:  16 KiB / 8 = 2048 B
-LDPC overlay:   2 KiB / 8 =  256 B
+LDPC overlay: 1536 B / 8 =  192 B
 ```
 
 注入参数包含：物理 main 地址、step、区域（main/LDPC）、step 内首 bit 和数量。同一 bit 再次注入等价于再次翻转，因此两次注入恢复原状态。
 
-overlay 必须随 v2 镜像持久化，以便现有“重启后恢复”测试覆盖 ECC 场景。v2 header 增加 overlay state/slot 区的 offset 和 length；每页 overlay slot 固定 2304 B 会导致约 7 GiB 的稀疏逻辑镜像扩张，因此后端继续依赖 sparse allocation，不做全量预分配。erase block 将对应 overlay slots 写零并清除内存状态。
+overlay 必须随 v2 镜像持久化，以便现有“重启后恢复”测试覆盖 ECC 场景。v2 header 增加 overlay state/slot 区的 offset 和 length；每页 overlay slot 固定 2240 B，后端继续依赖 sparse allocation，不做全量预分配。erase block 将对应 overlay slots 写零并清除内存状态。
 
 精确边界验证采用减法式检查，拒绝 step、region、first bit、count 越界和整数溢出。
 
 ## 6. 每 step 纠错判定
 
-对每个 1 KiB step，将 main overlay 与对应 128 B LDPC overlay 的 popcount 相加：
+对每个 1 KiB step，将 main overlay 与对应 96 B LDPC overlay 的 popcount 相加：
 
 - 0 bit：CLEAN；
 - 1..40 bit：CORRECTED；
@@ -119,7 +136,7 @@ QEMU 与 Linux 头文件新增完全一致的常量和寄存器：
 
 ```text
 ECC_GEOM0             step_size | strength
-ECC_GEOM1             parity_bytes | steps_per_page
+ECC_GEOM1             parity_bytes=96 | steps_per_page=16
 ECC_STATUS            CLEAN | CORRECTED | UNCORRECTABLE
 ECC_MAX_BITFLIPS
 ECC_CORRECTED_BITS
@@ -141,6 +158,8 @@ mtd->ecc_step_size = 1024;
 mtd->ecc_strength = 40;
 mtd->bitflip_threshold = 40;
 ```
+
+驱动同时实现 `_read_oob` 和 `_write_oob`，向 MTD 暴露完整 128 B logical OOB。`ooboffs=0` 对应 BBM，不能由驱动自动跳过或写保护；对 block 第一物理页的 logical OOB[0] 写入非 `0xff` 后，后续 block status 必须报告 bad。OOB 操作仍遵守 NAND 1→0、页 program 次数和顺序约束。对已经包含 driver-owned data metadata 或 parity manifest 的页执行 raw/place OOB 写入可能使 RAID metadata 失效，这是显式 raw 介质操作的结果，读取时必须通过 CRC/manifest 校验发现，不能静默接受。
 
 ## 8. 驱动内部读取结果
 
@@ -168,7 +187,7 @@ struct q3n_ecc_result {
 
 ## 9. 与串行异步 Page-RAID 的组合
 
-现有 OOB manifest 已经保存每个 data page CRC、parity CRC 和 header CRC，继续直接复用，无需增加新的 RAID metadata 格式。
+现有 manifest 结构已经定义每个 data page CRC、parity CRC 和 header CRC，但主路径尚未持久化。本次实现复用该格式，将 data metadata 和 parity manifest 写入 logical OOB[1..127]；无需增加新的 RAID metadata 结构。
 
 读取流程固定为：
 
@@ -228,21 +247,23 @@ guest debugfs注入格式固定为：
 必须覆盖：
 
 1. v1 image 被明确拒绝，空 image 创建 v2。
-2. v2 header、page stride、LDPC/OOB/坏块标记 offset 正确。
-3. 39 bit：数据纠正、无 `-EUCLEAN`、corrected 增加 39。
-4. 40 bit：数据纠正并形成 `-EUCLEAN`。
-5. 41 bit、stripe未保护：`-EBADMSG`。
-6. 两个step各30 bit：总corrected 60、max bitflips 30。
-7. 同step main 25 bit + LDPC 16 bit：合计41，不可纠。
-8. 目标41 bit、stripe已保护：CRC验证后RAID恢复，形成`-EUCLEAN`。
-9. 目标与另一data成员各41 bit：`-EBADMSG`。
-10. 目标与parity各41 bit：`-EBADMSG`。
-11. 重建CRC错误：`-EBADMSG`，不泄露错误数据。
-12. 后台parity build遇到不可纠成员：不发布manifest，stripe不进入PROTECTED。
-13. erase清除main/LDPC overlay并保持OOB坏块规则。
-14. 重启后LDPC区、overlay、ECC结果和RAID恢复行为保持一致。
-15. 多页读取后续失败：保留此前`retlen`并返回`-EBADMSG`。
-16. QEMU和Linux ABI静态一致，QEMU、kernel、rootfs构建及guest smoke全部通过。
+2. v2 header、18048 B page stride、LDPC/metadata/BBM offset 正确。
+3. logical OOB[0]读回第一页BBM，写为非`0xff`后block status变为bad。
+4. logical OOB[1..127]与physical OOB[1537..1663]双向映射正确，LDPC区不可见。
+5. 39 bit：数据纠正、无 `-EUCLEAN`、corrected 增加 39。
+6. 40 bit：数据纠正并形成 `-EUCLEAN`。
+7. 41 bit、stripe未保护：`-EBADMSG`。
+8. 两个step各30 bit：总corrected 60、max bitflips 30。
+9. 同step main 25 bit + LDPC 16 bit：合计41，不可纠。
+10. 目标41 bit、stripe已保护：CRC验证后RAID恢复，形成`-EUCLEAN`。
+11. 目标与另一data成员各41 bit：`-EBADMSG`。
+12. 目标与parity各41 bit：`-EBADMSG`。
+13. 重建CRC错误：`-EBADMSG`，不泄露错误数据。
+14. 后台parity build遇到不可纠成员：不发布manifest，stripe不进入PROTECTED。
+15. erase清除main/LDPC overlay并保持OOB坏块规则。
+16. 重启后LDPC区、overlay、ECC结果和RAID恢复行为保持一致。
+17. 多页读取后续失败：保留此前`retlen`并返回`-EBADMSG`。
+18. QEMU和Linux ABI静态一致，QEMU、kernel、rootfs构建及guest smoke全部通过。
 
 ## 12. 非目标
 
