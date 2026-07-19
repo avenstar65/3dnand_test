@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <kunit/test.h>
+#include <linux/completion.h>
+#include <linux/kthread.h>
 
 #include "qemu_3dnand_priv.h"
 
@@ -352,6 +354,75 @@ static void q3n_scheduler_tracks_max_pending_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, max_pending, 2U);
 }
 
+struct q3n_scheduler_wait_test_ctx {
+	struct q3n_sched *sched;
+	struct q3n_request *request;
+	struct completion first_attempt;
+	struct completion done;
+	atomic_t attempts;
+	int result;
+};
+
+static int q3n_scheduler_wait_test_thread(void *data)
+{
+	struct q3n_scheduler_wait_test_ctx *ctx = data;
+	u64 sequence;
+
+	atomic_inc(&ctx->attempts);
+	ctx->result = q3n_sched_try_start_seq(ctx->sched, ctx->request,
+						  &sequence);
+	complete(&ctx->first_attempt);
+	if (ctx->result == -EAGAIN) {
+		q3n_sched_wait_for_change(ctx->sched, sequence);
+		atomic_inc(&ctx->attempts);
+		ctx->result = q3n_sched_try_start_seq(ctx->sched, ctx->request,
+							  &sequence);
+	}
+	complete(&ctx->done);
+	return 0;
+}
+
+static void q3n_scheduler_waits_for_state_change_test(struct kunit *test)
+{
+	struct q3n_sched sched;
+	struct q3n_request foreground = {
+		.class = Q3N_REQ_FOREGROUND,
+		.op = Q3N_REQ_READ,
+	};
+	struct q3n_request parity = {
+		.class = Q3N_REQ_PARITY_READ,
+		.op = Q3N_REQ_READ,
+	};
+	struct q3n_scheduler_wait_test_ctx ctx = {
+		.sched = &sched,
+		.request = &parity,
+	};
+	struct task_struct *task;
+
+	q3n_sched_init(&sched);
+	init_completion(&ctx.first_attempt);
+	init_completion(&ctx.done);
+	atomic_set(&ctx.attempts, 0);
+	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &foreground), 0);
+	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &parity), 0);
+	task = kthread_run(q3n_scheduler_wait_test_thread, &ctx,
+			   "q3n-sched-wait-test");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	KUNIT_ASSERT_NE(test,
+		wait_for_completion_timeout(&ctx.first_attempt,
+					    msecs_to_jiffies(1000)), 0UL);
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx.attempts), 1);
+	KUNIT_EXPECT_FALSE(test, completion_done(&ctx.done));
+
+	KUNIT_ASSERT_EQ(test, q3n_sched_cancel(&sched, &foreground), 0);
+	KUNIT_ASSERT_NE(test,
+		wait_for_completion_timeout(&ctx.done, msecs_to_jiffies(1000)),
+		0UL);
+	KUNIT_EXPECT_EQ(test, atomic_read(&ctx.attempts), 2);
+	KUNIT_EXPECT_EQ(test, ctx.result, 0);
+	kthread_stop(task);
+}
+
 static void q3n_block_barrier_blocks_new_work_and_drains_test(struct kunit *test)
 {
 	struct q3n_block_barrier barrier;
@@ -414,6 +485,7 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_scheduler_p1_claim_preserves_foreground_test),
 	KUNIT_CASE(q3n_scheduler_reserves_capacity_per_stripe_test),
 	KUNIT_CASE(q3n_scheduler_tracks_max_pending_test),
+	KUNIT_CASE(q3n_scheduler_waits_for_state_change_test),
 	KUNIT_CASE(q3n_block_barrier_blocks_new_work_and_drains_test),
 	KUNIT_CASE(q3n_block_barrier_terminal_put_wakes_on_drain_test),
 	{}

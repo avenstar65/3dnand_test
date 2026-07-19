@@ -78,6 +78,16 @@ static void q3n_sched_remove_locked(struct q3n_sched *sched,
 		sched->pending_parity--;
 }
 
+static void q3n_sched_changed_locked(struct q3n_sched *sched)
+{
+	atomic64_inc(&sched->sequence);
+}
+
+static void q3n_sched_wake(struct q3n_sched *sched)
+{
+	wake_up_all(&sched->waitq);
+}
+
 void q3n_block_barrier_init(struct q3n_block_barrier *barrier)
 {
 	atomic_set(&barrier->pending_parity, 0);
@@ -123,6 +133,8 @@ int q3n_block_pending(const struct q3n_block_barrier *barrier)
 void q3n_sched_init(struct q3n_sched *sched)
 {
 	spin_lock_init(&sched->lock);
+	init_waitqueue_head(&sched->waitq);
+	atomic64_set(&sched->sequence, 0);
 	INIT_LIST_HEAD(&sched->foreground_queue);
 	INIT_LIST_HEAD(&sched->parity_read_queue);
 	INIT_LIST_HEAD(&sched->parity_write_queue);
@@ -151,7 +163,9 @@ int q3n_sched_enqueue(struct q3n_sched *sched, struct q3n_request *req)
 		if (sched->pending_parity > sched->max_pending_parity)
 			sched->max_pending_parity = sched->pending_parity;
 	}
+	q3n_sched_changed_locked(sched);
 	spin_unlock_irqrestore(&sched->lock, flags);
+	q3n_sched_wake(sched);
 	return 0;
 }
 
@@ -168,7 +182,9 @@ int q3n_sched_cancel(struct q3n_sched *sched, struct q3n_request *req)
 		return -ENOENT;
 	}
 	q3n_sched_remove_locked(sched, req);
+	q3n_sched_changed_locked(sched);
 	spin_unlock_irqrestore(&sched->lock, flags);
+	q3n_sched_wake(sched);
 	return 0;
 }
 
@@ -234,10 +250,12 @@ u64 q3n_sched_get_p1_over_p2(struct q3n_sched *sched)
 	return value;
 }
 
-int q3n_sched_try_start(struct q3n_sched *sched, struct q3n_request *req)
+int q3n_sched_try_start_seq(struct q3n_sched *sched, struct q3n_request *req,
+			    u64 *sequence)
 {
 	struct q3n_request *next = NULL;
 	unsigned long flags;
+	int ret = 0;
 
 	if (!sched || !req)
 		return -EINVAL;
@@ -246,19 +264,19 @@ int q3n_sched_try_start(struct q3n_sched *sched, struct q3n_request *req)
 	if (req->op == Q3N_REQ_PROGRAM) {
 		if (!req->block_state) {
 			q3n_sched_remove_locked(sched, req);
-			spin_unlock_irqrestore(&sched->lock, flags);
-			return -EINVAL;
+			ret = -EINVAL;
+			goto changed;
 		}
 		if (req->page < req->block_state->next_prog_page) {
 			q3n_sched_remove_locked(sched, req);
-			spin_unlock_irqrestore(&sched->lock, flags);
-			return -ESTALE;
+			ret = -ESTALE;
+			goto changed;
 		}
 		if (req->page > req->block_state->next_prog_page &&
 		    !q3n_sched_has_frontier_dependency(sched, req)) {
 			q3n_sched_remove_locked(sched, req);
-			spin_unlock_irqrestore(&sched->lock, flags);
-			return -ERANGE;
+			ret = -ERANGE;
+			goto changed;
 		}
 	}
 	next = q3n_sched_pick_ready(&sched->foreground_queue);
@@ -270,13 +288,42 @@ int q3n_sched_try_start(struct q3n_sched *sched, struct q3n_request *req)
 		if (next && next->class == Q3N_REQ_PARITY_READ &&
 		    req->class == Q3N_REQ_PARITY_WRITE)
 			sched->p1_over_p2++;
+		if (sequence)
+			*sequence = atomic64_read(&sched->sequence);
 		spin_unlock_irqrestore(&sched->lock, flags);
 		return -EAGAIN;
 	}
 
 	q3n_sched_remove_locked(sched, req);
+
+changed:
+	q3n_sched_changed_locked(sched);
+	if (sequence)
+		*sequence = atomic64_read(&sched->sequence);
 	spin_unlock_irqrestore(&sched->lock, flags);
-	return 0;
+	q3n_sched_wake(sched);
+	return ret;
+}
+
+int q3n_sched_try_start(struct q3n_sched *sched, struct q3n_request *req)
+{
+	return q3n_sched_try_start_seq(sched, req, NULL);
+}
+
+void q3n_sched_wait_for_change(struct q3n_sched *sched, u64 sequence)
+{
+	wait_event(sched->waitq,
+		   atomic64_read(&sched->sequence) != sequence);
+}
+
+void q3n_sched_notify(struct q3n_sched *sched)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&sched->lock, flags);
+	q3n_sched_changed_locked(sched);
+	spin_unlock_irqrestore(&sched->lock, flags);
+	q3n_sched_wake(sched);
 }
 
 struct q3n_request *q3n_sched_pick_next(struct q3n_sched *sched)
@@ -297,8 +344,11 @@ struct q3n_request *q3n_sched_pick_next(struct q3n_sched *sched)
 		list_del_init(&req->node);
 		if (req->class != Q3N_REQ_FOREGROUND)
 			sched->pending_parity--;
+		q3n_sched_changed_locked(sched);
 	}
 	spin_unlock_irqrestore(&sched->lock, flags);
+	if (req)
+		q3n_sched_wake(sched);
 	return req;
 }
 
@@ -318,7 +368,9 @@ void q3n_sched_drain(struct q3n_sched *sched)
 		list_for_each_entry_safe(req, tmp, queues[i], node)
 			list_del_init(&req->node);
 	sched->pending_parity = 0;
+	q3n_sched_changed_locked(sched);
 	spin_unlock_irqrestore(&sched->lock, flags);
+	q3n_sched_wake(sched);
 }
 
 MODULE_DESCRIPTION("QEMU 3D NAND foreground-priority request scheduler");

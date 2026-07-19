@@ -355,7 +355,12 @@ mtd_q3n_serial_smoke() {
   echo 0 > "$stats/parity_continuation_pause_enable" || return 1
   mtd_q3n_wait_gt "$stats/p1_over_p2" "$p1_over_p2_before" \
     "P1 over P2 arbitration" || return 1
-  echo "p1 over p2 acceptance passed"
+  p1_over_p2_after=$(cat "$stats/p1_over_p2") || return 1
+  [ "$p1_over_p2_after" -eq $((p1_over_p2_before + 1)) ] || {
+    echo "P2 retried without a scheduler state change: before=$p1_over_p2_before after=$p1_over_p2_after" >&2
+    return 1
+  }
+  echo "p1 over p2 acceptance passed: event wait"
   echo 0 > "$stats/parity_pause_enable" || return 1
   if ! wait "$serial_writer2_pid"; then
     serial_writer2_pid=

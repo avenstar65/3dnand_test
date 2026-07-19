@@ -6,6 +6,7 @@
 #include <linux/list.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
+#include <linux/wait.h>
 
 #define Q3N_RAID_MAX_DATA_PAGES	7
 #define Q3N_RAID_META_MAGIC		0x5133
@@ -107,6 +108,8 @@ struct q3n_request {
 
 struct q3n_sched {
 	spinlock_t lock;
+	wait_queue_head_t waitq;
+	atomic64_t sequence;
 	struct list_head foreground_queue;
 	struct list_head parity_read_queue;
 	struct list_head parity_write_queue;
@@ -157,6 +160,10 @@ void q3n_sched_get_counts(struct q3n_sched *sched, u32 *pending,
 			  u32 *reserved, u32 *max_pending);
 u64 q3n_sched_get_p1_over_p2(struct q3n_sched *sched);
 int q3n_sched_try_start(struct q3n_sched *sched, struct q3n_request *req);
+int q3n_sched_try_start_seq(struct q3n_sched *sched, struct q3n_request *req,
+			    u64 *sequence);
+void q3n_sched_wait_for_change(struct q3n_sched *sched, u64 sequence);
+void q3n_sched_notify(struct q3n_sched *sched);
 struct q3n_request *q3n_sched_pick_next(struct q3n_sched *sched);
 void q3n_sched_drain(struct q3n_sched *sched);
 

@@ -130,6 +130,7 @@ static void qemu_3dnand_free_metadata(struct qemu_3dnand *q3n)
 static int qemu_3dnand_lock_request(struct qemu_3dnand *q3n,
 				    struct q3n_request *req)
 {
+	u64 sequence;
 	int ret;
 
 	ret = q3n_sched_enqueue(&q3n->sched, req);
@@ -138,13 +139,13 @@ static int qemu_3dnand_lock_request(struct qemu_3dnand *q3n,
 
 	for (;;) {
 		mutex_lock(&q3n->mtd_lock);
-		ret = q3n_sched_try_start(&q3n->sched, req);
+		ret = q3n_sched_try_start_seq(&q3n->sched, req, &sequence);
 		if (!ret)
 			return 0;
 		mutex_unlock(&q3n->mtd_lock);
 		if (ret != -EAGAIN)
 			return ret;
-		cond_resched();
+		q3n_sched_wait_for_change(&q3n->sched, sequence);
 	}
 }
 
@@ -233,8 +234,10 @@ static int qemu_3dnand_program_phys_page_locked(struct qemu_3dnand *q3n,
 
 	qemu_3dnand_writel(q3n, Q3N_REG_CMD, Q3N_CMD_PROGRAM_PAGE);
 	ret = qemu_3dnand_wait_ready(q3n);
-	if (!ret && block < q3n->data_block_count)
+	if (!ret && block < q3n->data_block_count) {
 		q3n->program_state[block].next_prog_page = page + 1;
+		q3n_sched_notify(&q3n->sched);
+	}
 	return ret;
 }
 
@@ -482,6 +485,7 @@ static void qemu_3dnand_parity_worker(struct work_struct *work)
 	struct q3n_block_barrier *barrier =
 		&q3n->data_meta[parity->block].parity_barrier;
 	struct qemu_3dnand_parity_entry *entry;
+	u64 sequence;
 	int ret;
 
 	if (READ_ONCE(q3n->parity_pause_enable) &&
@@ -528,10 +532,11 @@ again:
 		}
 		goto out_finish;
 	}
-	ret = q3n_sched_try_start(&parity->q3n->sched, &parity->request);
+	ret = q3n_sched_try_start_seq(&parity->q3n->sched,
+				      &parity->request, &sequence);
 	if (ret == -EAGAIN) {
 		mutex_unlock(&parity->q3n->mtd_lock);
-		cond_resched();
+		q3n_sched_wait_for_change(&parity->q3n->sched, sequence);
 		goto again;
 	}
 	if (ret) {
@@ -887,6 +892,7 @@ static int qemu_3dnand_cancel_block_parity(struct qemu_3dnand *q3n,
 	ret = q3n_block_cancel_begin(barrier);
 	if (ret)
 		return ret;
+	q3n_sched_notify(&q3n->sched);
 	wake_up_all(&q3n->parity_pause_waitq);
 	mutex_unlock(&q3n->mtd_lock);
 	wait_event(q3n->parity_cancel_waitq, qemu_3dnand_pending_parity_drained(barrier));
