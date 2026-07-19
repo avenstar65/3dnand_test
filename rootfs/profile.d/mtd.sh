@@ -26,6 +26,21 @@ mtd_q3n_stats() {
   done
 }
 
+mtd_q3n_parity_stats() {
+  mtd_load_q3n || return 1
+  stats=/sys/kernel/debug/qemu_3dnand
+  for counter in foreground_ops parity_reads parity_writes order_errors \
+                 protected_stripes unprotected_stripes failed_stripes \
+                 pending_parity max_pending_parity; do
+    [ -r "$stats/$counter" ] || {
+      echo "q3n parity stats: missing $stats/$counter"
+      return 1
+    }
+    printf '%s=' "$counter"
+    cat "$stats/$counter"
+  done
+}
+
 mtd_q3n_inject_loss() {
   addr=${1:-}
   [ -n "$addr" ] || {
@@ -39,34 +54,142 @@ mtd_find_q3n() {
   sed -n 's/^mtd\([0-9][0-9]*\):.*"qemu-3dnand"$/\1/p' /proc/mtd | head -n 1
 }
 
+mtd_q3n_serial_cleanup() {
+  echo 0 > "$stats/parity_pause_enable" 2>/dev/null || true
+  if [ "${serial_writer_owned:-0}" -eq 1 ] &&
+     [ -n "${serial_writer_pid:-}" ]; then
+    wait "$serial_writer_pid" 2>/dev/null || true
+  fi
+  serial_writer_owned=0 serial_writer_pid=
+}
+
+mtd_q3n_serial_write_read_page() {
+  page=$1
+  dd if=/tmp/q3n-serial-page.bin of="$mtd_dev" bs=16384 count=1 \
+    seek="$page" 2>/dev/null || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-serial-read.bin bs=16384 count=1 \
+    skip="$page" 2>/dev/null || return 1
+  cmp /tmp/q3n-serial-page.bin /tmp/q3n-serial-read.bin || return 1
+}
+
 mtd_q3n_serial_smoke() {
   mtd_load_q3n || return 1
   mtd_num=$(mtd_find_q3n)
   [ -n "$mtd_num" ] || return 1
   mtd_dev="/dev/mtd${mtd_num}"
   stats=/sys/kernel/debug/qemu_3dnand
-  parity_written_before=$(cat "$stats/parity_written") || return 1
-  raid_recovered_before=$(cat "$stats/raid_recovered") || return 1
+  for counter in foreground_ops parity_reads parity_writes order_errors \
+                 protected_stripes unprotected_stripes failed_stripes \
+                 pending_parity max_pending_parity parity_paused \
+                 parity_pause_block parity_pause_enable \
+                 inject_parity_program_fail; do
+    [ -e "$stats/$counter" ] || {
+      echo "q3n serial smoke: missing $stats/$counter"
+      return 1
+    }
+  done
+
+  foreground_before=$(cat "$stats/foreground_ops") || return 1
+  parity_reads_before=$(cat "$stats/parity_reads") || return 1
+  parity_writes_before=$(cat "$stats/parity_writes") || return 1
+  protected_before=$(cat "$stats/protected_stripes") || return 1
+  unprotected_before=$(cat "$stats/unprotected_stripes") || return 1
+  failed_before=$(cat "$stats/failed_stripes") || return 1
+  dd if=/dev/zero of=/tmp/q3n-serial-page.bin bs=16384 count=1 \
+    2>/dev/null || return 1
+
+  serial_writer_pid= serial_writer_owned=0
+  trap 'mtd_q3n_serial_cleanup' 0
+  trap 'exit 1' HUP INT TERM
 
   flash_erase -q "$mtd_dev" 0 1 || return 1
-  # Cross the first parity barrier without waiting: D0..D6,P,D0.
-  dd if=/dev/zero of=/tmp/q3n-data.bin bs=16384 count=8 2>/dev/null || return 1
-  dd if=/tmp/q3n-data.bin of="$mtd_dev" bs=16384 count=8 2>/dev/null || return 1
+  page=0
+  while [ "$page" -lt 7 ]; do
+    if [ "$page" -lt 6 ]; then
+      mtd_q3n_serial_write_read_page "$page" || return 1
+    fi
+    page=$((page + 1))
+  done
+
+  echo 0 > "$stats/parity_pause_block" || return 1
+  echo 1 > "$stats/parity_pause_enable" || return 1
+  dd if=/tmp/q3n-serial-page.bin of="$mtd_dev" bs=16384 count=1 \
+    seek=6 2>/tmp/q3n-serial-write.err &
+  serial_writer_pid=$! serial_writer_owned=1
+
   tries=0
-  parity_written_after=$(cat "$stats/parity_written") || return 1
-  while [ "$parity_written_after" -le "$parity_written_before" ] && [ "$tries" -lt 20 ]; do
+  while [ "$(cat "$stats/parity_paused")" -eq 0 ] && [ "$tries" -lt 20 ]; do
     sleep 1
     tries=$((tries + 1))
-    parity_written_after=$(cat "$stats/parity_written") || return 1
   done
-  [ "$parity_written_after" -gt "$parity_written_before" ] || return 1
+  [ "$(cat "$stats/parity_paused")" -gt 0 ] || {
+    echo "q3n serial smoke: parity was not queued"
+    return 1
+  }
+  [ "$(cat "$stats/pending_parity")" -gt 0 ] || return 1
+  unprotected_queued=$(cat "$stats/unprotected_stripes") || return 1
+  [ "$unprotected_queued" -gt "$unprotected_before" ] || return 1
 
-  echo 0 > "$stats/inject_data_loss" || return 1
-  dd if="$mtd_dev" of=/tmp/q3n-recovered.bin bs=16384 count=1 2>/dev/null || return 1
-  cmp /tmp/q3n-data.bin /tmp/q3n-recovered.bin -n 16384 || return 1
-  raid_recovered_after=$(cat "$stats/raid_recovered") || return 1
-  [ "$raid_recovered_after" -gt "$raid_recovered_before" ] || return 1
-  echo "q3n serial smoke passed: parity=$parity_written_after recovered=$raid_recovered_after"
+  echo 0 > "$stats/parity_pause_enable" || return 1
+  if ! wait "$serial_writer_pid"; then
+    serial_writer_owned=0 serial_writer_pid=
+    cat /tmp/q3n-serial-write.err 2>/dev/null || true
+    return 1
+  fi
+  serial_writer_owned=0 serial_writer_pid=
+  dd if="$mtd_dev" of=/tmp/q3n-serial-read.bin bs=16384 count=1 \
+    skip=6 2>/dev/null || return 1
+  cmp /tmp/q3n-serial-page.bin /tmp/q3n-serial-read.bin || return 1
+  protected_after=$(cat "$stats/protected_stripes") || return 1
+  tries=0
+  while [ "$protected_after" -le "$protected_before" ] && [ "$tries" -lt 20 ]; do
+    sleep 1
+    tries=$((tries + 1))
+    protected_after=$(cat "$stats/protected_stripes") || return 1
+  done
+  [ "$protected_after" -gt "$protected_before" ] || return 1
+
+  # A one-shot physical program fault targets P for logical stripe zero.
+  # D0..D6 remain readable even though that stripe never becomes protected.
+  flash_erase -q "$mtd_dev" 0 1 || return 1
+  page=0
+  while [ "$page" -lt 6 ]; do
+    mtd_q3n_serial_write_read_page "$page" || return 1
+    page=$((page + 1))
+  done
+  echo 0 > "$stats/inject_parity_program_fail" || return 1
+  mtd_q3n_serial_write_read_page 6 || return 1
+  failed_after=$(cat "$stats/failed_stripes") || return 1
+  tries=0
+  while [ "$failed_after" -le "$failed_before" ] && [ "$tries" -lt 20 ]; do
+    sleep 1
+    tries=$((tries + 1))
+    failed_after=$(cat "$stats/failed_stripes") || return 1
+  done
+  [ "$failed_after" -gt "$failed_before" ] || return 1
+
+  page=0
+  while [ "$page" -lt 7 ]; do
+    dd if="$mtd_dev" of=/tmp/q3n-serial-read.bin bs=16384 count=1 \
+      skip="$page" 2>/dev/null || return 1
+    cmp /tmp/q3n-serial-page.bin /tmp/q3n-serial-read.bin || return 1
+    page=$((page + 1))
+  done
+
+  foreground_after=$(cat "$stats/foreground_ops") || return 1
+  parity_reads_after=$(cat "$stats/parity_reads") || return 1
+  parity_writes_after=$(cat "$stats/parity_writes") || return 1
+  order_errors=$(cat "$stats/order_errors") || return 1
+  max_pending=$(cat "$stats/max_pending_parity") || return 1
+  [ "$foreground_after" -gt "$foreground_before" ] || return 1
+  [ "$parity_reads_after" -gt "$parity_reads_before" ] || return 1
+  [ "$parity_writes_after" -gt "$parity_writes_before" ] || return 1
+  [ "$order_errors" -eq 0 ] || return 1
+  [ "$max_pending" -gt 0 ] || return 1
+
+  trap - 0 HUP INT TERM
+  mtd_q3n_parity_stats || return 1
+  echo "q3n serial smoke passed: protected=$protected_after unprotected=$unprotected_queued failed=$failed_after order_errors=$order_errors max_pending=$max_pending"
 }
 
 mtd_q3n_markbad_smoke() {
@@ -459,6 +582,7 @@ case "${1:-}" in
   smoke) mtd_smoke ;;
   q3n) mtd_load_q3n ;;
   q3n-stats) mtd_q3n_stats ;;
+  q3n-parity-stats) mtd_q3n_parity_stats ;;
   q3n-inject-loss) mtd_q3n_inject_loss "${2:-}" ;;
   q3n-serial-smoke) mtd_q3n_serial_smoke ;;
   q3n-generation-smoke) mtd_q3n_generation_smoke ;;

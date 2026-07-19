@@ -57,6 +57,7 @@ enum q3n_reg {
     Q3N_REG_POOL0              = 0x0028,
     Q3N_REG_POOL1              = 0x002c,
     Q3N_REG_OOB_LEN            = 0x0030,
+    Q3N_REG_OP_CLASS           = 0x0034,
     Q3N_REG_IRQ_STATUS         = 0x0038,
     Q3N_REG_IRQ_MASK           = 0x003c,
     Q3N_REG_STAT_PAGE_PROGRAMS = 0x0040,
@@ -100,6 +101,13 @@ enum q3n_irq {
 
 enum q3n_fault {
     Q3N_FAULT_INJECT_DATA_LOSS = 1U << 0,
+    Q3N_FAULT_FAIL_NEXT_PROGRAM = 1U << 1,
+};
+
+enum q3n_op_class {
+    Q3N_OP_FOREGROUND = 0,
+    Q3N_OP_PARITY_READ = 1,
+    Q3N_OP_PARITY_WRITE = 2,
 };
 
 MemoryRegion *q3n_nand_get_mmio(Q3NNandState *s);

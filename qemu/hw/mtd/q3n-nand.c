@@ -50,6 +50,9 @@ struct Q3NNandState {
     uint64_t addr;
     uint64_t fault_addr;
     uint32_t fault_ctrl;
+    uint32_t op_class;
+    uint64_t fail_program_addr;
+    bool fail_next_program;
     uint32_t block_status;
     uint32_t block_next_page;
 
@@ -112,6 +115,12 @@ static bool q3n_program_page(Q3NNandState *s, uint32_t block,
         return false;
     }
     if (!q3n_check_program_order(s, block, page)) {
+        return false;
+    }
+    if (s->fail_next_program && s->addr == s->fail_program_addr) {
+        s->fail_next_program = false;
+        s->fault_ctrl &= ~Q3N_FAULT_FAIL_NEXT_PROGRAM;
+        s->stats.faults_injected++;
         return false;
     }
 
@@ -194,6 +203,12 @@ static void q3n_cmd_read_page(Q3NNandState *s)
         return;
     }
 
+    if (s->op_class == Q3N_OP_PARITY_READ) {
+        s->stats.parity_reads++;
+    } else {
+        s->stats.fg_ops++;
+    }
+
     if (q3n_read_page(s, block, page, s->data_buf, NULL)) {
         q3n_finish_error(s);
         return;
@@ -212,8 +227,17 @@ static void q3n_cmd_program_page(Q3NNandState *s)
 
     if (s->data_count < Q3N_PAGE_SIZE ||
         !q3n_decode_addr(s, s->addr, &block, &page, &column) ||
-        column != 0 ||
-        !q3n_program_page(s, block, page, s->data_buf, NULL)) {
+        column != 0) {
+        q3n_finish_error(s);
+        return;
+    }
+
+    if (s->op_class == Q3N_OP_PARITY_WRITE) {
+        s->stats.parity_writes++;
+    } else {
+        s->stats.fg_ops++;
+    }
+    if (!q3n_program_page(s, block, page, s->data_buf, NULL)) {
         q3n_finish_error(s);
         return;
     }
@@ -235,6 +259,12 @@ static void q3n_cmd_read_page_oob(Q3NNandState *s)
         return;
     }
 
+    if (s->op_class == Q3N_OP_PARITY_READ) {
+        s->stats.parity_reads++;
+    } else {
+        s->stats.fg_ops++;
+    }
+
     s->data_count = Q3N_PAGE_SIZE + Q3N_OOB_SIZE;
     s->data_pos = 0;
     q3n_finish_ok(s);
@@ -248,8 +278,17 @@ static void q3n_cmd_program_page_oob(Q3NNandState *s)
 
     if (s->data_count < Q3N_PAGE_SIZE + Q3N_OOB_SIZE ||
         s->oob_len != Q3N_OOB_SIZE ||
-        !q3n_decode_addr(s, s->addr, &block, &page, &column) || column != 0 ||
-        !q3n_program_page(s, block, page, s->data_buf,
+        !q3n_decode_addr(s, s->addr, &block, &page, &column) || column != 0) {
+        q3n_finish_error(s);
+        return;
+    }
+
+    if (s->op_class == Q3N_OP_PARITY_WRITE) {
+        s->stats.parity_writes++;
+    } else {
+        s->stats.fg_ops++;
+    }
+    if (!q3n_program_page(s, block, page, s->data_buf,
                           s->data_buf + Q3N_PAGE_SIZE)) {
         q3n_finish_error(s);
         return;
@@ -428,6 +467,8 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
         return s->len;
     case Q3N_REG_OOB_LEN:
         return s->oob_len;
+    case Q3N_REG_OP_CLASS:
+        return s->op_class;
     case Q3N_REG_GEOM0:
         return (Q3N_PAGE_SIZE & 0xffffU) | (Q3N_OOB_SIZE << 16);
     case Q3N_REG_GEOM1:
@@ -508,6 +549,11 @@ static void q3n_mmio_write(void *opaque, hwaddr offset, uint64_t value,
     case Q3N_REG_OOB_LEN:
         s->oob_len = value;
         break;
+    case Q3N_REG_OP_CLASS:
+        if (value <= Q3N_OP_PARITY_WRITE) {
+            s->op_class = value;
+        }
+        break;
     case Q3N_REG_FAULT_ADDR_LO:
         s->fault_addr = (s->fault_addr & 0xffffffff00000000ULL) |
                         (uint32_t)value;
@@ -523,7 +569,21 @@ static void q3n_mmio_write(void *opaque, hwaddr offset, uint64_t value,
             !q3n_inject_data_loss(s, s->fault_addr)) {
             s->status |= Q3N_STATUS_ERROR;
         }
-        s->fault_ctrl = 0;
+        if (value & Q3N_FAULT_FAIL_NEXT_PROGRAM) {
+            uint32_t block;
+            uint32_t page;
+            uint32_t column;
+
+            if (!q3n_decode_addr(s, s->fault_addr, &block, &page,
+                                 &column) || column != 0) {
+                s->status |= Q3N_STATUS_ERROR;
+                s->fault_ctrl &= ~Q3N_FAULT_FAIL_NEXT_PROGRAM;
+            } else {
+                s->fail_program_addr = s->fault_addr;
+                s->fail_next_program = true;
+            }
+        }
+        s->fault_ctrl &= Q3N_FAULT_FAIL_NEXT_PROGRAM;
         break;
     case Q3N_REG_IRQ_STATUS:
         s->irq_status &= ~(uint32_t)value;

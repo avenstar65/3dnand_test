@@ -196,6 +196,26 @@ dmesg
 ./scripts/shell.sh ./scripts/run-qemu.sh --append "MTD_SMOKE=ubifs"
 ```
 
+串行同块 `D0..D6,P` Page-RAID 的确定性端到端验收可直接运行：
+
+```sh
+./scripts/shell.sh ./scripts/run-qemu.sh --fresh-nand \
+  --append "MTD_SMOKE=q3n-serial-smoke"
+```
+
+该命令逐个写入并立即读回 7 个 16 KiB data page，观察异步 parity
+queued/protected 转换，再对目标物理 parity page 注入一次 program failure，
+确认已写 data 仍可读。guest 内可单独查看从启动以来的累计统计：
+
+```sh
+/etc/profile.d/mtd.sh q3n-parity-stats
+```
+
+输出包括 `foreground_ops`、`parity_reads`、`parity_writes`、
+`order_errors`、`protected_stripes`、`unprotected_stripes`、
+`failed_stripes` 和 `max_pending_parity`。前三类物理命令及页序错误由
+QEMU 计数；stripe 状态事件和 pending 高水位由 Linux 驱动计数。
+
 ## 常见问题
 
 如果提示缺少 Docker，请先安装并启动 Docker。

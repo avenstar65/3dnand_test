@@ -683,18 +683,25 @@ Page-RAID 恢复通过。
 
 ---
 
-### Task 10: Guest 工具和端到端串行验证（部分完成）
+### Task 10: Guest 工具和端到端串行验证（已完成）
 
 **Files:**
 - Modify: `rootfs/profile.d/mtd.sh`
 - Modify: `rootfs/init`
 - Modify: `tests/test_scripts.sh`
 - Modify: `README.md`
+- Modify: `linux/drivers/mtd/nand/raw/qemu_3dnand*.{c,h}`
+- Modify: `qemu/hw/mtd/q3n-nand.c`
+- Modify: `qemu/include/hw/mtd/q3n-nand.h`
+
+原 Files 列表遗漏了 Step 2/3 所需的真实设备接口。Task 10 实施时按职责补齐：
+QEMU 只标记和统计物理 foreground/parity 命令并提供单次物理 program
+fault；Linux 驱动计算 parity 物理地址、维护 stripe 事件统计和 pending 高水位。
 
 **Interfaces:**
 - Produces: reproducible guest commands for priority, order, parity state and fault tests.
 
-- [ ] **Step 1: 添加失败的命令门禁**
+- [x] **Step 1: 添加失败的命令门禁**
 
 ```sh
 assert_contains rootfs/profile.d/mtd.sh 'q3n-serial-smoke'
@@ -703,15 +710,15 @@ assert_contains rootfs/profile.d/mtd.sh 'order_errors'
 assert_contains rootfs/profile.d/mtd.sh 'unprotected'
 ```
 
-- [ ] **Step 2: 实现 guest 测试命令**
+- [x] **Step 2: 实现 guest 测试命令**
 
 `q3n-serial-smoke` 依次执行：erase、逐 16KiB 写 7 页、每页立即读回、检查 parity queued/protected、注入 parity fail、确认 data 仍可读。
 
-- [ ] **Step 3: 增加页序和优先级统计**
+- [x] **Step 3: 增加页序和优先级统计**
 
 输出 foreground ops、parity reads/writes、order errors、protected/unprotected/failed stripe 和最大 pending parity。
 
-- [ ] **Step 4: 运行完整构建和 QEMU smoke**
+- [x] **Step 4: 运行完整构建和 QEMU smoke**
 
 ```bash
 ./scripts/smoke-test.sh
@@ -719,11 +726,19 @@ assert_contains rootfs/profile.d/mtd.sh 'unprotected'
 ./scripts/shell.sh ./scripts/build-kernel.sh
 ./scripts/shell.sh ./scripts/build-rootfs.sh
 ./scripts/shell.sh ./scripts/run-qemu.sh --append "MTD_SMOKE=1"
+./scripts/shell.sh ./scripts/run-qemu.sh --fresh-nand \
+  --append "MTD_SMOKE=q3n-serial-smoke"
 ```
 
 Expected: all exit 0; `order_errors=0`; data readable before/after parity failure; protected count increases after full stripe.
 
-- [ ] **Step 5: 提交**
+2026-07-19 验收：结构 smoke、QEMU/Linux/rootfs 构建和通用 guest smoke
+均 exit 0；KUnit `pass:23 fail:0`；串行 guest 输出
+`foreground_ops=35 parity_reads=14 parity_writes=2 order_errors=0`
+`protected_stripes=1 unprotected_stripes=2 failed_stripes=1`
+`pending_parity=0 max_pending_parity=1`，并打印 `q3n serial smoke passed`。
+
+- [x] **Step 5: 提交**
 
 ```bash
 git add rootfs tests README.md

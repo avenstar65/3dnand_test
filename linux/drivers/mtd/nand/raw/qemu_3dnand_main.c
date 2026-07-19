@@ -83,6 +83,9 @@ struct qemu_3dnand {
 	u64 raid_recovered;
 	u64 raid_failed;
 	u64 generation_updates;
+	u64 protected_stripes;
+	u64 unprotected_stripes;
+	u64 failed_stripes;
 };
 
 struct qemu_3dnand_parity_work {
@@ -188,13 +191,15 @@ static void qemu_3dnand_set_addr(struct qemu_3dnand *q3n, loff_t addr)
 }
 
 static int qemu_3dnand_read_phys_page_locked(struct qemu_3dnand *q3n,
-					     u32 block, u32 page, u8 *buf)
+					     u32 block, u32 page, u8 *buf,
+					     u32 op_class)
 {
 	u32 *words = (u32 *)buf;
 	int ret;
 	u32 i;
 
 	qemu_3dnand_set_addr(q3n, qemu_3dnand_phys_addr(q3n, block, page));
+	qemu_3dnand_writel(q3n, Q3N_REG_OP_CLASS, op_class);
 	qemu_3dnand_writel(q3n, Q3N_REG_LEN, q3n->page_size);
 	qemu_3dnand_writel(q3n, Q3N_REG_CMD, Q3N_CMD_READ_PAGE);
 	ret = qemu_3dnand_wait_ready(q3n);
@@ -209,13 +214,14 @@ static int qemu_3dnand_read_phys_page_locked(struct qemu_3dnand *q3n,
 
 static int qemu_3dnand_program_phys_page_locked(struct qemu_3dnand *q3n,
 						u32 block, u32 page,
-						const u8 *buf)
+						const u8 *buf, u32 op_class)
 {
 	const u32 *words = (const u32 *)buf;
 	int ret;
 	u32 i;
 
 	qemu_3dnand_set_addr(q3n, qemu_3dnand_phys_addr(q3n, block, page));
+	qemu_3dnand_writel(q3n, Q3N_REG_OP_CLASS, op_class);
 	qemu_3dnand_writel(q3n, Q3N_REG_LEN, q3n->page_size);
 	for (i = 0; i < q3n->page_size / sizeof(u32); i++)
 		qemu_3dnand_writel(q3n, Q3N_REG_DATA, words[i]);
@@ -339,7 +345,8 @@ static int qemu_3dnand_commit_parity_locked(struct qemu_3dnand *q3n,
 	int ret;
 
 	ret = qemu_3dnand_program_phys_page_locked(q3n, block,
-			stripe * Q3N_STRIPE_PAGES + Q3N_DATA_PAGES, parity);
+			stripe * Q3N_STRIPE_PAGES + Q3N_DATA_PAGES, parity,
+			Q3N_OP_PARITY_WRITE);
 	if (ret)
 		return ret;
 
@@ -350,6 +357,7 @@ static int qemu_3dnand_commit_parity_locked(struct qemu_3dnand *q3n,
 	entry->sequence = ++q3n->parity_sequence;
 	entry->valid = true;
 	q3n->parity_written++;
+	q3n->protected_stripes++;
 	return 0;
 }
 
@@ -368,8 +376,9 @@ static int qemu_3dnand_append_parity_locked(struct qemu_3dnand *q3n,
 	memset(q3n->raid_buf, 0, q3n->page_size);
 	for (lane = 0; lane < Q3N_DATA_PAGES; lane++) {
 		ret = qemu_3dnand_read_phys_page_locked(q3n, block,
-						 stripe * Q3N_STRIPE_PAGES + lane,
-							q3n->page_buf);
+					 stripe * Q3N_STRIPE_PAGES + lane,
+							q3n->page_buf,
+							Q3N_OP_PARITY_READ);
 		if (ret)
 			return ret;
 		for (i = 0; i < q3n->page_size; i++)
@@ -481,6 +490,7 @@ static void qemu_3dnand_parity_worker(struct work_struct *work)
 		atomic_dec(&q3n->parity_paused);
 	}
 
+again:
 	if (!parity->request_queued) {
 		ret = q3n_sched_requeue_p1(&q3n->sched,
 					   &parity->request);
@@ -507,15 +517,17 @@ static void qemu_3dnand_parity_worker(struct work_struct *work)
 		mutex_unlock(&parity->q3n->mtd_lock);
 		if (ret == -ESTALE)
 			parity->q3n->parity_stale++;
-		else
+		else {
 			parity->q3n->raid_failed++;
+			parity->q3n->failed_stripes++;
+		}
 		goto out_finish;
 	}
 	ret = q3n_sched_try_start(&parity->q3n->sched, &parity->request);
 	if (ret == -EAGAIN) {
 		mutex_unlock(&parity->q3n->mtd_lock);
-		queue_work(parity->q3n->parity_wq, &parity->work);
-		return;
+		cond_resched();
+		goto again;
 	}
 	if (ret) {
 		mutex_unlock(&parity->q3n->mtd_lock);
@@ -528,7 +540,7 @@ static void qemu_3dnand_parity_worker(struct work_struct *work)
 			parity->block,
 			parity->stripe * Q3N_STRIPE_PAGES +
 				parity->rebuild.next_slot,
-			parity->page_buf);
+			parity->page_buf, Q3N_OP_PARITY_READ);
 		if (!ret)
 			ret = q3n_rebuild_xor_one(&parity->rebuild,
 						  parity->page_buf);
@@ -557,11 +569,12 @@ static void qemu_3dnand_parity_worker(struct work_struct *work)
 	if (parity->rebuild.next_slot == Q3N_DATA_PAGES &&
 	    !parity->request_queued)
 		goto out_finish;
-	queue_work(parity->q3n->parity_wq, &parity->work);
-	return;
+	cond_resched();
+	goto again;
 
 out_failed:
 	parity->q3n->raid_failed++;
+	parity->q3n->failed_stripes++;
 out_finish:
 	qemu_3dnand_finish_parity_work(parity);
 }
@@ -642,7 +655,8 @@ static int qemu_3dnand_recover_page_locked(struct qemu_3dnand *q3n,
 	}
 
 	ret = qemu_3dnand_read_phys_page_locked(q3n, entry->physical_block,
-						entry->page, buf);
+						entry->page, buf,
+						Q3N_OP_FOREGROUND);
 	if (ret)
 		return ret;
 
@@ -654,8 +668,9 @@ static int qemu_3dnand_recover_page_locked(struct qemu_3dnand *q3n,
 							       stripe * Q3N_STRIPE_PAGES + lane)])
 			return -EIO;
 		ret = qemu_3dnand_read_phys_page_locked(q3n, data_block,
-						 stripe * Q3N_STRIPE_PAGES + lane,
-							q3n->page_buf);
+					 stripe * Q3N_STRIPE_PAGES + lane,
+							q3n->page_buf,
+							Q3N_OP_FOREGROUND);
 		if (ret)
 			return ret;
 		for (i = 0; i < q3n->page_size; i++)
@@ -671,7 +686,8 @@ static int qemu_3dnand_read_data_page_locked(struct qemu_3dnand *q3n,
 {
 	int ret;
 
-	ret = qemu_3dnand_read_phys_page_locked(q3n, data_block, page, buf);
+	ret = qemu_3dnand_read_phys_page_locked(q3n, data_block, page, buf,
+						Q3N_OP_FOREGROUND);
 	if (!ret)
 		return 0;
 
@@ -782,7 +798,8 @@ static int qemu_3dnand_mtd_write(struct mtd_info *mtd, loff_t to, size_t len,
 			break;
 		}
 		ret = qemu_3dnand_program_phys_page_locked(q3n, block, page,
-							   buf + done);
+							   buf + done,
+							   Q3N_OP_FOREGROUND);
 		if (ret) {
 			mutex_unlock(&q3n->mtd_lock);
 			if (parity_reserved)
@@ -794,8 +811,12 @@ static int qemu_3dnand_mtd_write(struct mtd_info *mtd, loff_t to, size_t len,
 								  page)] = 1;
 		q3n->data_meta[block].erased = false;
 		stripe = page / Q3N_STRIPE_PAGES;
-		if (parity_reserved)
+		if (parity_reserved) {
+			q3n->unprotected_stripes++;
 			ret = qemu_3dnand_queue_parity_locked(q3n, block, stripe);
+			if (ret)
+				q3n->failed_stripes++;
+		}
 		mutex_unlock(&q3n->mtd_lock);
 		if (ret)
 			break;
@@ -1004,6 +1025,51 @@ static int qemu_3dnand_inject_data_loss(void *data, u64 value)
 	return ret;
 }
 
+static int qemu_3dnand_inject_parity_program_fail(void *data, u64 value)
+{
+	struct qemu_3dnand *q3n = data;
+	u32 block;
+	u32 page;
+	u32 column;
+	u32 parity_page;
+	loff_t phys_addr;
+	int ret;
+
+	if (value >= q3n->mtd.size)
+		return -ERANGE;
+	qemu_3dnand_decode_logical(q3n, value, &block, &page, &column);
+	if (column)
+		return -EINVAL;
+	parity_page = (page / Q3N_STRIPE_PAGES) * Q3N_STRIPE_PAGES +
+		Q3N_DATA_PAGES;
+	phys_addr = qemu_3dnand_phys_addr(q3n, block, parity_page);
+
+	mutex_lock(&q3n->mtd_lock);
+	qemu_3dnand_writel(q3n, Q3N_REG_FAULT_ADDR_LO,
+			   lower_32_bits(phys_addr));
+	qemu_3dnand_writel(q3n, Q3N_REG_FAULT_ADDR_HI,
+			   upper_32_bits(phys_addr));
+	qemu_3dnand_writel(q3n, Q3N_REG_FAULT_CTRL,
+			   Q3N_FAULT_FAIL_NEXT_PROGRAM);
+	ret = qemu_3dnand_wait_ready(q3n);
+	mutex_unlock(&q3n->mtd_lock);
+
+	return ret;
+}
+
+#define Q3N_MMIO_STAT_GETTER(_name, _reg) \
+static int qemu_3dnand_##_name##_get(void *data, u64 *value) \
+{ \
+	struct qemu_3dnand *q3n = data; \
+	*value = qemu_3dnand_readl(q3n, _reg); \
+	return 0; \
+}
+
+Q3N_MMIO_STAT_GETTER(foreground_ops, Q3N_REG_STAT_FG_OPS)
+Q3N_MMIO_STAT_GETTER(parity_reads, Q3N_REG_STAT_PARITY_READS)
+Q3N_MMIO_STAT_GETTER(parity_writes, Q3N_REG_STAT_PARITY_WRITES)
+Q3N_MMIO_STAT_GETTER(order_errors, Q3N_REG_STAT_ORDER_ERRORS)
+
 static int qemu_3dnand_raid_recovered_get(void *data, u64 *value)
 {
 	struct qemu_3dnand *q3n = data;
@@ -1049,6 +1115,30 @@ static int qemu_3dnand_generation_updates_get(void *data, u64 *value)
 	struct qemu_3dnand *q3n = data;
 
 	*value = q3n->generation_updates;
+	return 0;
+}
+
+static int qemu_3dnand_protected_stripes_get(void *data, u64 *value)
+{
+	struct qemu_3dnand *q3n = data;
+
+	*value = q3n->protected_stripes;
+	return 0;
+}
+
+static int qemu_3dnand_unprotected_stripes_get(void *data, u64 *value)
+{
+	struct qemu_3dnand *q3n = data;
+
+	*value = q3n->unprotected_stripes;
+	return 0;
+}
+
+static int qemu_3dnand_failed_stripes_get(void *data, u64 *value)
+{
+	struct qemu_3dnand *q3n = data;
+
+	*value = q3n->failed_stripes;
 	return 0;
 }
 
@@ -1105,7 +1195,7 @@ static int qemu_3dnand_pending_parity_get(void *data, u64 *value)
 	u32 pending;
 	u32 reserved;
 
-	q3n_sched_get_counts(&q3n->sched, &pending, &reserved);
+	q3n_sched_get_counts(&q3n->sched, &pending, &reserved, NULL);
 	*value = pending;
 	return 0;
 }
@@ -1116,13 +1206,35 @@ static int qemu_3dnand_reserved_parity_get(void *data, u64 *value)
 	u32 pending;
 	u32 reserved;
 
-	q3n_sched_get_counts(&q3n->sched, &pending, &reserved);
+	q3n_sched_get_counts(&q3n->sched, &pending, &reserved, NULL);
 	*value = reserved;
+	return 0;
+}
+
+static int qemu_3dnand_max_pending_parity_get(void *data, u64 *value)
+{
+	struct qemu_3dnand *q3n = data;
+	u32 pending;
+	u32 reserved;
+	u32 max_pending;
+
+	q3n_sched_get_counts(&q3n->sched, &pending, &reserved, &max_pending);
+	*value = max_pending;
 	return 0;
 }
 
 DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_inject_data_loss_fops, NULL,
 			 qemu_3dnand_inject_data_loss, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_inject_parity_program_fail_fops, NULL,
+			 qemu_3dnand_inject_parity_program_fail, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_foreground_ops_fops,
+			 qemu_3dnand_foreground_ops_get, NULL, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_parity_reads_fops,
+			 qemu_3dnand_parity_reads_get, NULL, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_parity_writes_fops,
+			 qemu_3dnand_parity_writes_get, NULL, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_order_errors_fops,
+			 qemu_3dnand_order_errors_get, NULL, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_raid_recovered_fops,
 			 qemu_3dnand_raid_recovered_get, NULL, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_raid_failed_fops,
@@ -1135,6 +1247,12 @@ DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_parity_written_fops,
 			 qemu_3dnand_parity_written_get, NULL, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_generation_updates_fops,
 			 qemu_3dnand_generation_updates_get, NULL, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_protected_stripes_fops,
+			 qemu_3dnand_protected_stripes_get, NULL, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_unprotected_stripes_fops,
+			 qemu_3dnand_unprotected_stripes_get, NULL, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_failed_stripes_fops,
+			 qemu_3dnand_failed_stripes_get, NULL, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_parity_pause_block_fops,
 			 qemu_3dnand_parity_pause_block_get,
 			 qemu_3dnand_parity_pause_block_set, "%llu\n");
@@ -1147,12 +1265,25 @@ DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_pending_parity_fops,
 			 qemu_3dnand_pending_parity_get, NULL, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_reserved_parity_fops,
 			 qemu_3dnand_reserved_parity_get, NULL, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_max_pending_parity_fops,
+			 qemu_3dnand_max_pending_parity_get, NULL, "%llu\n");
 
 static void qemu_3dnand_debugfs_init(struct qemu_3dnand *q3n)
 {
 	q3n->debugfs_dir = debugfs_create_dir("qemu_3dnand", NULL);
 	debugfs_create_file("inject_data_loss", 0200, q3n->debugfs_dir, q3n,
 			    &qemu_3dnand_inject_data_loss_fops);
+	debugfs_create_file("inject_parity_program_fail", 0200,
+			    q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_inject_parity_program_fail_fops);
+	debugfs_create_file("foreground_ops", 0400, q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_foreground_ops_fops);
+	debugfs_create_file("parity_reads", 0400, q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_parity_reads_fops);
+	debugfs_create_file("parity_writes", 0400, q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_parity_writes_fops);
+	debugfs_create_file("order_errors", 0400, q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_order_errors_fops);
 	debugfs_create_file("raid_recovered", 0400, q3n->debugfs_dir, q3n,
 			    &qemu_3dnand_raid_recovered_fops);
 	debugfs_create_file("raid_failed", 0400, q3n->debugfs_dir, q3n,
@@ -1163,6 +1294,12 @@ static void qemu_3dnand_debugfs_init(struct qemu_3dnand *q3n)
 			    &qemu_3dnand_parity_written_fops);
 	debugfs_create_file("generation_updates", 0400, q3n->debugfs_dir, q3n,
 			    &qemu_3dnand_generation_updates_fops);
+	debugfs_create_file("protected_stripes", 0400, q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_protected_stripes_fops);
+	debugfs_create_file("unprotected_stripes", 0400, q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_unprotected_stripes_fops);
+	debugfs_create_file("failed_stripes", 0400, q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_failed_stripes_fops);
 	debugfs_create_file("faults_injected", 0400, q3n->debugfs_dir, q3n,
 			    &qemu_3dnand_faults_injected_fops);
 	debugfs_create_file("parity_pause_block", 0600, q3n->debugfs_dir, q3n,
@@ -1175,6 +1312,8 @@ static void qemu_3dnand_debugfs_init(struct qemu_3dnand *q3n)
 			    &qemu_3dnand_pending_parity_fops);
 	debugfs_create_file("reserved_parity", 0400, q3n->debugfs_dir, q3n,
 			    &qemu_3dnand_reserved_parity_fops);
+	debugfs_create_file("max_pending_parity", 0400, q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_max_pending_parity_fops);
 }
 
 static int qemu_3dnand_probe(struct pci_dev *pdev,

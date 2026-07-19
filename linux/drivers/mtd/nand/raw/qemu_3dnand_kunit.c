@@ -332,6 +332,26 @@ static void q3n_scheduler_reserves_capacity_per_stripe_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, q3n_sched_reserve_parity(&sched), 0);
 }
 
+static void q3n_scheduler_tracks_max_pending_test(struct kunit *test)
+{
+	struct q3n_sched sched;
+	struct q3n_request first = { .class = Q3N_REQ_PARITY_READ,
+		.op = Q3N_REQ_READ };
+	struct q3n_request second = { .class = Q3N_REQ_PARITY_WRITE,
+		.op = Q3N_REQ_PROGRAM };
+	u32 pending;
+	u32 reserved;
+	u32 max_pending;
+
+	q3n_sched_init(&sched);
+	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &first), 0);
+	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &second), 0);
+	KUNIT_ASSERT_PTR_EQ(test, q3n_sched_pick_next(&sched), &first);
+	q3n_sched_get_counts(&sched, &pending, &reserved, &max_pending);
+	KUNIT_EXPECT_EQ(test, pending, 1U);
+	KUNIT_EXPECT_EQ(test, max_pending, 2U);
+}
+
 static void q3n_block_barrier_blocks_new_work_and_drains_test(struct kunit *test)
 {
 	struct q3n_block_barrier barrier;
@@ -393,6 +413,7 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_scheduler_foreground_preempts_requeued_rebuild_test),
 	KUNIT_CASE(q3n_scheduler_p1_claim_preserves_foreground_test),
 	KUNIT_CASE(q3n_scheduler_reserves_capacity_per_stripe_test),
+	KUNIT_CASE(q3n_scheduler_tracks_max_pending_test),
 	KUNIT_CASE(q3n_block_barrier_blocks_new_work_and_drains_test),
 	KUNIT_CASE(q3n_block_barrier_terminal_put_wakes_on_drain_test),
 	{}

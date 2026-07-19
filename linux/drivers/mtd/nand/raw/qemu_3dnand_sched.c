@@ -128,6 +128,7 @@ void q3n_sched_init(struct q3n_sched *sched)
 	INIT_LIST_HEAD(&sched->parity_write_queue);
 	sched->pending_parity = 0;
 	sched->reserved_parity = 0;
+	sched->max_pending_parity = 0;
 }
 
 int q3n_sched_enqueue(struct q3n_sched *sched, struct q3n_request *req)
@@ -144,8 +145,11 @@ int q3n_sched_enqueue(struct q3n_sched *sched, struct q3n_request *req)
 	spin_lock_irqsave(&sched->lock, flags);
 	INIT_LIST_HEAD(&req->node);
 	list_add_tail(&req->node, queue);
-	if (req->class != Q3N_REQ_FOREGROUND)
+	if (req->class != Q3N_REQ_FOREGROUND) {
 		sched->pending_parity++;
+		if (sched->pending_parity > sched->max_pending_parity)
+			sched->max_pending_parity = sched->pending_parity;
+	}
 	spin_unlock_irqrestore(&sched->lock, flags);
 	return 0;
 }
@@ -206,13 +210,15 @@ void q3n_sched_release_parity(struct q3n_sched *sched)
 }
 
 void q3n_sched_get_counts(struct q3n_sched *sched, u32 *pending,
-			  u32 *reserved)
+			  u32 *reserved, u32 *max_pending)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&sched->lock, flags);
 	*pending = sched->pending_parity;
 	*reserved = sched->reserved_parity;
+	if (max_pending)
+		*max_pending = sched->max_pending_parity;
 	spin_unlock_irqrestore(&sched->lock, flags);
 }
 

@@ -154,6 +154,16 @@ assert_contains rootfs/profile.d/mtd.sh 'qemu-3dnand'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-inject-loss'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-stats'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-serial-smoke'
+assert_contains rootfs/profile.d/mtd.sh 'q3n-parity-stats'
+for counter in foreground_ops parity_reads parity_writes order_errors \
+		protected_stripes unprotected_stripes failed_stripes \
+		max_pending_parity; do
+	assert_contains rootfs/profile.d/mtd.sh "$counter"
+done
+assert_contains rootfs/profile.d/mtd.sh 'inject_parity_program_fail'
+assert_contains rootfs/profile.d/mtd.sh 'while.*page.*-lt 7'
+assert_contains rootfs/profile.d/mtd.sh 'cmp.*q3n-serial-page'
+assert_contains rootfs/init 'q3n-serial-smoke.*mtd_q3n_serial_smoke'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-generation-smoke'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-cancel-barrier-smoke'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-markbad-smoke'
@@ -176,9 +186,9 @@ assert_contains rootfs/profile.d/mtd.sh 'cancel_writer_pid=\$!'
 assert_contains rootfs/profile.d/mtd.sh 'wait "\$cancel_writer_pid"'
 assert_contains rootfs/profile.d/mtd.sh 'dd if=/tmp/q3n-cancel\.bin of="\$mtd_dev" bs=16384 count=7 2>/tmp/q3n-cancel-dd\.err[[:space:]]*&[[:space:]]*$'
 assert_not_contains rootfs/profile.d/mtd.sh 'kill "\$cancel_writer_pid"'
-assert_contains rootfs/profile.d/mtd.sh 'parity_written_before'
-assert_contains rootfs/profile.d/mtd.sh 'raid_recovered_before'
-assert_contains rootfs/profile.d/mtd.sh 'parity_written'
+assert_contains rootfs/profile.d/mtd.sh 'protected_after'
+assert_contains rootfs/profile.d/mtd.sh 'failed_after'
+assert_contains rootfs/profile.d/mtd.sh 'inject_parity_program_fail'
 assert_contains README.md 'QEMU'
 assert_contains README.md 'MTD'
 assert_contains README.md 'MTD_SMOKE=ubifs'
@@ -204,7 +214,8 @@ for symbol in \
   Q3N_REG_STAT_FG_OPS \
   Q3N_REG_STAT_PARITY_READS \
   Q3N_REG_STAT_PARITY_WRITES \
-  Q3N_REG_STAT_ORDER_ERRORS; do
+  Q3N_REG_STAT_ORDER_ERRORS \
+  Q3N_FAULT_FAIL_NEXT_PROGRAM; do
   assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h "$symbol"
   assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
 done
@@ -225,6 +236,10 @@ assert_contains qemu/hw/mtd/q3n-nand.c 'next_prog_page'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_check_program_order'
 assert_contains qemu/hw/mtd/q3n-media.c 'Q3N_BBM_GOOD'
 assert_contains qemu/hw/mtd/q3n-nand.c 'stat_order_errors'
+assert_contains qemu/hw/mtd/q3n-nand.c 'fail_next_program'
+assert_contains qemu/hw/mtd/q3n-nand.c 'stats\.fg_ops\+\+'
+assert_contains qemu/hw/mtd/q3n-nand.c 'stats\.parity_reads\+\+'
+assert_contains qemu/hw/mtd/q3n-nand.c 'stats\.parity_writes\+\+'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_inject_data_loss'
 assert_contains qemu/hw/mtd/q3n-nand.c 'faults_injected'
 assert_not_contains qemu/hw/mtd/q3n-nand.c 'q3n_append_parity_record'
@@ -252,7 +267,9 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_finis
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_cancel_block_parity'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'wait_event.*pending_parity'
 for name in parity_pause_block parity_pause_enable parity_paused \
-		pending_parity reserved_parity; do
+		pending_parity reserved_parity foreground_ops parity_reads \
+		parity_writes order_errors protected_stripes unprotected_stripes \
+		failed_stripes max_pending_parity inject_parity_program_fail; do
 	assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
 		"debugfs_create_file.*$name"
 done
@@ -298,8 +315,11 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'struct mutex mtd_
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'q3n_sched_enqueue'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'q3n_sched_try_start\(&parity->q3n->sched'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'q3n_sched_requeue_p1\(&parity->q3n->sched'
+assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'queue_work\(parity->q3n->parity_wq, &parity->work\)'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'cond_resched\(\)'
 assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'IS_ALIGNED\(instr->addr, mtd->erasesize\)'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_map_non_power_of_two_geometry_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_program_order_test'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_scheduler_tracks_max_pending_test'
 
 printf 'ok: script structure verified\n'

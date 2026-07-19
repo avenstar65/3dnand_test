@@ -23,6 +23,7 @@
 #define Q3N_REG_POOL0                  0x0028
 #define Q3N_REG_POOL1                  0x002c
 #define Q3N_REG_OOB_LEN                0x0030
+#define Q3N_REG_OP_CLASS               0x0034
 #define Q3N_REG_STAT_PAGE_PROGRAMS     0x0040
 #define Q3N_REG_STAT_BLOCK_ERASES      0x0044
 #define Q3N_REG_STAT_PAGE_READ_ERRORS  0x0048
@@ -58,5 +59,10 @@
 #define Q3N_CMD_MARK_BAD_BLOCK         9
 
 #define Q3N_FAULT_INJECT_DATA_LOSS     BIT(0)
+#define Q3N_FAULT_FAIL_NEXT_PROGRAM    BIT(1)
+
+#define Q3N_OP_FOREGROUND              0
+#define Q3N_OP_PARITY_READ             1
+#define Q3N_OP_PARITY_WRITE            2
 
 #endif
