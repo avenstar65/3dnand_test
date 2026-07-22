@@ -364,6 +364,7 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_pack_data_oob
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_unpack_data_oob'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_pack_parity_oob'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_unpack_parity_oob'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'manifest->data_crc\[lane\] = cpu_to_le32\(stripe->data_crc\[lane\]\)'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'Q3N_STRIPE_UNPROTECTED'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'q3n->parity_index = kvcalloc'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'kvfree\(q3n->parity_index\)'
@@ -399,6 +400,12 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_read_
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_program_phys_page_oob_locked'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_READ_PAGE_OOB'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_PROGRAM_PAGE_OOB'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_validate_replay_members_locked'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'le32_to_cpu\(manifest->data_crc\[lane\]\) != data_crc'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'get_unaligned_le32'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'put_unaligned_le32'
+assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'u32 \*oob_words'
+assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'u32 \*data_words'
 
 controller_tmp=$(mktemp -d "${TMPDIR:-/tmp}/q3n-controller.XXXXXX")
 trap 'rm -rf "$controller_tmp"' EXIT HUP INT TERM

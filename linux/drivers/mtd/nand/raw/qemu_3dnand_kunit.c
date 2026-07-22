@@ -216,6 +216,7 @@ static void q3n_parity_oob_round_trip_and_crc_validation_test(struct kunit *test
 
 	KUNIT_ASSERT_EQ(test, q3n_open_stripe_update(&stripe, 0, data,
 						       sizeof(data)), 0);
+	stripe.data_crc[0] = 0x11223344;
 	KUNIT_ASSERT_EQ(test, q3n_build_manifest(&stripe, &manifest), 0);
 	KUNIT_ASSERT_EQ(test, q3n_pack_parity_oob(logical_oob,
 						   sizeof(logical_oob), &manifest), 0);
@@ -224,6 +225,20 @@ static void q3n_parity_oob_round_trip_and_crc_validation_test(struct kunit *test
 						     sizeof(logical_oob), &decoded), 0);
 	KUNIT_EXPECT_MEMEQ(test, &decoded, &manifest, sizeof(decoded));
 	KUNIT_EXPECT_MEMEQ(test, logical_oob + 1, &manifest, sizeof(manifest));
+	KUNIT_EXPECT_EQ(test, le32_to_cpu(decoded.data_crc[0]),
+			stripe.data_crc[0]);
+	KUNIT_EXPECT_EQ(test,
+		logical_oob[1 + offsetof(struct q3n_parity_manifest, data_crc)],
+		(u8)0x44);
+	KUNIT_EXPECT_EQ(test,
+		logical_oob[2 + offsetof(struct q3n_parity_manifest, data_crc)],
+		(u8)0x33);
+	KUNIT_EXPECT_EQ(test,
+		logical_oob[3 + offsetof(struct q3n_parity_manifest, data_crc)],
+		(u8)0x22);
+	KUNIT_EXPECT_EQ(test,
+		logical_oob[4 + offsetof(struct q3n_parity_manifest, data_crc)],
+		(u8)0x11);
 
 	logical_oob[1 + offsetof(struct q3n_parity_manifest, data_crc)] ^= 1;
 	KUNIT_EXPECT_EQ(test, q3n_unpack_parity_oob(logical_oob,

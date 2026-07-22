@@ -16,6 +16,7 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
+#include <linux/unaligned.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 
@@ -225,8 +226,6 @@ static int qemu_3dnand_read_phys_page_oob_locked(
 		struct qemu_3dnand *q3n, u32 block, u32 page, u8 *data,
 		u8 *logical_oob, u32 op_class, struct q3n_ecc_result *ecc)
 {
-	u32 *data_words = (u32 *)data;
-	u32 *oob_words = (u32 *)logical_oob;
 	int ret;
 	u32 i;
 
@@ -239,10 +238,12 @@ static int qemu_3dnand_read_phys_page_oob_locked(
 	if (ret)
 		return ret;
 
-	for (i = 0; i < q3n->page_size / sizeof(u32); i++)
-		data_words[i] = qemu_3dnand_readl(q3n, Q3N_REG_DATA);
-	for (i = 0; i < Q3N_LOGICAL_OOB_SIZE / sizeof(u32); i++)
-		oob_words[i] = qemu_3dnand_readl(q3n, Q3N_REG_DATA);
+	for (i = 0; i < q3n->page_size; i += sizeof(u32))
+		put_unaligned_le32(qemu_3dnand_readl(q3n, Q3N_REG_DATA),
+				   data + i);
+	for (i = 0; i < Q3N_LOGICAL_OOB_SIZE; i += sizeof(u32))
+		put_unaligned_le32(qemu_3dnand_readl(q3n, Q3N_REG_DATA),
+				   logical_oob + i);
 
 	if (ecc) {
 		ecc->status = qemu_3dnand_readl(q3n, Q3N_REG_ECC_STATUS);
@@ -261,8 +262,6 @@ static int qemu_3dnand_program_phys_page_oob_locked(
 		struct qemu_3dnand *q3n, u32 block, u32 page, const u8 *data,
 		const u8 *logical_oob, u32 op_class)
 {
-	const u32 *data_words = (const u32 *)data;
-	const u32 *oob_words = (const u32 *)logical_oob;
 	int ret;
 	u32 i;
 
@@ -270,10 +269,12 @@ static int qemu_3dnand_program_phys_page_oob_locked(
 	qemu_3dnand_writel(q3n, Q3N_REG_OP_CLASS, op_class);
 	qemu_3dnand_writel(q3n, Q3N_REG_LEN, q3n->page_size);
 	qemu_3dnand_writel(q3n, Q3N_REG_OOB_LEN, Q3N_LOGICAL_OOB_SIZE);
-	for (i = 0; i < q3n->page_size / sizeof(u32); i++)
-		qemu_3dnand_writel(q3n, Q3N_REG_DATA, data_words[i]);
-	for (i = 0; i < Q3N_LOGICAL_OOB_SIZE / sizeof(u32); i++)
-		qemu_3dnand_writel(q3n, Q3N_REG_DATA, oob_words[i]);
+	for (i = 0; i < q3n->page_size; i += sizeof(u32))
+		qemu_3dnand_writel(q3n, Q3N_REG_DATA,
+				     get_unaligned_le32(data + i));
+	for (i = 0; i < Q3N_LOGICAL_OOB_SIZE; i += sizeof(u32))
+		qemu_3dnand_writel(q3n, Q3N_REG_DATA,
+				     get_unaligned_le32(logical_oob + i));
 
 	qemu_3dnand_writel(q3n, Q3N_REG_CMD, Q3N_CMD_PROGRAM_PAGE_OOB);
 	ret = qemu_3dnand_wait_ready(q3n);
@@ -376,6 +377,35 @@ static int qemu_3dnand_validate_data_metadata(
 
 	if (data_crc)
 		*data_crc = crc;
+	return 0;
+}
+
+static int qemu_3dnand_validate_replay_members_locked(
+		struct qemu_3dnand *q3n, u32 block, u32 stripe,
+		const struct q3n_parity_manifest *manifest)
+{
+	u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
+	struct q3n_ecc_result ecc;
+	u32 data_crc;
+	u32 lane;
+	int ret;
+
+	for (lane = 0; lane < Q3N_DATA_PAGES; lane++) {
+		ret = qemu_3dnand_read_phys_page_oob_locked(q3n, block,
+			stripe * Q3N_STRIPE_PAGES + lane, q3n->page_buf,
+			logical_oob, Q3N_OP_PARITY_READ, &ecc);
+		if (ret)
+			return ret;
+		ret = qemu_3dnand_validate_data_metadata(q3n->page_buf,
+			q3n->page_size, logical_oob,
+			qemu_3dnand_stripe_id(q3n, block, stripe), lane,
+			&data_crc);
+		if (ret)
+			return ret;
+		if (le32_to_cpu(manifest->data_crc[lane]) != data_crc)
+			return -EBADMSG;
+	}
+
 	return 0;
 }
 
@@ -562,6 +592,9 @@ static int qemu_3dnand_restore_media_locked(struct qemu_3dnand *q3n)
 			if (!ret && le32_to_cpu(manifest.parity_crc) !=
 				crc32_le(~0, q3n->page_buf, q3n->page_size))
 				ret = -EBADMSG;
+			if (!ret)
+				ret = qemu_3dnand_validate_replay_members_locked(
+					q3n, block, stripe, &manifest);
 			if (ret) {
 				entry->valid = false;
 				q3n->raid_failed++;

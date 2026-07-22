@@ -77,6 +77,8 @@ void q3n_open_stripe_complete_parity(struct q3n_open_stripe *stripe, bool ok)
 int q3n_build_manifest(const struct q3n_open_stripe *stripe,
 		       struct q3n_parity_manifest *manifest)
 {
+	u8 lane;
+
 	if (!stripe || !manifest || !stripe->parity || !stripe->page_size ||
 	    stripe->data_pages == 0 || stripe->data_pages > Q3N_RAID_MAX_DATA_PAGES ||
 	    stripe->member_bitmap != q3n_member_mask(stripe->data_pages))
@@ -88,7 +90,8 @@ int q3n_build_manifest(const struct q3n_open_stripe *stripe,
 	manifest->data_pages = stripe->data_pages;
 	manifest->stripe_id = cpu_to_le64(stripe->stripe_id);
 	manifest->member_bitmap = cpu_to_le16(stripe->member_bitmap);
-	memcpy(manifest->data_crc, stripe->data_crc, sizeof(manifest->data_crc));
+	for (lane = 0; lane < Q3N_RAID_MAX_DATA_PAGES; lane++)
+		manifest->data_crc[lane] = cpu_to_le32(stripe->data_crc[lane]);
 	manifest->parity_crc = cpu_to_le32(crc32_le(~0, stripe->parity,
 						     stripe->page_size));
 	manifest->header_crc = cpu_to_le32(q3n_manifest_header_crc(manifest));
