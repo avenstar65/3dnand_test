@@ -944,6 +944,174 @@ static int qemu_3dnand_mtd_read(struct mtd_info *mtd, loff_t from, size_t len,
 	return ret;
 }
 
+static int qemu_3dnand_mtd_read_oob(struct mtd_info *mtd, loff_t from,
+				     struct mtd_oob_ops *ops)
+{
+	struct qemu_3dnand *q3n = mtd->priv;
+	struct q3n_request req = {
+		.class = Q3N_REQ_FOREGROUND,
+		.op = Q3N_REQ_READ,
+	};
+	size_t data_done = 0;
+	size_t oob_done = 0;
+	u32 ooboffs;
+	u64 logical_page;
+	u32 column;
+	int ret = 0;
+
+	if (!ops)
+		return -EINVAL;
+	ops->retlen = 0;
+	ops->oobretlen = 0;
+	if (ops->mode != MTD_OPS_PLACE_OOB && ops->mode != MTD_OPS_RAW)
+		return -EOPNOTSUPP;
+	if (from < 0 || from + ops->len > mtd->size)
+		return -EINVAL;
+	if (ops->ooboffs >= Q3N_LOGICAL_OOB_SIZE && ops->ooblen)
+		return -EINVAL;
+	if (!ops->oobbuf)
+		return qemu_3dnand_mtd_read(mtd, from, ops->len,
+					    &ops->retlen, ops->datbuf);
+
+	logical_page = div64_u64(from, q3n->page_size);
+	column = from % q3n->page_size;
+	ooboffs = ops->ooboffs;
+	ret = qemu_3dnand_lock_request(q3n, &req);
+	if (ret)
+		return ret;
+	while (data_done < ops->len || oob_done < ops->ooblen) {
+		struct q3n_ecc_result ecc;
+		loff_t page_addr = logical_page * q3n->page_size;
+		size_t data_chunk = min_t(size_t, ops->len - data_done,
+					       q3n->page_size - column);
+		size_t oob_chunk = min_t(size_t, ops->ooblen - oob_done,
+					      Q3N_LOGICAL_OOB_SIZE - ooboffs);
+		u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
+		u32 block, page, ignored;
+
+		qemu_3dnand_decode_logical(q3n, page_addr, &block, &page,
+					   &ignored);
+		if (q3n_block_is_cancelling(
+				&q3n->data_meta[block].parity_barrier)) {
+			ret = -EBUSY;
+			break;
+		}
+		ret = qemu_3dnand_read_phys_page_oob_locked(q3n, block, page,
+				q3n->page_buf, logical_oob, Q3N_OP_FOREGROUND,
+				&ecc);
+		if (ret)
+			break;
+		if (data_chunk)
+			memcpy(ops->datbuf + data_done,
+			       q3n->page_buf + column, data_chunk);
+		if (oob_chunk)
+			memcpy(ops->oobbuf + oob_done, logical_oob + ooboffs,
+			       oob_chunk);
+		data_done += data_chunk;
+		oob_done += oob_chunk;
+		logical_page++;
+		column = 0;
+		ooboffs = 0;
+	}
+	mutex_unlock(&q3n->mtd_lock);
+
+	ops->retlen = data_done;
+	ops->oobretlen = oob_done;
+	return ret;
+}
+
+static int qemu_3dnand_program_logical_page(struct qemu_3dnand *q3n,
+					    u32 block, u32 page,
+					    const u8 *data,
+					    const u8 *oob, u32 ooboffs,
+					    size_t ooblen)
+{
+	struct q3n_request req = {
+		.class = Q3N_REQ_FOREGROUND,
+		.op = Q3N_REQ_PROGRAM,
+		.block_state = &q3n->program_state[block],
+		.page = page,
+	};
+	struct q3n_data_meta page_meta;
+	u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
+	const u8 *program_data = data;
+	u32 stripe;
+	bool parity_reserved = false;
+	int ret;
+
+	mutex_lock(&q3n->mtd_lock);
+	ret = q3n->data_meta[block].bad ? -EIO : 0;
+	mutex_unlock(&q3n->mtd_lock);
+	if (ret)
+		return ret;
+	if (page % Q3N_STRIPE_PAGES == Q3N_DATA_PAGES - 1) {
+		ret = qemu_3dnand_reserve_parity(q3n);
+		if (ret)
+			return ret;
+		parity_reserved = true;
+	}
+	ret = qemu_3dnand_lock_request(q3n, &req);
+	if (ret)
+		goto out_release_parity;
+	if (q3n_block_is_cancelling(
+			&q3n->data_meta[block].parity_barrier)) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+	if (q3n->data_meta[block].bad) {
+		ret = -EIO;
+		goto out_unlock;
+	}
+
+	if (data) {
+		memset(&page_meta, 0, sizeof(page_meta));
+		page_meta.slot = page % Q3N_STRIPE_PAGES;
+		page_meta.stripe_id = cpu_to_le64(qemu_3dnand_stripe_id(
+			q3n, block, page / Q3N_STRIPE_PAGES));
+		page_meta.data_crc = cpu_to_le32(crc32_le(~0, data,
+							       q3n->page_size));
+		ret = q3n_pack_data_oob(logical_oob, sizeof(logical_oob),
+					     &page_meta);
+	} else {
+		memset(q3n->page_buf, 0xff, q3n->page_size);
+		memset(logical_oob, 0xff, sizeof(logical_oob));
+		program_data = q3n->page_buf;
+		ret = 0;
+	}
+	if (!ret && ooblen)
+		memcpy(logical_oob + ooboffs, oob, ooblen);
+	if (!ret)
+		ret = qemu_3dnand_program_phys_page_oob_locked(q3n, block,
+			page, program_data, logical_oob, Q3N_OP_FOREGROUND);
+	if (ret)
+		goto out_unlock;
+
+	q3n->data_page_valid[qemu_3dnand_data_page_index(q3n, block,
+							      page)] = 1;
+	q3n->data_meta[block].erased = false;
+	if (page == 0 && logical_oob[0] != 0xff)
+		q3n->data_meta[block].bad = true;
+	stripe = page / Q3N_STRIPE_PAGES;
+	if (parity_reserved) {
+		int parity_ret;
+
+		atomic64_inc(&q3n->unprotected_stripes);
+		parity_ret = qemu_3dnand_queue_parity_locked(q3n, block,
+							stripe);
+		if (parity_ret)
+			atomic64_inc(&q3n->failed_stripes);
+	}
+	mutex_unlock(&q3n->mtd_lock);
+	return 0;
+
+out_unlock:
+	mutex_unlock(&q3n->mtd_lock);
+out_release_parity:
+	if (parity_reserved)
+		q3n_sched_release_parity(&q3n->sched);
+	return ret;
+}
+
 static int qemu_3dnand_mtd_write(struct mtd_info *mtd, loff_t to, size_t len,
 				 size_t *retlen, const u_char *buf)
 {
@@ -957,89 +1125,77 @@ static int qemu_3dnand_mtd_write(struct mtd_info *mtd, loff_t to, size_t len,
 		return -EINVAL;
 
 	while (done < len) {
-		struct q3n_request req = {
-			.class = Q3N_REQ_FOREGROUND,
-			.op = Q3N_REQ_PROGRAM,
-		};
-		u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
-		struct q3n_data_meta page_meta;
 		u32 block, page, column;
-		u32 stripe;
-		bool parity_reserved = false;
 
 		qemu_3dnand_decode_logical(q3n, to + done, &block, &page,
 					   &column);
-		mutex_lock(&q3n->mtd_lock);
-		if (q3n->data_meta[block].bad)
-			ret = -EIO;
-		mutex_unlock(&q3n->mtd_lock);
+		ret = qemu_3dnand_program_logical_page(q3n, block, page,
+							buf + done, NULL, 0, 0);
 		if (ret)
 			break;
-		if (page % Q3N_STRIPE_PAGES == Q3N_DATA_PAGES - 1) {
-			ret = qemu_3dnand_reserve_parity(q3n);
-			if (ret)
-				break;
-			parity_reserved = true;
-		}
-		req.block_state = &q3n->program_state[block];
-		req.page = page;
-		ret = qemu_3dnand_lock_request(q3n, &req);
-		if (ret) {
-			if (parity_reserved)
-				q3n_sched_release_parity(&q3n->sched);
-			break;
-		}
-		if (q3n_block_is_cancelling(
-				&q3n->data_meta[block].parity_barrier)) {
-			mutex_unlock(&q3n->mtd_lock);
-			if (parity_reserved)
-				q3n_sched_release_parity(&q3n->sched);
-			ret = -EBUSY;
-			break;
-		}
-		if (q3n->data_meta[block].bad) {
-			mutex_unlock(&q3n->mtd_lock);
-			if (parity_reserved)
-				q3n_sched_release_parity(&q3n->sched);
-			ret = -EIO;
-			break;
-		}
-		memset(&page_meta, 0, sizeof(page_meta));
-		page_meta.slot = page % Q3N_STRIPE_PAGES;
-		page_meta.stripe_id = cpu_to_le64(qemu_3dnand_stripe_id(
-			q3n, block, page / Q3N_STRIPE_PAGES));
-		page_meta.data_crc = cpu_to_le32(crc32_le(~0, buf + done,
-							       q3n->page_size));
-		ret = q3n_pack_data_oob(logical_oob, sizeof(logical_oob),
-					     &page_meta);
-		if (!ret)
-			ret = qemu_3dnand_program_phys_page_oob_locked(q3n, block,
-				page, buf + done, logical_oob, Q3N_OP_FOREGROUND);
-		if (ret) {
-			mutex_unlock(&q3n->mtd_lock);
-			if (parity_reserved)
-				q3n_sched_release_parity(&q3n->sched);
-			break;
-		}
-
-		q3n->data_page_valid[qemu_3dnand_data_page_index(q3n, block,
-								  page)] = 1;
-		q3n->data_meta[block].erased = false;
-		stripe = page / Q3N_STRIPE_PAGES;
-		if (parity_reserved) {
-			int parity_ret;
-
-			atomic64_inc(&q3n->unprotected_stripes);
-			parity_ret = qemu_3dnand_queue_parity_locked(q3n, block,
-							stripe);
-			if (parity_ret)
-				atomic64_inc(&q3n->failed_stripes);
-		}
-		mutex_unlock(&q3n->mtd_lock);
 		done += q3n->page_size;
 	}
 
 	*retlen = done;
+	return ret;
+}
+
+static int qemu_3dnand_mtd_write_oob(struct mtd_info *mtd, loff_t to,
+				      struct mtd_oob_ops *ops)
+{
+	struct qemu_3dnand *q3n = mtd->priv;
+	size_t data_done = 0;
+	size_t oob_done = 0;
+	u64 logical_page;
+	u32 ooboffs;
+	int ret = 0;
+
+	if (!ops)
+		return -EINVAL;
+	ops->retlen = 0;
+	ops->oobretlen = 0;
+	if (ops->mode != MTD_OPS_PLACE_OOB && ops->mode != MTD_OPS_RAW)
+		return -EOPNOTSUPP;
+	if (to < 0 || to + ops->len > mtd->size)
+		return -EINVAL;
+	if (ops->ooboffs >= Q3N_LOGICAL_OOB_SIZE && ops->ooblen)
+		return -EINVAL;
+	if (!ops->oobbuf)
+		return qemu_3dnand_mtd_write(mtd, to, ops->len,
+					     &ops->retlen, ops->datbuf);
+	if (ops->datbuf &&
+	    (!IS_ALIGNED(to, q3n->page_size) ||
+	     !IS_ALIGNED(ops->len, q3n->page_size)))
+		return -EINVAL;
+
+	logical_page = div64_u64(to, q3n->page_size);
+	ooboffs = ops->ooboffs;
+	while (data_done < ops->len || oob_done < ops->ooblen) {
+		loff_t page_addr = logical_page * q3n->page_size;
+		size_t oob_chunk = min_t(size_t, ops->ooblen - oob_done,
+					      Q3N_LOGICAL_OOB_SIZE - ooboffs);
+		const u8 *data = data_done < ops->len ?
+			ops->datbuf + data_done : NULL;
+		u32 block, page, column;
+
+		qemu_3dnand_decode_logical(q3n, page_addr, &block, &page,
+					   &column);
+		ret = qemu_3dnand_program_logical_page(q3n, block, page, data,
+				ops->oobbuf + oob_done, ooboffs, oob_chunk);
+		if (ret) {
+			if (ret == -ESTALE)
+				ret = -EIO;
+			break;
+		}
+		if (data)
+			data_done += q3n->page_size;
+		oob_done += oob_chunk;
+		logical_page++;
+		ooboffs = 0;
+	}
+
+	ops->retlen = data_done;
+	ops->oobretlen = oob_done;
 	return ret;
 }
 
@@ -1151,6 +1307,9 @@ static int qemu_3dnand_mtd_block_isbad(struct mtd_info *mtd, loff_t ofs)
 {
 	struct qemu_3dnand *q3n = mtd->priv;
 	u64 block;
+	u32 status;
+	u32 next_page;
+	int ret;
 	int bad;
 
 	if (ofs < 0 || ofs >= mtd->size)
@@ -1160,7 +1319,14 @@ static int qemu_3dnand_mtd_block_isbad(struct mtd_info *mtd, loff_t ofs)
 		return -EINVAL;
 
 	mutex_lock(&q3n->mtd_lock);
-	bad = q3n->data_meta[block].bad;
+	ret = qemu_3dnand_get_phys_block_status_locked(q3n, block, &status,
+						       &next_page);
+	if (ret) {
+		bad = ret;
+	} else {
+		q3n->data_meta[block].bad = status & Q3N_BLOCK_STATUS_BAD;
+		bad = q3n->data_meta[block].bad;
+	}
 	mutex_unlock(&q3n->mtd_lock);
 	return bad;
 }
@@ -1212,11 +1378,11 @@ static int qemu_3dnand_register_mtd(struct qemu_3dnand *q3n)
 		Q3N_DATA_PAGES * q3n->page_size;
 	mtd->writesize = q3n->page_size;
 	mtd->writebufsize = q3n->page_size;
-	mtd->oobsize = q3n->oob_size;
+	mtd->oobsize = Q3N_LOGICAL_OOB_SIZE;
 	mtd->owner = THIS_MODULE;
 	mtd->priv = q3n;
-	mtd->_read = qemu_3dnand_mtd_read;
-	mtd->_write = qemu_3dnand_mtd_write;
+	mtd->_read_oob = qemu_3dnand_mtd_read_oob;
+	mtd->_write_oob = qemu_3dnand_mtd_write_oob;
 	mtd->_erase = qemu_3dnand_mtd_erase;
 	mtd->_sync = qemu_3dnand_mtd_sync;
 	mtd->_block_isbad = qemu_3dnand_mtd_block_isbad;

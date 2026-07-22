@@ -422,6 +422,44 @@ mtd_q3n_markbad_smoke() {
   echo "q3n markbad smoke passed"
 }
 
+mtd_q3n_oob_bbm_test() {
+  mtd_load_q3n || return 1
+  mtd_num=$(mtd_find_q3n)
+  [ -n "$mtd_num" ] || return 1
+  mtd_dev="/dev/mtd${mtd_num}"
+  mtd_sysfs="/sys/class/mtd/mtd${mtd_num}"
+  writesize=$(cat "$mtd_sysfs/writesize") || return 1
+  oobsize=$(cat "$mtd_sysfs/oobsize") || return 1
+
+  [ "$writesize" -eq 16384 ] || return 1
+  [ "$oobsize" -eq 128 ] || {
+    echo "q3n OOB/BBM test: exposed OOB is $oobsize, expected 128"
+    return 1
+  }
+
+  flash_erase -q "$mtd_dev" 0 1 || return 1
+  [ "$(mtd_badblock oob-read "$mtd_dev" 0 0)" = "ff" ] || {
+    echo "q3n OOB/BBM test: erased page BBM is not ff"
+    return 1
+  }
+
+  mtd_badblock oob-write "$mtd_dev" 0 0 0x00 || return 1
+  [ "$(mtd_badblock oob-read "$mtd_dev" 0 0)" = "00" ] || {
+    echo "q3n OOB/BBM test: programmed BBM did not read back as 00"
+    return 1
+  }
+  [ "$(mtd_badblock get "$mtd_dev" 0)" = "1" ] || {
+    echo "q3n OOB/BBM test: block status did not observe BBM"
+    return 1
+  }
+  if mtd_badblock oob-write "$mtd_dev" 0 0 0x00 \
+       >/tmp/q3n-oob-rewrite.out 2>/tmp/q3n-oob-rewrite.err; then
+    echo "q3n OOB/BBM test: second OOB program unexpectedly succeeded"
+    return 1
+  fi
+  echo "q3n OOB/BBM test passed: logical_oob=128 bbm=00"
+}
+
 mtd_q3n_persist_prepare() {
   mtd_load_q3n || return 1
   mtd_num=$(mtd_find_q3n)
@@ -789,6 +827,7 @@ case "${1:-}" in
   q3n-generation-smoke) mtd_q3n_generation_smoke ;;
   q3n-cancel-barrier-smoke) mtd_q3n_cancel_barrier_smoke ;;
   q3n-markbad-smoke) mtd_q3n_markbad_smoke ;;
+  q3n-oob-bbm-test) mtd_q3n_oob_bbm_test ;;
   q3n-persist-prepare) mtd_q3n_persist_prepare ;;
   q3n-persist-verify) mtd_q3n_persist_verify ;;
   q3n-tail-prepare) mtd_q3n_tail_prepare 0 ;;
