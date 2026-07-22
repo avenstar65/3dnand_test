@@ -220,6 +220,8 @@ RAID恢复成功时将逻辑结果的max bitflips至少提升到`mtd->bitflip_th
 
 后台异步 parity worker读取D0..D6时，各页都先经过LDPC。若任一来源不可纠，则不写parity manifest，将stripe保持UNPROTECTED/FAILED；不能使用损坏数据计算parity。
 
+同block串行布局不能跳过隐藏P页。若OOB-only/raw操作导致任一data metadata不可用于生成受保护parity，worker必须仍在P位置执行一次main+OOB program：main保持全`0xff`，logical OOB[1..]写入带stripe ID、`UNPROTECTED`状态、原因码和header CRC的tombstone metadata。OOB中的非`0xff`内容使该物理页成为present并把`next_prog_page`推进到下一stripe；tombstone不包含有效parity，不得用于RAID恢复。重启replay识别tombstone后恢复UNPROTECTED状态并继续扫描，不把它计为受保护stripe。
+
 ## 10. 可观测性
 
 除标准 MTD `ecc_stats` 外，QEMU MMIO 或 Linux debugfs 提供：
@@ -261,10 +263,12 @@ guest debugfs注入格式固定为：
 12. 目标与parity各41 bit：`-EBADMSG`。
 13. 重建CRC错误：`-EBADMSG`，不泄露错误数据。
 14. 后台parity build遇到不可纠成员：不发布manifest，stripe不进入PROTECTED。
-15. erase清除main/LDPC overlay并保持OOB坏块规则。
-16. 重启后LDPC区、overlay、ECC结果和RAID恢复行为保持一致。
-17. 多页读取后续失败：保留此前`retlen`并返回`-EBADMSG`。
-18. QEMU和Linux ABI静态一致，QEMU、kernel、rootfs构建及guest smoke全部通过。
+15. OOB-only/raw data metadata不可用时，P页main全`0xff`、OOB写UNPROTECTED tombstone并推进frontier；下一stripe可继续写。
+16. 重启replay识别tombstone为UNPROTECTED且不尝试RAID恢复。
+17. erase清除main/LDPC overlay并保持OOB坏块规则。
+18. 重启后LDPC区、overlay、ECC结果和RAID恢复行为保持一致。
+19. 多页读取后续失败：保留此前`retlen`并返回`-EBADMSG`。
+20. QEMU和Linux ABI静态一致，QEMU、kernel、rootfs构建及guest smoke全部通过。
 
 ## 12. 非目标
 

@@ -433,13 +433,15 @@ mtd->_write_oob = qemu_3dnand_mtd_write_oob;
 
 OOB-only写入使用main全`0xff`与128 B logical OOB执行一次PROGRAM_PAGE_OOB，仍受物理页frontier和单次program约束。main+OOB同时提供时在一次program完成。已program页上的第二次OOB写返回`-EIO`，不模拟partial-page program。
 
+如果OOB-only/raw写导致stripe中的data metadata不能通过后台校验，parity worker不得让frontier停在隐藏P页。它必须对P执行一次PROGRAM_PAGE_OOB：main全`0xff`，logical OOB[0]保持`0xff`，logical OOB[1..]写入独立的UNPROTECTED tombstone（包含magic/version/stripe ID/reason/header CRC）。成功后物理页为present且frontier推进；该页不增加protected计数，不可用于RAID恢复。replay识别tombstone后恢复UNPROTECTED状态并继续，不把它当作有效manifest。
+
 - [ ] **Step 4: 连接 BBM 和 block status**
 
 第一页OOB[0]写为非`0xff`后，QEMU media立即把block bad状态设为true；驱动下一次GET_BLOCK_STATUS、`_block_isbad`或重启probe都看到bad。`_block_markbad`继续写同一个物理字节，不能有第二份旁路标记。
 
 - [ ] **Step 5: guest 验证并提交**
 
-增加命令验证：读新块page0 OOB[0]=ff；顺序program page0并将logical OOB[0]=00；读回00；`mtd_is_bad`为true；physical LDPC区不可通过OOB长度访问。
+增加命令验证：读新块page0 OOB[0]=ff；顺序program page0并将logical OOB[0]=00；读回00；`mtd_is_bad`为true；physical LDPC区不可通过OOB长度访问。另验证offset=128/length>128拒绝、跨页OOB、PLACE/RAW、main+OOB单次program、good block已program页二次OOB写拒绝，以及OOB-only metadata无效stripe在P页写tombstone后下一stripe D0可继续program。
 
 ```bash
 ./scripts/smoke-test.sh
@@ -554,7 +556,7 @@ XOR后调用`q3n_verify_recovered_page()`对比manifest中的missing slot CRC。
 
 - [ ] **Step 5: 后台不可纠保持UNPROTECTED**
 
-parity worker读取任一D成员uncorrectable时不得program parity page或manifest，增加failed_stripes/background failure统计，并保持UNPROTECTED/FAILED。不得把`-EBADMSG`误当普通调度重试。
+parity worker读取任一D成员uncorrectable时不得program有效parity或manifest；必须在隐藏P页写main全`0xff`加UNPROTECTED tombstone以推进frontier，增加failed_stripes/background failure统计，并保持UNPROTECTED/FAILED。不得把`-EBADMSG`误当普通调度重试，tombstone也不得进入RAID恢复路径。
 
 - [ ] **Step 6: 验证并提交**
 
@@ -619,7 +621,7 @@ step0 30 + step1 30        -> corrected total 60, max 30
 
 - [ ] **Step 4: 增加 OOB/BBM 与后台测试**
 
-验证128 B logical OOB mapping、OOB[0]坏块写入、metadata从offset1开始；后台parity build遇到不可纠D成员时不产生有效manifest。
+验证128 B logical OOB mapping、OOB[0]坏块写入、metadata从offset1开始；后台parity build遇到不可纠D成员时不产生有效manifest，但P页必须写UNPROTECTED tombstone并允许下一stripe继续program。
 
 - [ ] **Step 5: 增加 v2 重启持久化测试**
 
