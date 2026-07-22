@@ -105,6 +105,8 @@ struct qemu_3dnand_parity_work {
 	u32 block;
 	u32 stripe;
 	u8 *page_buf;
+	u8 tombstone_reason;
+	bool tombstone;
 	bool request_queued;
 };
 
@@ -488,6 +490,30 @@ static int qemu_3dnand_commit_parity_locked(struct qemu_3dnand *q3n,
 	return 0;
 }
 
+static int qemu_3dnand_program_unprotected_tombstone_locked(
+		struct qemu_3dnand *q3n, u32 block, u32 stripe, u8 reason,
+		u8 *page_buf)
+{
+	struct q3n_unprotected_tombstone tombstone = {
+		.reason = reason,
+		.stripe_id = cpu_to_le64(qemu_3dnand_stripe_id(q3n, block,
+								 stripe)),
+	};
+	u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
+	int ret;
+
+	if (!page_buf)
+		return -EINVAL;
+	ret = q3n_pack_unprotected_oob(logical_oob, sizeof(logical_oob),
+					       &tombstone);
+	if (ret)
+		return ret;
+	memset(page_buf, 0xff, q3n->page_size);
+	return qemu_3dnand_program_phys_page_oob_locked(q3n, block,
+		stripe * Q3N_STRIPE_PAGES + Q3N_DATA_PAGES, page_buf,
+		logical_oob, Q3N_OP_PARITY_WRITE);
+}
+
 static int qemu_3dnand_append_parity_locked(struct qemu_3dnand *q3n,
 					    u32 block, u32 stripe)
 {
@@ -569,6 +595,7 @@ static int qemu_3dnand_restore_media_locked(struct qemu_3dnand *q3n)
 			struct qemu_3dnand_parity_entry *entry;
 			u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
 			struct q3n_parity_manifest manifest;
+			struct q3n_unprotected_tombstone tombstone;
 			struct q3n_ecc_result ecc;
 			u32 lane;
 
@@ -582,6 +609,22 @@ static int qemu_3dnand_restore_media_locked(struct qemu_3dnand *q3n)
 				&ecc);
 			if (ret)
 				break;
+			if (get_unaligned_le16(logical_oob + 1) ==
+			    Q3N_RAID_TOMBSTONE_MAGIC) {
+				ret = q3n_unpack_unprotected_oob(logical_oob,
+							 sizeof(logical_oob),
+							 &tombstone);
+				if (!ret && le64_to_cpu(tombstone.stripe_id) !=
+				    qemu_3dnand_stripe_id(q3n, block, stripe))
+					ret = -EBADMSG;
+				entry->valid = false;
+				atomic64_inc(&q3n->failed_stripes);
+				atomic64_inc(&q3n->unprotected_stripes);
+				if (ret)
+					q3n->raid_failed++;
+				ret = 0;
+				continue;
+			}
 			ret = q3n_unpack_parity_oob(logical_oob,
 						    sizeof(logical_oob), &manifest);
 			if (!ret && manifest.data_pages != Q3N_DATA_PAGES)
@@ -622,11 +665,20 @@ static int qemu_3dnand_restore_media_locked(struct qemu_3dnand *q3n)
 			u32 restored_status;
 			u32 restored_next;
 
+			stripe = next_page / Q3N_STRIPE_PAGES;
 			ret = qemu_3dnand_append_parity_locked(q3n, block,
-							  next_page /
-							  Q3N_STRIPE_PAGES);
-			if (ret)
-				break;
+							  stripe);
+			if (ret) {
+				ret = qemu_3dnand_program_unprotected_tombstone_locked(
+					q3n, block, stripe,
+					Q3N_UNPROTECTED_INVALID_METADATA,
+					q3n->page_buf);
+				if (ret)
+					break;
+				q3n->raid_failed++;
+				atomic64_inc(&q3n->failed_stripes);
+				atomic64_inc(&q3n->unprotected_stripes);
+			}
 			ret = qemu_3dnand_get_phys_block_status_locked(
 				q3n, block, &restored_status, &restored_next);
 			if (ret)
@@ -710,29 +762,51 @@ again:
 	}
 	parity->request_queued = false;
 
-	if (parity->rebuild.next_slot < Q3N_DATA_PAGES) {
+	if (parity->tombstone) {
+		entry = &parity->q3n->parity_index[
+			qemu_3dnand_parity_index(parity->q3n, parity->block,
+						  parity->stripe)];
+		ret = qemu_3dnand_program_unprotected_tombstone_locked(
+			parity->q3n, parity->block, parity->stripe,
+			parity->tombstone_reason, parity->page_buf);
+		if (!ret)
+			entry->valid = false;
+	} else if (parity->rebuild.next_slot < Q3N_DATA_PAGES) {
 		u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
 		struct q3n_ecc_result ecc;
 		u8 slot = parity->rebuild.next_slot;
+		u8 reason = Q3N_UNPROTECTED_MEMBER_READ;
 
 		ret = qemu_3dnand_read_phys_page_oob_locked(parity->q3n,
 			parity->block,
 			parity->stripe * Q3N_STRIPE_PAGES +
 				slot,
 			parity->page_buf, logical_oob, Q3N_OP_PARITY_READ, &ecc);
-		if (!ret)
+		if (!ret) {
+			reason = Q3N_UNPROTECTED_INVALID_METADATA;
 			ret = qemu_3dnand_validate_data_metadata(
 				parity->page_buf, parity->q3n->page_size,
 				logical_oob, parity->rebuild.stripe_id, slot,
 				&parity->rebuild.data_crc[slot]);
-		if (!ret)
+		}
+		if (!ret) {
+			reason = Q3N_UNPROTECTED_REBUILD;
 			ret = q3n_rebuild_xor_one(&parity->rebuild,
 						  parity->page_buf);
+		}
 		if (!ret && parity->rebuild.next_slot < Q3N_DATA_PAGES) {
 			ret = q3n_sched_requeue_p1(&parity->q3n->sched,
 						   &parity->request);
 			parity->request_queued = !ret;
 		} else if (!ret) {
+			parity->request.class = Q3N_REQ_PARITY_WRITE;
+			parity->request.op = Q3N_REQ_PROGRAM;
+			ret = q3n_sched_enqueue(&parity->q3n->sched,
+						&parity->request);
+			parity->request_queued = !ret;
+		} else if (ret) {
+			parity->tombstone = true;
+			parity->tombstone_reason = reason;
 			parity->request.class = Q3N_REQ_PARITY_WRITE;
 			parity->request.op = Q3N_REQ_PROGRAM;
 			ret = q3n_sched_enqueue(&parity->q3n->sched,
@@ -751,6 +825,11 @@ again:
 	mutex_unlock(&parity->q3n->mtd_lock);
 	if (ret)
 		goto out_failed;
+	if (parity->tombstone && !parity->request_queued) {
+		parity->q3n->raid_failed++;
+		atomic64_inc(&parity->q3n->failed_stripes);
+		goto out_finish;
+	}
 	if (parity->rebuild.next_slot == Q3N_DATA_PAGES &&
 	    !parity->request_queued)
 		goto out_finish;

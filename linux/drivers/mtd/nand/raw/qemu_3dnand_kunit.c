@@ -3,6 +3,7 @@
 #include <kunit/test.h>
 #include <linux/completion.h>
 #include <linux/kthread.h>
+#include <linux/unaligned.h>
 
 #include "qemu_3dnand_priv.h"
 
@@ -256,6 +257,38 @@ static void q3n_parity_oob_round_trip_and_crc_validation_test(struct kunit *test
 	KUNIT_EXPECT_EQ(test, q3n_unpack_parity_oob(logical_oob,
 						     sizeof(logical_oob), &decoded),
 			-EBADMSG);
+}
+
+static void q3n_unprotected_tombstone_round_trip_test(struct kunit *test)
+{
+	u8 logical_oob[128];
+	struct q3n_unprotected_tombstone tombstone = {
+		.reason = Q3N_UNPROTECTED_INVALID_METADATA,
+		.stripe_id = cpu_to_le64(0x123456789ULL),
+	};
+	struct q3n_unprotected_tombstone decoded;
+	struct q3n_parity_manifest manifest;
+
+	KUNIT_ASSERT_EQ(test, q3n_pack_unprotected_oob(logical_oob,
+						       sizeof(logical_oob),
+						       &tombstone), 0);
+	KUNIT_EXPECT_EQ(test, logical_oob[0], (u8)0xff);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(logical_oob + 1),
+			(u16)Q3N_RAID_TOMBSTONE_MAGIC);
+	KUNIT_ASSERT_EQ(test, q3n_unpack_unprotected_oob(logical_oob,
+							 sizeof(logical_oob),
+							 &decoded), 0);
+	KUNIT_EXPECT_EQ(test, decoded.reason, tombstone.reason);
+	KUNIT_EXPECT_EQ(test, decoded.stripe_id, tombstone.stripe_id);
+	KUNIT_EXPECT_EQ(test, q3n_unpack_parity_oob(logical_oob,
+						   sizeof(logical_oob),
+						   &manifest), -EBADMSG);
+
+	logical_oob[1 + offsetof(struct q3n_unprotected_tombstone,
+				 header_crc)] ^= 1;
+	KUNIT_EXPECT_EQ(test, q3n_unpack_unprotected_oob(logical_oob,
+							 sizeof(logical_oob),
+							 &decoded), -EBADMSG);
 }
 
 static void q3n_oob_helpers_reject_short_buffers_test(struct kunit *test)
@@ -596,6 +629,7 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_data_oob_round_trip_preserves_bbm_test),
 	KUNIT_CASE(q3n_data_oob_rejects_corrupt_crc_fields_test),
 	KUNIT_CASE(q3n_parity_oob_round_trip_and_crc_validation_test),
+	KUNIT_CASE(q3n_unprotected_tombstone_round_trip_test),
 	KUNIT_CASE(q3n_oob_helpers_reject_short_buffers_test),
 	KUNIT_CASE(q3n_open_stripe_is_unprotected_until_parity_completes_test),
 	KUNIT_CASE(q3n_recover_single_missing_page_test),

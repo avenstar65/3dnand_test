@@ -430,6 +430,8 @@ mtd_q3n_oob_bbm_test() {
   mtd_sysfs="/sys/class/mtd/mtd${mtd_num}"
   writesize=$(cat "$mtd_sysfs/writesize") || return 1
   oobsize=$(cat "$mtd_sysfs/oobsize") || return 1
+  erasesize=$(cat "$mtd_sysfs/erasesize") || return 1
+  stats=/sys/kernel/debug/qemu_3dnand
 
   [ "$writesize" -eq 16384 ] || return 1
   [ "$oobsize" -eq 128 ] || {
@@ -437,14 +439,101 @@ mtd_q3n_oob_bbm_test() {
     return 1
   }
 
+  # Page-scoped commands must reject an OOB offset at the boundary and any
+  # length that would wrap into the next page.
+  bounds_offset=$erasesize
+  flash_erase -q "$mtd_dev" "$bounds_offset" 1 || return 1
+  if mtd_badblock oob-read place "$mtd_dev" "$bounds_offset" 128 1 \
+       >/tmp/q3n-oob-offset.out 2>/tmp/q3n-oob-offset.err; then
+    echo "q3n OOB/BBM test: OOB offset 128 unexpectedly accepted"
+    return 1
+  fi
+  if mtd_badblock oob-read place "$mtd_dev" "$bounds_offset" 0 129 \
+       >/tmp/q3n-oob-length.out 2>/tmp/q3n-oob-length.err; then
+    echo "q3n OOB/BBM test: page OOB length 129 unexpectedly accepted"
+    return 1
+  fi
+  echo "OOB bounds rejection passed"
+
+  # The explicit span command is the unambiguous cross-page interface.
+  mtd_badblock span-write place "$mtd_dev" "$bounds_offset" 2 100 0x5a || \
+    return 1
+  mtd_badblock span-read place "$mtd_dev" "$bounds_offset" 2 100 0x5a || \
+    return 1
+  echo "cross-page OOB passed"
+
+  # A combined request must program main+OOB once. The page remains good, so
+  # the following OOB-only rewrite tests single-program rejection directly.
+  place_offset=$((2 * erasesize))
+  flash_erase -q "$mtd_dev" "$place_offset" 1 || return 1
+  mtd_badblock page-write place "$mtd_dev" "$place_offset" \
+    0x5a 100 1 0xa5 || return 1
+  mtd_badblock page-read place "$mtd_dev" "$place_offset" \
+    0x5a 100 1 0xa5 || return 1
+  [ "$(mtd_badblock get "$mtd_dev" "$place_offset")" = "0" ] || return 1
+  echo "PLACE main+OOB passed"
+  if mtd_badblock oob-write place "$mtd_dev" "$place_offset" 100 1 0x00 \
+       >/tmp/q3n-good-rewrite.out 2>/tmp/q3n-good-rewrite.err; then
+    echo "q3n OOB/BBM test: good programmed page accepted second OOB write"
+    return 1
+  fi
+  [ "$(mtd_badblock get "$mtd_dev" "$place_offset")" = "0" ] || return 1
+  echo "good-page second OOB program rejected"
+
+  raw_offset=$((3 * erasesize))
+  flash_erase -q "$mtd_dev" "$raw_offset" 1 || return 1
+  mtd_badblock page-write raw "$mtd_dev" "$raw_offset" \
+    0x3c 100 1 0xc3 || return 1
+  mtd_badblock page-read raw "$mtd_dev" "$raw_offset" \
+    0x3c 100 1 0xc3 || return 1
+  [ "$(mtd_badblock get "$mtd_dev" "$raw_offset")" = "0" ] || return 1
+  echo "RAW main+OOB passed"
+
+  # An OOB-only D0 lacks valid driver metadata. D6 queues background parity;
+  # the worker must program a tombstone at hidden P so replay and the next D0
+  # can proceed instead of leaving the physical frontier at P.
+  tombstone_offset=$((4 * erasesize))
+  tombstone_page=$((tombstone_offset / writesize))
+  flash_erase -q "$mtd_dev" "$tombstone_offset" 1 || return 1
+  failed_before=$(cat "$stats/failed_stripes") || return 1
+  protected_before=$(cat "$stats/protected_stripes") || return 1
+  unprotected_before=$(cat "$stats/unprotected_stripes") || return 1
+  mtd_badblock oob-write raw "$mtd_dev" "$tombstone_offset" 100 1 0xa5 || \
+    return 1
+  dd if=/dev/zero of=/tmp/q3n-tombstone-main.bin bs="$writesize" count=6 \
+    2>/dev/null || return 1
+  dd if=/tmp/q3n-tombstone-main.bin of="$mtd_dev" bs="$writesize" count=6 \
+    seek=$((tombstone_page + 1)) 2>/tmp/q3n-tombstone-write.err || return 1
+  mtd_q3n_wait_eq "$stats/pending_parity" 0 "tombstone pending parity" || \
+    return 1
+  [ "$(cat "$stats/failed_stripes")" -eq $((failed_before + 1)) ] || \
+    return 1
+  [ "$(cat "$stats/protected_stripes")" -eq "$protected_before" ] || \
+    return 1
+  [ "$(cat "$stats/unprotected_stripes")" -eq \
+    $((unprotected_before + 1)) ] || return 1
+
+  rmmod qemu_3dnand || return 1
+  mtd_load_q3n || return 1
+  mtd_num=$(mtd_find_q3n)
+  [ -n "$mtd_num" ] || return 1
+  mtd_dev="/dev/mtd${mtd_num}"
+  dd if=/dev/zero of=/tmp/q3n-tombstone-next.bin bs="$writesize" count=1 \
+    2>/dev/null || return 1
+  dd if=/tmp/q3n-tombstone-next.bin of="$mtd_dev" bs="$writesize" count=1 \
+    seek=$((tombstone_page + 7)) 2>/tmp/q3n-tombstone-next.err || return 1
+  echo "tombstone frontier passed"
+
+  # Keep the direct writable-BBM acceptance on a separate block so the
+  # good-page rewrite case above is not masked by bad-block rejection.
   flash_erase -q "$mtd_dev" 0 1 || return 1
-  [ "$(mtd_badblock oob-read "$mtd_dev" 0 0)" = "ff" ] || {
+  [ "$(mtd_badblock oob-read place "$mtd_dev" 0 0 1)" = "ff" ] || {
     echo "q3n OOB/BBM test: erased page BBM is not ff"
     return 1
   }
 
-  mtd_badblock oob-write "$mtd_dev" 0 0 0x00 || return 1
-  [ "$(mtd_badblock oob-read "$mtd_dev" 0 0)" = "00" ] || {
+  mtd_badblock oob-write place "$mtd_dev" 0 0 1 0x00 || return 1
+  [ "$(mtd_badblock oob-read place "$mtd_dev" 0 0 1)" = "00" ] || {
     echo "q3n OOB/BBM test: programmed BBM did not read back as 00"
     return 1
   }
@@ -452,7 +541,7 @@ mtd_q3n_oob_bbm_test() {
     echo "q3n OOB/BBM test: block status did not observe BBM"
     return 1
   }
-  if mtd_badblock oob-write "$mtd_dev" 0 0 0x00 \
+  if mtd_badblock oob-write place "$mtd_dev" 0 0 1 0x00 \
        >/tmp/q3n-oob-rewrite.out 2>/tmp/q3n-oob-rewrite.err; then
     echo "q3n OOB/BBM test: second OOB program unexpectedly succeeded"
     return 1

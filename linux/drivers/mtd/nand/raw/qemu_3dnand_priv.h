@@ -10,6 +10,7 @@
 
 #define Q3N_RAID_MAX_DATA_PAGES	7
 #define Q3N_RAID_META_MAGIC		0x5133
+#define Q3N_RAID_TOMBSTONE_MAGIC	0x5533
 #define Q3N_RAID_META_VERSION		1
 #define Q3N_MAX_PENDING_PARITY		32
 #define Q3N_MAX_PARITY_READ_INFLIGHT	1
@@ -62,6 +63,20 @@ struct q3n_parity_manifest {
 	__le16 member_bitmap;
 	__le32 data_crc[Q3N_RAID_MAX_DATA_PAGES];
 	__le32 parity_crc;
+	__le32 header_crc;
+} __packed;
+
+enum q3n_unprotected_reason {
+	Q3N_UNPROTECTED_INVALID_METADATA = 1,
+	Q3N_UNPROTECTED_MEMBER_READ = 2,
+	Q3N_UNPROTECTED_REBUILD = 3,
+};
+
+struct q3n_unprotected_tombstone {
+	__le16 magic;
+	u8 version;
+	u8 reason;
+	__le64 stripe_id;
 	__le32 header_crc;
 } __packed;
 
@@ -152,6 +167,10 @@ int q3n_pack_parity_oob(u8 *logical_oob, size_t oob_len,
 			const struct q3n_parity_manifest *manifest);
 int q3n_unpack_parity_oob(const u8 *logical_oob, size_t oob_len,
 			  struct q3n_parity_manifest *manifest);
+int q3n_pack_unprotected_oob(u8 *logical_oob, size_t oob_len,
+			     const struct q3n_unprotected_tombstone *tombstone);
+int q3n_unpack_unprotected_oob(const u8 *logical_oob, size_t oob_len,
+			       struct q3n_unprotected_tombstone *tombstone);
 int q3n_recover_page(u8 *out, const u8 *parity, const u8 * const *members,
 		     u8 data_pages, u8 missing_slot, size_t len);
 int q3n_rebuild_xor_one(struct q3n_parity_rebuild *rebuild,
