@@ -51,9 +51,18 @@ run_stage "$work_dir/q3n-tail-fail-prepare.log" \
 run_stage "$work_dir/q3n-tail-fail-verify.log" \
   'q3n tail failure verify passed' 0 q3n-tail-fail-verify
 
-# Image v1 uses block-state offset 4096 and page-state offset 12000 for the
-# fixed 1976-block geometry.  The preceding failure case leaves block 0 at
-# frontier 7; marking page-state[7] present must therefore be rejected.
+# Image v2 places block 0 physical P-page tombstone reason at byte 3318660 for
+# the fixed geometry.  The lost member must be classified as MEMBER_READ (2),
+# not generic metadata corruption.
+tail_reason_offset=3318660
+tail_reason=$(dd if="$nand_image" bs=1 skip="$tail_reason_offset" count=1 \
+  2>/dev/null | od -An -tu1 | tr -d ' ')
+[ "$tail_reason" -eq 2 ] || die "tail tombstone reason is not MEMBER_READ"
+
+# The verify stage first replays P at physical page 7 (frontier 8), then proves
+# that exact frontier by programming next-stripe D0 at physical page 8.  Build
+# an inconsistent fixture by rewinding the persisted block frontier to 8 while
+# explicitly leaving page-state[8] present.
 invalid_image="$work_dir/media/q3n-invalid-state.raw"
 invalid_log="$work_dir/q3n-invalid-state.log"
 rm -f "$invalid_image"
@@ -61,7 +70,9 @@ dd if="$nand_image" of="$invalid_image" bs=4096 count=800 \
   conv=notrunc 2>/dev/null
 dd if=/dev/zero of="$invalid_image" bs=1 count=0 seek="$logical_bytes" \
   2>/dev/null
-printf '\001' | dd of="$invalid_image" bs=1 seek=12007 conv=notrunc \
+printf '\010\000\000\000' | dd of="$invalid_image" bs=1 seek=4096 \
+  conv=notrunc 2>/dev/null
+printf '\001' | dd of="$invalid_image" bs=1 seek=12008 conv=notrunc \
   2>/dev/null
 invalid_image_arg=${invalid_image#"$repo_root/"}
 if "$repo_root/scripts/run-qemu.sh" --nand-image "$invalid_image_arg" \

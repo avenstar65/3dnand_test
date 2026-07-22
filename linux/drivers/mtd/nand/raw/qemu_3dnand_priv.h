@@ -69,7 +69,9 @@ struct q3n_parity_manifest {
 enum q3n_unprotected_reason {
 	Q3N_UNPROTECTED_INVALID_METADATA = 1,
 	Q3N_UNPROTECTED_MEMBER_READ = 2,
-	Q3N_UNPROTECTED_REBUILD = 3,
+	Q3N_UNPROTECTED_LDPC_UNCORRECTABLE = 3,
+	Q3N_UNPROTECTED_PARITY_PROGRAM = 4,
+	Q3N_UNPROTECTED_REBUILD = 5,
 };
 
 struct q3n_unprotected_tombstone {

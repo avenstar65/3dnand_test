@@ -515,7 +515,8 @@ static int qemu_3dnand_program_unprotected_tombstone_locked(
 }
 
 static int qemu_3dnand_append_parity_locked(struct qemu_3dnand *q3n,
-					    u32 block, u32 stripe)
+					    u32 block, u32 stripe,
+					    u8 *failure_reason)
 {
 	struct qemu_3dnand_parity_entry *entry;
 	u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
@@ -525,18 +526,27 @@ static int qemu_3dnand_append_parity_locked(struct qemu_3dnand *q3n,
 	u32 i;
 	int ret;
 
+	if (!failure_reason)
+		return -EINVAL;
+	*failure_reason = Q3N_UNPROTECTED_INVALID_METADATA;
 	if (!qemu_3dnand_stripe_full(q3n, block, stripe))
 		return 0;
 
 	entry = &q3n->parity_index[qemu_3dnand_parity_index(q3n, block, stripe)];
 	memset(q3n->raid_buf, 0, q3n->page_size);
 	for (lane = 0; lane < Q3N_DATA_PAGES; lane++) {
+		*failure_reason = Q3N_UNPROTECTED_MEMBER_READ;
 		ret = qemu_3dnand_read_phys_page_oob_locked(q3n, block,
 				 stripe * Q3N_STRIPE_PAGES + lane,
 						q3n->page_buf, logical_oob,
 						Q3N_OP_PARITY_READ, &ecc);
 		if (ret)
 			return ret;
+		if (ecc.status & Q3N_ECC_STATUS_UNCORRECTABLE) {
+			*failure_reason = Q3N_UNPROTECTED_LDPC_UNCORRECTABLE;
+			return -EBADMSG;
+		}
+		*failure_reason = Q3N_UNPROTECTED_INVALID_METADATA;
 		ret = qemu_3dnand_validate_data_metadata(q3n->page_buf,
 			q3n->page_size, logical_oob,
 			qemu_3dnand_stripe_id(q3n, block, stripe), lane,
@@ -547,6 +557,7 @@ static int qemu_3dnand_append_parity_locked(struct qemu_3dnand *q3n,
 			q3n->raid_buf[i] ^= q3n->page_buf[i];
 	}
 
+	*failure_reason = Q3N_UNPROTECTED_PARITY_PROGRAM;
 	return qemu_3dnand_commit_parity_locked(q3n, block, stripe, entry,
 						q3n->raid_buf, data_crc);
 }
@@ -664,14 +675,15 @@ static int qemu_3dnand_restore_media_locked(struct qemu_3dnand *q3n)
 		if (needs_tail_parity) {
 			u32 restored_status;
 			u32 restored_next;
+			u8 failure_reason;
 
 			stripe = next_page / Q3N_STRIPE_PAGES;
 			ret = qemu_3dnand_append_parity_locked(q3n, block,
-							  stripe);
+							  stripe,
+							  &failure_reason);
 			if (ret) {
 				ret = qemu_3dnand_program_unprotected_tombstone_locked(
-					q3n, block, stripe,
-					Q3N_UNPROTECTED_INVALID_METADATA,
+					q3n, block, stripe, failure_reason,
 					q3n->page_buf);
 				if (ret)
 					break;
@@ -782,6 +794,10 @@ again:
 			parity->stripe * Q3N_STRIPE_PAGES +
 				slot,
 			parity->page_buf, logical_oob, Q3N_OP_PARITY_READ, &ecc);
+		if (!ret && (ecc.status & Q3N_ECC_STATUS_UNCORRECTABLE)) {
+			reason = Q3N_UNPROTECTED_LDPC_UNCORRECTABLE;
+			ret = -EBADMSG;
+		}
 		if (!ret) {
 			reason = Q3N_UNPROTECTED_INVALID_METADATA;
 			ret = qemu_3dnand_validate_data_metadata(

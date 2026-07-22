@@ -13,11 +13,12 @@ static int usage(const char *prog)
 	fprintf(stderr,
 		"usage: %s get|set DEVICE OFFSET\n"
 		"       %s oob-read MODE DEVICE PAGE_OFFSET OOB_OFFSET LENGTH\n"
+		"       %s oob-read-unchecked MODE DEVICE PAGE_OFFSET OOB_OFFSET LENGTH\n"
 		"       %s oob-write MODE DEVICE PAGE_OFFSET OOB_OFFSET LENGTH BYTE\n"
 		"       %s page-read|page-write MODE DEVICE PAGE_OFFSET DATA_BYTE OOB_OFFSET OOB_LENGTH OOB_BYTE\n"
 		"       %s span-read|span-write MODE DEVICE PAGE_OFFSET PAGE_COUNT OOB_OFFSET OOB_BYTE\n"
 		"MODE is place or raw; page OOB commands never wrap to another page.\n",
-		prog, prog, prog, prog, prog);
+		prog, prog, prog, prog, prog, prog);
 	return 2;
 }
 
@@ -87,14 +88,19 @@ static int set_oob_file_mode(int fd, uint8_t mode)
 
 static int oob_io(int fd, int write, uint8_t mode,
 		  const struct mtd_info_user *info, uint64_t page_offset,
-		  uint64_t oob_offset, uint64_t length, unsigned char value)
+		  uint64_t oob_offset, uint64_t length, unsigned char value,
+		  int validate_logical_bounds)
 {
 	struct mtd_oob_buf64 req;
 	unsigned char *buf;
 	uint64_t i;
 	int ret;
 
-	if (validate_page_oob(info, page_offset, oob_offset, length) ||
+	if ((validate_logical_bounds &&
+	     validate_page_oob(info, page_offset, oob_offset, length)) ||
+	    (!validate_logical_bounds &&
+	     (!info->writesize || !info->oobsize ||
+	      page_offset % info->writesize || !length || length > 4096)) ||
 	    page_offset + oob_offset < page_offset)
 		return -1;
 	buf = malloc(length);
@@ -254,12 +260,14 @@ static int run_extended(int argc, char **argv)
 	unsigned char oob_value;
 	uint8_t mode;
 	int write;
+	int unchecked;
 	int fd;
 	int ret;
 
 	if (argc < 5)
 		return usage(argv[0]);
 	write = strstr(argv[1], "write") != NULL;
+	unchecked = !strcmp(argv[1], "oob-read-unchecked");
 	if (parse_mode(argv[2], &mode) || parse_u64(argv[4], &page_offset))
 		return usage(argv[0]);
 	fd = open(argv[3], O_RDWR);
@@ -273,7 +281,8 @@ static int run_extended(int argc, char **argv)
 		return 1;
 	}
 
-	if (!strcmp(argv[1], "oob-read") || !strcmp(argv[1], "oob-write")) {
+	if (!strcmp(argv[1], "oob-read") || !strcmp(argv[1], "oob-write") ||
+	    unchecked) {
 		if (argc != (write ? 8 : 7) || parse_u64(argv[5], &first) ||
 		    parse_u64(argv[6], &second) ||
 		    (write && parse_byte(argv[7], &oob_value))) {
@@ -281,7 +290,7 @@ static int run_extended(int argc, char **argv)
 			return usage(argv[0]);
 		}
 		ret = oob_io(fd, write, mode, &info, page_offset, first,
-			     second, write ? oob_value : 0);
+			     second, write ? oob_value : 0, !unchecked);
 	} else if (!strcmp(argv[1], "page-read") ||
 		   !strcmp(argv[1], "page-write")) {
 		if (argc != 9 || parse_byte(argv[5], &data_value) ||

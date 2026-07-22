@@ -261,29 +261,51 @@ static void q3n_parity_oob_round_trip_and_crc_validation_test(struct kunit *test
 
 static void q3n_unprotected_tombstone_round_trip_test(struct kunit *test)
 {
+	static const u8 reasons[] = {
+		Q3N_UNPROTECTED_INVALID_METADATA,
+		Q3N_UNPROTECTED_MEMBER_READ,
+		Q3N_UNPROTECTED_LDPC_UNCORRECTABLE,
+		Q3N_UNPROTECTED_PARITY_PROGRAM,
+		Q3N_UNPROTECTED_REBUILD,
+	};
 	u8 logical_oob[128];
 	struct q3n_unprotected_tombstone tombstone = {
-		.reason = Q3N_UNPROTECTED_INVALID_METADATA,
 		.stripe_id = cpu_to_le64(0x123456789ULL),
 	};
 	struct q3n_unprotected_tombstone decoded;
 	struct q3n_parity_manifest manifest;
+	size_t i;
 
-	KUNIT_ASSERT_EQ(test, q3n_pack_unprotected_oob(logical_oob,
+	for (i = 0; i < ARRAY_SIZE(reasons); i++) {
+		tombstone.reason = reasons[i];
+		KUNIT_ASSERT_EQ(test, q3n_pack_unprotected_oob(logical_oob,
 						       sizeof(logical_oob),
 						       &tombstone), 0);
+		KUNIT_ASSERT_EQ(test, q3n_unpack_unprotected_oob(logical_oob,
+							 sizeof(logical_oob),
+							 &decoded), 0);
+		KUNIT_EXPECT_EQ(test, decoded.reason, reasons[i]);
+	}
 	KUNIT_EXPECT_EQ(test, logical_oob[0], (u8)0xff);
 	KUNIT_EXPECT_EQ(test, get_unaligned_le16(logical_oob + 1),
 			(u16)Q3N_RAID_TOMBSTONE_MAGIC);
-	KUNIT_ASSERT_EQ(test, q3n_unpack_unprotected_oob(logical_oob,
-							 sizeof(logical_oob),
-							 &decoded), 0);
-	KUNIT_EXPECT_EQ(test, decoded.reason, tombstone.reason);
 	KUNIT_EXPECT_EQ(test, decoded.stripe_id, tombstone.stripe_id);
 	KUNIT_EXPECT_EQ(test, q3n_unpack_parity_oob(logical_oob,
 						   sizeof(logical_oob),
 						   &manifest), -EBADMSG);
+	tombstone.reason = 0;
+	KUNIT_EXPECT_EQ(test, q3n_pack_unprotected_oob(logical_oob,
+						       sizeof(logical_oob),
+						       &tombstone), -EINVAL);
+	tombstone.reason = Q3N_UNPROTECTED_REBUILD + 1;
+	KUNIT_EXPECT_EQ(test, q3n_pack_unprotected_oob(logical_oob,
+						       sizeof(logical_oob),
+						       &tombstone), -EINVAL);
 
+	tombstone.reason = Q3N_UNPROTECTED_INVALID_METADATA;
+	KUNIT_ASSERT_EQ(test, q3n_pack_unprotected_oob(logical_oob,
+						       sizeof(logical_oob),
+						       &tombstone), 0);
 	logical_oob[1 + offsetof(struct q3n_unprotected_tombstone,
 				 header_crc)] ^= 1;
 	KUNIT_EXPECT_EQ(test, q3n_unpack_unprotected_oob(logical_oob,

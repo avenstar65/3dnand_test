@@ -455,6 +455,17 @@ mtd_q3n_oob_bbm_test() {
   fi
   echo "OOB bounds rejection passed"
 
+  # Bypass the helper's logical-OOB range check and let MEMREADOOB64 reach
+  # mtdchar.  The kernel must independently reject ooboffs == oobsize.
+  if mtd_badblock oob-read-unchecked place "$mtd_dev" \
+       "$bounds_offset" 128 1 >/tmp/q3n-oob-kernel.out \
+       2>/tmp/q3n-oob-kernel.err; then
+    echo "q3n OOB/BBM test: kernel accepted OOB offset 128"
+    return 1
+  fi
+  grep -q 'ioctl' /tmp/q3n-oob-kernel.err || return 1
+  echo "kernel OOB bounds rejection passed"
+
   # The explicit span command is the unambiguous cross-page interface.
   mtd_badblock span-write place "$mtd_dev" "$bounds_offset" 2 100 0x5a || \
     return 1
@@ -655,18 +666,30 @@ mtd_q3n_tail_verify() {
 }
 
 mtd_q3n_tail_fail_verify() {
-  # modprobe reports module insertion, not whether the already-present PCI
-  # device's probe succeeded.  The recovery contract is that no qemu-3dnand
-  # MTD is registered when the incomplete tail cannot be reconstructed.
-  modprobe qemu_3dnand 2>/dev/null || true
-  if ! dmesg | grep -q 'error -EIO: failed to register MTD'; then
-    echo "q3n tail failure: expected recovery -EIO missing"
-    return 1
-  fi
-  if grep -q '"qemu-3dnand"' /proc/mtd; then
-    echo "q3n tail failure: MTD unexpectedly registered"
-    return 1
-  fi
+  mtd_load_q3n || return 1
+  mtd_num=$(mtd_find_q3n)
+  [ -n "$mtd_num" ] || return 1
+  mtd_dev="/dev/mtd${mtd_num}"
+  stats=/sys/kernel/debug/qemu_3dnand
+  writesize=$(cat "/sys/class/mtd/mtd${mtd_num}/writesize") || return 1
+
+  tail_raid_failed=$(cat "$stats/raid_failed") || return 1
+  tail_failed=$(cat "$stats/failed_stripes") || return 1
+  tail_unprotected=$(cat "$stats/unprotected_stripes") || return 1
+  tail_protected=$(cat "$stats/protected_stripes") || return 1
+  [ "$tail_raid_failed" -eq 1 ] || return 1
+  [ "$tail_failed" -eq 1 ] || return 1
+  [ "$tail_unprotected" -eq 1 ] || return 1
+  [ "$tail_protected" -eq 0 ] || return 1
+
+  # Logical page 7 maps to physical page 8.  Its successful first program
+  # proves replay filled hidden P at physical page 7 and advanced the exact
+  # serial frontier from 7 to 8.
+  dd if=/dev/zero of=/tmp/q3n-tail-next.bin bs="$writesize" count=1 \
+    2>/dev/null || return 1
+  dd if=/tmp/q3n-tail-next.bin of="$mtd_dev" bs="$writesize" count=1 \
+    seek=7 2>/tmp/q3n-tail-next.err || return 1
+  echo "q3n tail tombstone replay passed"
   echo "q3n tail failure verify passed"
 }
 
