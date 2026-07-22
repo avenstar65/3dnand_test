@@ -134,6 +134,78 @@ static void q3n_incremental_xor_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, parity[1], (u8)0x00);
 }
 
+static void q3n_ecc_accumulate_clean_test(struct kunit *test)
+{
+	struct q3n_ecc_result total = {};
+	struct q3n_ecc_result page = {};
+
+	q3n_ecc_accumulate(&total, &page);
+	KUNIT_EXPECT_EQ(test, total.max_bitflips, 0U);
+	KUNIT_EXPECT_EQ(test, total.corrected_bits, 0U);
+	KUNIT_EXPECT_FALSE(test, total.uncorrectable);
+	KUNIT_EXPECT_EQ(test, q3n_ecc_result_to_mtd_ret(&total), 0);
+}
+
+static void
+q3n_ecc_accumulate_uses_max_and_sums_corrected_test(struct kunit *test)
+{
+	struct q3n_ecc_result total = {};
+	struct q3n_ecc_result first = {
+		.max_bitflips = 30,
+		.corrected_bits = 30,
+	};
+	struct q3n_ecc_result second = {
+		.max_bitflips = 20,
+		.corrected_bits = 20,
+	};
+
+	q3n_ecc_accumulate(&total, &first);
+	q3n_ecc_accumulate(&total, &second);
+	KUNIT_EXPECT_EQ(test, total.max_bitflips, 30U);
+	KUNIT_EXPECT_EQ(test, total.corrected_bits, 50U);
+	KUNIT_EXPECT_EQ(test, q3n_ecc_result_to_mtd_ret(&total), 30);
+}
+
+static void q3n_ecc_accumulate_preserves_threshold_test(struct kunit *test)
+{
+	struct q3n_ecc_result total = {};
+	struct q3n_ecc_result page = {
+		.max_bitflips = 40,
+		.corrected_bits = 40,
+	};
+
+	q3n_ecc_accumulate(&total, &page);
+	KUNIT_EXPECT_EQ(test, total.max_bitflips, 40U);
+	KUNIT_EXPECT_EQ(test, q3n_ecc_result_to_mtd_ret(&total), 40);
+}
+
+static void
+q3n_ecc_accumulate_defers_failure_accounting_once_test(struct kunit *test)
+{
+	struct q3n_ecc_result total = {};
+	struct q3n_ecc_result first = {
+		.failed_step = 3,
+		.uncorrectable = true,
+	};
+	struct q3n_ecc_result second = {
+		.failed_step = 9,
+		.uncorrectable = true,
+	};
+	u32 failed = 0;
+
+	q3n_ecc_accumulate(&total, &first);
+	q3n_ecc_accumulate(&total, &second);
+	if (total.uncorrectable)
+		failed++;
+
+	KUNIT_EXPECT_TRUE(test, total.uncorrectable);
+	KUNIT_EXPECT_EQ(test, total.failed_step, 3U);
+	KUNIT_EXPECT_EQ(test, failed, 1U);
+	KUNIT_EXPECT_EQ(test, total.max_bitflips, 0U);
+	KUNIT_EXPECT_EQ(test, q3n_ecc_result_to_mtd_ret(&total), -EBADMSG);
+	KUNIT_EXPECT_EQ(test, failed, 1U);
+}
+
 static void q3n_manifest_rejects_header_crc_corruption_test(struct kunit *test)
 {
 	u8 parity[16] = {};
@@ -647,6 +719,10 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_program_order_test),
 	KUNIT_CASE(q3n_serial_same_block_mapping_test),
 	KUNIT_CASE(q3n_incremental_xor_test),
+	KUNIT_CASE(q3n_ecc_accumulate_clean_test),
+	KUNIT_CASE(q3n_ecc_accumulate_uses_max_and_sums_corrected_test),
+	KUNIT_CASE(q3n_ecc_accumulate_preserves_threshold_test),
+	KUNIT_CASE(q3n_ecc_accumulate_defers_failure_accounting_once_test),
 	KUNIT_CASE(q3n_manifest_rejects_header_crc_corruption_test),
 	KUNIT_CASE(q3n_data_oob_round_trip_preserves_bbm_test),
 	KUNIT_CASE(q3n_data_oob_rejects_corrupt_crc_fields_test),

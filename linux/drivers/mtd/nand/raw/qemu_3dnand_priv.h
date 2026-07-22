@@ -3,6 +3,7 @@
 #define __QEMU_3DNAND_PRIV_H
 
 #include <linux/atomic.h>
+#include <linux/errno.h>
 #include <linux/list.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
@@ -105,11 +106,28 @@ struct q3n_parity_rebuild {
 };
 
 struct q3n_ecc_result {
-	u32 status;
 	u32 max_bitflips;
 	u32 corrected_bits;
 	u32 failed_step;
+	bool uncorrectable;
 };
+
+static inline void q3n_ecc_accumulate(struct q3n_ecc_result *total,
+				      const struct q3n_ecc_result *page)
+{
+	if (page->max_bitflips > total->max_bitflips)
+		total->max_bitflips = page->max_bitflips;
+	total->corrected_bits += page->corrected_bits;
+	if (page->uncorrectable && !total->uncorrectable)
+		total->failed_step = page->failed_step;
+	total->uncorrectable |= page->uncorrectable;
+}
+
+static inline int
+q3n_ecc_result_to_mtd_ret(const struct q3n_ecc_result *result)
+{
+	return result->uncorrectable ? -EBADMSG : result->max_bitflips;
+}
 
 enum q3n_req_class {
 	Q3N_REQ_FOREGROUND,

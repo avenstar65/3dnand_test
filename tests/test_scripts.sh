@@ -437,6 +437,30 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_data_oob_rou
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_parity_oob_round_trip_and_crc_validation_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c \
 	'q3n_unprotected_tombstone_round_trip_test'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c \
+	'q3n_ecc_accumulate_uses_max_and_sums_corrected_test'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c \
+	'q3n_ecc_accumulate_defers_failure_accounting_once_test'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_priv.h \
+	'bool uncorrectable'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_priv.h \
+	'q3n_ecc_result_to_mtd_ret'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+	'mtd->ecc_step_size = Q3N_ECC_STEP_SIZE'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+	'mtd->ecc_strength = Q3N_ECC_STRENGTH'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+	'mtd->bitflip_threshold = Q3N_ECC_STRENGTH'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+	'background_ecc_corrected_bits'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+	'raid_source_corrected_bits'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+	'Q3N_REG_ECC_GEOM0'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+	'Q3N_REG_ECC_GEOM1'
+assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+	'ecc_stats\.failed'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_read_phys_page_oob_locked'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_program_phys_page_oob_locked'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_READ_PAGE_OOB'
@@ -449,7 +473,7 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_priv.h \
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_priv.h \
 	'Q3N_UNPROTECTED_PARITY_PROGRAM'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
-	'ecc\.status.*Q3N_ECC_STATUS_UNCORRECTABLE'
+	'ecc\.uncorrectable'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
 	'u8 \*failure_reason'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'le32_to_cpu\(manifest->data_crc\[lane\]\) != data_crc'

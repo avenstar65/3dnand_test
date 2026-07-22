@@ -91,6 +91,8 @@ struct qemu_3dnand {
 	u64 parity_stale;
 	u64 raid_recovered;
 	u64 raid_failed;
+	u64 raid_source_corrected_bits;
+	u64 background_ecc_corrected_bits;
 	u64 generation_updates;
 	atomic64_t protected_stripes;
 	atomic64_t unprotected_stripes;
@@ -177,6 +179,40 @@ static void qemu_3dnand_writel(struct qemu_3dnand *q3n, u32 reg, u32 val)
 	writel(val, q3n->regs + reg);
 }
 
+static void qemu_3dnand_read_ecc_result(struct qemu_3dnand *q3n,
+					struct q3n_ecc_result *ecc)
+{
+	u32 status;
+
+	if (!ecc)
+		return;
+
+	status = qemu_3dnand_readl(q3n, Q3N_REG_ECC_STATUS);
+	ecc->max_bitflips =
+		qemu_3dnand_readl(q3n, Q3N_REG_ECC_MAX_BITFLIPS);
+	ecc->corrected_bits =
+		qemu_3dnand_readl(q3n, Q3N_REG_ECC_CORRECTED_BITS);
+	ecc->failed_step = qemu_3dnand_readl(q3n, Q3N_REG_ECC_FAILED_STEP);
+	ecc->uncorrectable = status & Q3N_ECC_STATUS_UNCORRECTABLE;
+}
+
+static void
+qemu_3dnand_account_background_ecc(struct qemu_3dnand *q3n,
+				   const struct q3n_ecc_result *ecc)
+{
+	q3n->background_ecc_corrected_bits += ecc->corrected_bits;
+}
+
+static void
+qemu_3dnand_account_foreground_ecc(struct qemu_3dnand *q3n,
+				   struct mtd_req_stats *stats,
+				   const struct q3n_ecc_result *ecc)
+{
+	q3n->mtd.ecc_stats.corrected += ecc->corrected_bits;
+	if (stats)
+		stats->corrected_bitflips += ecc->corrected_bits;
+}
+
 static int qemu_3dnand_wait_ready(struct qemu_3dnand *q3n)
 {
 	u32 status = qemu_3dnand_readl(q3n, Q3N_REG_STATUS);
@@ -204,7 +240,8 @@ static void qemu_3dnand_set_addr(struct qemu_3dnand *q3n, loff_t addr)
 
 static int qemu_3dnand_read_phys_page_locked(struct qemu_3dnand *q3n,
 					     u32 block, u32 page, u8 *buf,
-					     u32 op_class)
+					     u32 op_class,
+					     struct q3n_ecc_result *ecc)
 {
 	u32 *words = (u32 *)buf;
 	int ret;
@@ -214,12 +251,15 @@ static int qemu_3dnand_read_phys_page_locked(struct qemu_3dnand *q3n,
 	qemu_3dnand_writel(q3n, Q3N_REG_OP_CLASS, op_class);
 	qemu_3dnand_writel(q3n, Q3N_REG_LEN, q3n->page_size);
 	qemu_3dnand_writel(q3n, Q3N_REG_CMD, Q3N_CMD_READ_PAGE);
+	if (ecc)
+		*ecc = (struct q3n_ecc_result) {};
 	ret = qemu_3dnand_wait_ready(q3n);
 	if (ret)
 		return ret;
 
 	for (i = 0; i < q3n->page_size / sizeof(u32); i++)
 		words[i] = qemu_3dnand_readl(q3n, Q3N_REG_DATA);
+	qemu_3dnand_read_ecc_result(q3n, ecc);
 
 	return 0;
 }
@@ -236,6 +276,8 @@ static int qemu_3dnand_read_phys_page_oob_locked(
 	qemu_3dnand_writel(q3n, Q3N_REG_LEN, q3n->page_size);
 	qemu_3dnand_writel(q3n, Q3N_REG_OOB_LEN, Q3N_LOGICAL_OOB_SIZE);
 	qemu_3dnand_writel(q3n, Q3N_REG_CMD, Q3N_CMD_READ_PAGE_OOB);
+	if (ecc)
+		*ecc = (struct q3n_ecc_result) {};
 	ret = qemu_3dnand_wait_ready(q3n);
 	if (ret)
 		return ret;
@@ -247,15 +289,7 @@ static int qemu_3dnand_read_phys_page_oob_locked(
 		put_unaligned_le32(qemu_3dnand_readl(q3n, Q3N_REG_DATA),
 				   logical_oob + i);
 
-	if (ecc) {
-		ecc->status = qemu_3dnand_readl(q3n, Q3N_REG_ECC_STATUS);
-		ecc->max_bitflips = qemu_3dnand_readl(q3n,
-						      Q3N_REG_ECC_MAX_BITFLIPS);
-		ecc->corrected_bits = qemu_3dnand_readl(q3n,
-						       Q3N_REG_ECC_CORRECTED_BITS);
-		ecc->failed_step = qemu_3dnand_readl(q3n,
-						     Q3N_REG_ECC_FAILED_STEP);
-	}
+	qemu_3dnand_read_ecc_result(q3n, ecc);
 
 	return 0;
 }
@@ -398,6 +432,9 @@ static int qemu_3dnand_validate_replay_members_locked(
 			logical_oob, Q3N_OP_PARITY_READ, &ecc);
 		if (ret)
 			return ret;
+		qemu_3dnand_account_background_ecc(q3n, &ecc);
+		if (ecc.uncorrectable)
+			return -EBADMSG;
 		ret = qemu_3dnand_validate_data_metadata(q3n->page_buf,
 			q3n->page_size, logical_oob,
 			qemu_3dnand_stripe_id(q3n, block, stripe), lane,
@@ -542,7 +579,8 @@ static int qemu_3dnand_append_parity_locked(struct qemu_3dnand *q3n,
 						Q3N_OP_PARITY_READ, &ecc);
 		if (ret)
 			return ret;
-		if (ecc.status & Q3N_ECC_STATUS_UNCORRECTABLE) {
+		qemu_3dnand_account_background_ecc(q3n, &ecc);
+		if (ecc.uncorrectable) {
 			*failure_reason = Q3N_UNPROTECTED_LDPC_UNCORRECTABLE;
 			return -EBADMSG;
 		}
@@ -620,6 +658,14 @@ static int qemu_3dnand_restore_media_locked(struct qemu_3dnand *q3n)
 				&ecc);
 			if (ret)
 				break;
+			qemu_3dnand_account_background_ecc(q3n, &ecc);
+			if (ecc.uncorrectable) {
+				entry->valid = false;
+				q3n->raid_failed++;
+				atomic64_inc(&q3n->failed_stripes);
+				atomic64_inc(&q3n->unprotected_stripes);
+				continue;
+			}
 			if (get_unaligned_le16(logical_oob + 1) ==
 			    Q3N_RAID_TOMBSTONE_MAGIC) {
 				ret = q3n_unpack_unprotected_oob(logical_oob,
@@ -794,7 +840,9 @@ again:
 			parity->stripe * Q3N_STRIPE_PAGES +
 				slot,
 			parity->page_buf, logical_oob, Q3N_OP_PARITY_READ, &ecc);
-		if (!ret && (ecc.status & Q3N_ECC_STATUS_UNCORRECTABLE)) {
+		if (!ret)
+			qemu_3dnand_account_background_ecc(parity->q3n, &ecc);
+		if (!ret && ecc.uncorrectable) {
 			reason = Q3N_UNPROTECTED_LDPC_UNCORRECTABLE;
 			ret = -EBADMSG;
 		}
@@ -936,8 +984,12 @@ static int qemu_3dnand_queue_parity_locked(struct qemu_3dnand *q3n,
 }
 
 static int qemu_3dnand_recover_page_locked(struct qemu_3dnand *q3n,
-					   u32 data_block, u32 page, u8 *buf)
+					   u32 data_block, u32 page, u8 *buf,
+					   struct mtd_req_stats *stats,
+					   struct q3n_ecc_result *ecc)
 {
+	struct q3n_ecc_result total = {};
+	struct q3n_ecc_result source;
 	u32 stripe = page / Q3N_STRIPE_PAGES;
 	u32 missing_lane = page % Q3N_STRIPE_PAGES;
 	struct qemu_3dnand_parity_entry *entry;
@@ -956,9 +1008,14 @@ static int qemu_3dnand_recover_page_locked(struct qemu_3dnand *q3n,
 
 	ret = qemu_3dnand_read_phys_page_locked(q3n, entry->physical_block,
 						entry->page, buf,
-						Q3N_OP_FOREGROUND);
+						Q3N_OP_FOREGROUND, &source);
 	if (ret)
 		return ret;
+	if (source.uncorrectable)
+		return -EBADMSG;
+	qemu_3dnand_account_foreground_ecc(q3n, stats, &source);
+	q3n->raid_source_corrected_bits += source.corrected_bits;
+	q3n_ecc_accumulate(&total, &source);
 
 	for (lane = 0; lane < Q3N_DATA_PAGES; lane++) {
 		if (lane == missing_lane)
@@ -970,37 +1027,53 @@ static int qemu_3dnand_recover_page_locked(struct qemu_3dnand *q3n,
 		ret = qemu_3dnand_read_phys_page_locked(q3n, data_block,
 					 stripe * Q3N_STRIPE_PAGES + lane,
 							q3n->page_buf,
-							Q3N_OP_FOREGROUND);
+							Q3N_OP_FOREGROUND,
+							&source);
 		if (ret)
 			return ret;
+		if (source.uncorrectable)
+			return -EBADMSG;
+		qemu_3dnand_account_foreground_ecc(q3n, stats, &source);
+		q3n->raid_source_corrected_bits += source.corrected_bits;
+		q3n_ecc_accumulate(&total, &source);
 		for (i = 0; i < q3n->page_size; i++)
 			buf[i] ^= q3n->page_buf[i];
 	}
 
+	*ecc = total;
 	q3n->raid_recovered++;
 	return 0;
 }
 
 static int qemu_3dnand_read_data_page_locked(struct qemu_3dnand *q3n,
-					     u32 data_block, u32 page, u8 *buf)
+					     u32 data_block, u32 page, u8 *buf,
+					     struct mtd_req_stats *stats,
+					     struct q3n_ecc_result *ecc)
 {
 	int ret;
 
 	ret = qemu_3dnand_read_phys_page_locked(q3n, data_block, page, buf,
-						Q3N_OP_FOREGROUND);
-	if (!ret)
+						Q3N_OP_FOREGROUND, ecc);
+	if (!ret && ecc->uncorrectable)
+		return -EBADMSG;
+	if (!ret) {
+		qemu_3dnand_account_foreground_ecc(q3n, stats, ecc);
 		return 0;
+	}
 
-	ret = qemu_3dnand_recover_page_locked(q3n, data_block, page, buf);
+	ret = qemu_3dnand_recover_page_locked(q3n, data_block, page, buf,
+					      stats, ecc);
 	if (ret)
 		q3n->raid_failed++;
 	return ret;
 }
 
 static int qemu_3dnand_mtd_read(struct mtd_info *mtd, loff_t from, size_t len,
-				size_t *retlen, u_char *buf)
+				size_t *retlen, u_char *buf,
+				struct mtd_req_stats *stats)
 {
 	struct qemu_3dnand *q3n = mtd->priv;
+	struct q3n_ecc_result total = {};
 	struct q3n_request req = {
 		.class = Q3N_REQ_FOREGROUND,
 		.op = Q3N_REQ_READ,
@@ -1015,6 +1088,7 @@ static int qemu_3dnand_mtd_read(struct mtd_info *mtd, loff_t from, size_t len,
 	if (ret)
 		return ret;
 	while (done < len) {
+		struct q3n_ecc_result page_ecc;
 		u32 block, page, column;
 		size_t chunk;
 
@@ -1027,22 +1101,25 @@ static int qemu_3dnand_mtd_read(struct mtd_info *mtd, loff_t from, size_t len,
 		}
 		chunk = min_t(size_t, len - done, q3n->page_size - column);
 		ret = qemu_3dnand_read_data_page_locked(q3n, block, page,
-							q3n->page_buf);
+							q3n->page_buf, stats,
+							&page_ecc);
 		if (ret)
 			break;
+		q3n_ecc_accumulate(&total, &page_ecc);
 		memcpy(buf + done, q3n->page_buf + column, chunk);
 		done += chunk;
 	}
 	mutex_unlock(&q3n->mtd_lock);
 
 	*retlen = done;
-	return ret;
+	return ret ?: q3n_ecc_result_to_mtd_ret(&total);
 }
 
 static int qemu_3dnand_mtd_read_oob(struct mtd_info *mtd, loff_t from,
 				     struct mtd_oob_ops *ops)
 {
 	struct qemu_3dnand *q3n = mtd->priv;
+	struct q3n_ecc_result total = {};
 	struct q3n_request req = {
 		.class = Q3N_REQ_FOREGROUND,
 		.op = Q3N_REQ_READ,
@@ -1066,7 +1143,8 @@ static int qemu_3dnand_mtd_read_oob(struct mtd_info *mtd, loff_t from,
 		return -EINVAL;
 	if (!ops->oobbuf)
 		return qemu_3dnand_mtd_read(mtd, from, ops->len,
-					    &ops->retlen, ops->datbuf);
+					    &ops->retlen, ops->datbuf,
+					    ops->stats);
 
 	logical_page = div64_u64(from, q3n->page_size);
 	column = from % q3n->page_size;
@@ -1096,6 +1174,12 @@ static int qemu_3dnand_mtd_read_oob(struct mtd_info *mtd, loff_t from,
 				&ecc);
 		if (ret)
 			break;
+		if (ecc.uncorrectable) {
+			ret = -EBADMSG;
+			break;
+		}
+		qemu_3dnand_account_foreground_ecc(q3n, ops->stats, &ecc);
+		q3n_ecc_accumulate(&total, &ecc);
 		if (data_chunk)
 			memcpy(ops->datbuf + data_done,
 			       q3n->page_buf + column, data_chunk);
@@ -1112,7 +1196,7 @@ static int qemu_3dnand_mtd_read_oob(struct mtd_info *mtd, loff_t from,
 
 	ops->retlen = data_done;
 	ops->oobretlen = oob_done;
-	return ret;
+	return ret ?: q3n_ecc_result_to_mtd_ret(&total);
 }
 
 static int qemu_3dnand_program_logical_page(struct qemu_3dnand *q3n,
@@ -1474,6 +1558,9 @@ static int qemu_3dnand_register_mtd(struct qemu_3dnand *q3n)
 	mtd->writesize = q3n->page_size;
 	mtd->writebufsize = q3n->page_size;
 	mtd->oobsize = Q3N_LOGICAL_OOB_SIZE;
+	mtd->ecc_step_size = Q3N_ECC_STEP_SIZE;
+	mtd->ecc_strength = Q3N_ECC_STRENGTH;
+	mtd->bitflip_threshold = Q3N_ECC_STRENGTH;
 	mtd->owner = THIS_MODULE;
 	mtd->priv = q3n;
 	mtd->_read_oob = qemu_3dnand_mtd_read_oob;
@@ -1619,6 +1706,23 @@ static int qemu_3dnand_raid_failed_get(void *data, u64 *value)
 	struct qemu_3dnand *q3n = data;
 
 	*value = q3n->raid_failed;
+	return 0;
+}
+
+static int qemu_3dnand_raid_source_corrected_bits_get(void *data, u64 *value)
+{
+	struct qemu_3dnand *q3n = data;
+
+	*value = q3n->raid_source_corrected_bits;
+	return 0;
+}
+
+static int
+qemu_3dnand_background_ecc_corrected_bits_get(void *data, u64 *value)
+{
+	struct qemu_3dnand *q3n = data;
+
+	*value = q3n->background_ecc_corrected_bits;
 	return 0;
 }
 
@@ -1863,6 +1967,12 @@ DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_raid_recovered_fops,
 			 qemu_3dnand_raid_recovered_get, NULL, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_raid_failed_fops,
 			 qemu_3dnand_raid_failed_get, NULL, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_raid_source_corrected_bits_fops,
+			 qemu_3dnand_raid_source_corrected_bits_get, NULL,
+			 "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_background_ecc_corrected_bits_fops,
+			 qemu_3dnand_background_ecc_corrected_bits_get, NULL,
+			 "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_parity_stale_fops,
 			 qemu_3dnand_parity_stale_get, NULL, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_faults_injected_fops,
@@ -1936,6 +2046,12 @@ static void qemu_3dnand_debugfs_init(struct qemu_3dnand *q3n)
 			    &qemu_3dnand_raid_recovered_fops);
 	debugfs_create_file("raid_failed", 0400, q3n->debugfs_dir, q3n,
 			    &qemu_3dnand_raid_failed_fops);
+	debugfs_create_file("raid_source_corrected_bits", 0400,
+			    q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_raid_source_corrected_bits_fops);
+	debugfs_create_file("background_ecc_corrected_bits", 0400,
+			    q3n->debugfs_dir, q3n,
+			    &qemu_3dnand_background_ecc_corrected_bits_fops);
 	debugfs_create_file("parity_stale", 0400, q3n->debugfs_dir, q3n,
 			    &qemu_3dnand_parity_stale_fops);
 	debugfs_create_file("parity_written", 0400, q3n->debugfs_dir, q3n,
@@ -1988,6 +2104,8 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 	u32 cap;
 	u32 geom0;
 	u32 geom1;
+	u32 ecc_geom0;
+	u32 ecc_geom1;
 	u32 pool0;
 	u32 pool1;
 	int ret;
@@ -2026,11 +2144,6 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 	atomic64_set(&q3n->unprotected_stripes, 0);
 	atomic64_set(&q3n->failed_stripes, 0);
 	q3n->parity_continuation_pause_class = Q3N_REQ_PARITY_READ;
-	q3n->parity_wq = alloc_workqueue("q3n-parity", WQ_UNBOUND,
-					 Q3N_MAX_PENDING_PARITY);
-	if (!q3n->parity_wq)
-		return -ENOMEM;
-	pci_set_drvdata(pdev, q3n);
 
 	ident = qemu_3dnand_readl(q3n, Q3N_REG_ID);
 	if (ident != Q3N_ID_VALUE)
@@ -2041,8 +2154,18 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 	q3n->cap = cap;
 	geom0 = qemu_3dnand_readl(q3n, Q3N_REG_GEOM0);
 	geom1 = qemu_3dnand_readl(q3n, Q3N_REG_GEOM1);
+	ecc_geom0 = qemu_3dnand_readl(q3n, Q3N_REG_ECC_GEOM0);
+	ecc_geom1 = qemu_3dnand_readl(q3n, Q3N_REG_ECC_GEOM1);
 	pool0 = qemu_3dnand_readl(q3n, Q3N_REG_POOL0);
 	pool1 = qemu_3dnand_readl(q3n, Q3N_REG_POOL1);
+	if ((ecc_geom0 & 0xffff) != Q3N_ECC_STEP_SIZE ||
+	    (ecc_geom0 >> 16) != Q3N_ECC_STRENGTH ||
+	    (ecc_geom1 & 0xffff) != Q3N_LDPC_BYTES_PER_STEP ||
+	    (ecc_geom1 >> 16) != Q3N_LDPC_STEPS)
+		return dev_err_probe(dev, -EINVAL,
+			"unsupported ECC geometry %u/%u/%u/%u\n",
+			ecc_geom0 & 0xffff, ecc_geom0 >> 16,
+			ecc_geom1 & 0xffff, ecc_geom1 >> 16);
 
 	q3n->page_size = geom0 & 0xffff;
 	q3n->oob_size = geom0 >> 16;
@@ -2055,6 +2178,11 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 	q3n->data_block_count = q3n->data_blocks_per_plane * Q3N_RAID_LANES;
 	q3n->parity_block_count = q3n->parity_blocks_per_plane * Q3N_RAID_LANES;
 	q3n->raid_group_count = q3n->data_block_count / Q3N_RAID_LANES;
+	q3n->parity_wq = alloc_workqueue("q3n-parity", WQ_UNBOUND,
+					 Q3N_MAX_PENDING_PARITY);
+	if (!q3n->parity_wq)
+		return -ENOMEM;
+	pci_set_drvdata(pdev, q3n);
 
 	q3n->page_buf = devm_kmalloc(dev, q3n->page_size, GFP_KERNEL);
 	q3n->raid_buf = devm_kmalloc(dev, q3n->page_size, GFP_KERNEL);
@@ -2072,9 +2200,10 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 					     sizeof(*q3n->parity_index),
 					     GFP_KERNEL);
 	if (!q3n->page_buf || !q3n->raid_buf || !q3n->data_page_valid ||
-	    !q3n->program_state ||
-	    !q3n->data_meta || !q3n->parity_index)
+	    !q3n->program_state || !q3n->data_meta || !q3n->parity_index) {
+		ret = -ENOMEM;
 		goto err_free_metadata;
+	}
 
 	for (ret = 0; ret < q3n->data_block_count; ret++) {
 		q3n->data_meta[ret].generation = 1;
