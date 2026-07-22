@@ -6,6 +6,7 @@
 #include <linux/module.h>
 #include <linux/string.h>
 
+#include "qemu_3dnand.h"
 #include "qemu_3dnand_priv.h"
 
 static u16 q3n_member_mask(u8 data_pages)
@@ -16,6 +17,14 @@ static u16 q3n_member_mask(u8 data_pages)
 static u32 q3n_manifest_header_crc(const struct q3n_parity_manifest *manifest)
 {
 	struct q3n_parity_manifest copy = *manifest;
+
+	copy.header_crc = 0;
+	return crc32_le(~0, (const u8 *)&copy, sizeof(copy));
+}
+
+static u32 q3n_data_meta_header_crc(const struct q3n_data_meta *meta)
+{
+	struct q3n_data_meta copy = *meta;
 
 	copy.header_crc = 0;
 	return crc32_le(~0, (const u8 *)&copy, sizeof(copy));
@@ -99,6 +108,64 @@ int q3n_validate_manifest(const struct q3n_parity_manifest *manifest)
 		return -EBADMSG;
 
 	return 0;
+}
+
+int q3n_pack_data_oob(u8 *logical_oob, size_t oob_len,
+		      const struct q3n_data_meta *meta)
+{
+	struct q3n_data_meta encoded;
+
+	if (!logical_oob || !meta || oob_len < Q3N_LOGICAL_OOB_SIZE)
+		return -EINVAL;
+
+	encoded = *meta;
+	encoded.magic = cpu_to_le16(Q3N_RAID_META_MAGIC);
+	encoded.version = Q3N_RAID_META_VERSION;
+	encoded.header_crc = cpu_to_le32(q3n_data_meta_header_crc(&encoded));
+	memset(logical_oob, 0xff, Q3N_LOGICAL_OOB_SIZE);
+	memcpy(logical_oob + 1, &encoded, sizeof(encoded));
+	return 0;
+}
+
+int q3n_unpack_data_oob(const u8 *logical_oob, size_t oob_len,
+			struct q3n_data_meta *meta)
+{
+	if (!logical_oob || !meta || oob_len < Q3N_LOGICAL_OOB_SIZE)
+		return -EINVAL;
+
+	memcpy(meta, logical_oob + 1, sizeof(*meta));
+	if (le16_to_cpu(meta->magic) != Q3N_RAID_META_MAGIC ||
+	    meta->version != Q3N_RAID_META_VERSION ||
+	    le32_to_cpu(meta->header_crc) != q3n_data_meta_header_crc(meta))
+		return -EBADMSG;
+
+	return 0;
+}
+
+int q3n_pack_parity_oob(u8 *logical_oob, size_t oob_len,
+			const struct q3n_parity_manifest *manifest)
+{
+	int ret;
+
+	if (!logical_oob || !manifest || oob_len < Q3N_LOGICAL_OOB_SIZE)
+		return -EINVAL;
+	ret = q3n_validate_manifest(manifest);
+	if (ret)
+		return ret;
+
+	memset(logical_oob, 0xff, Q3N_LOGICAL_OOB_SIZE);
+	memcpy(logical_oob + 1, manifest, sizeof(*manifest));
+	return 0;
+}
+
+int q3n_unpack_parity_oob(const u8 *logical_oob, size_t oob_len,
+			  struct q3n_parity_manifest *manifest)
+{
+	if (!logical_oob || !manifest || oob_len < Q3N_LOGICAL_OOB_SIZE)
+		return -EINVAL;
+
+	memcpy(manifest, logical_oob + 1, sizeof(*manifest));
+	return q3n_validate_manifest(manifest);
 }
 
 int q3n_recover_page(u8 *out, const u8 *parity, const u8 * const *members,

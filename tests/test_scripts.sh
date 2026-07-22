@@ -360,6 +360,10 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_GET_BLOCK
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_MARK_BAD_BLOCK'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CAP_BAD_BLOCK_MARKER'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_validate_manifest'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_pack_data_oob'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_unpack_data_oob'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_pack_parity_oob'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_unpack_parity_oob'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'Q3N_STRIPE_UNPROTECTED'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'q3n->parity_index = kvcalloc'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'kvfree\(q3n->parity_index\)'
@@ -389,6 +393,12 @@ assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'IS_ALIGNED\(i
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_map_non_power_of_two_geometry_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_program_order_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_scheduler_tracks_max_pending_test'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_data_oob_round_trip_preserves_bbm_test'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_parity_oob_round_trip_and_crc_validation_test'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_read_phys_page_oob_locked'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_program_phys_page_oob_locked'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_READ_PAGE_OOB'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_PROGRAM_PAGE_OOB'
 
 controller_tmp=$(mktemp -d "${TMPDIR:-/tmp}/q3n-controller.XXXXXX")
 trap 'rm -rf "$controller_tmp"' EXIT HUP INT TERM

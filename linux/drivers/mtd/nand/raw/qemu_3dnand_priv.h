@@ -87,6 +87,13 @@ struct q3n_parity_rebuild {
 	u32 data_crc[Q3N_RAID_MAX_DATA_PAGES];
 };
 
+struct q3n_ecc_result {
+	u32 status;
+	u32 max_bitflips;
+	u32 corrected_bits;
+	u32 failed_step;
+};
+
 enum q3n_req_class {
 	Q3N_REQ_FOREGROUND,
 	Q3N_REQ_PARITY_READ,
@@ -137,6 +144,14 @@ void q3n_open_stripe_complete_parity(struct q3n_open_stripe *stripe, bool ok);
 int q3n_build_manifest(const struct q3n_open_stripe *stripe,
 		       struct q3n_parity_manifest *manifest);
 int q3n_validate_manifest(const struct q3n_parity_manifest *manifest);
+int q3n_pack_data_oob(u8 *logical_oob, size_t oob_len,
+		      const struct q3n_data_meta *meta);
+int q3n_unpack_data_oob(const u8 *logical_oob, size_t oob_len,
+			struct q3n_data_meta *meta);
+int q3n_pack_parity_oob(u8 *logical_oob, size_t oob_len,
+			const struct q3n_parity_manifest *manifest);
+int q3n_unpack_parity_oob(const u8 *logical_oob, size_t oob_len,
+			  struct q3n_parity_manifest *manifest);
 int q3n_recover_page(u8 *out, const u8 *parity, const u8 * const *members,
 		     u8 data_pages, u8 missing_slot, size_t len);
 int q3n_rebuild_xor_one(struct q3n_parity_rebuild *rebuild,
