@@ -30,15 +30,6 @@ static u32 q3n_data_meta_header_crc(const struct q3n_data_meta *meta)
 	return crc32_le(~0, (const u8 *)&copy, sizeof(copy));
 }
 
-static u32 q3n_tombstone_header_crc(
-		const struct q3n_unprotected_tombstone *tombstone)
-{
-	struct q3n_unprotected_tombstone copy = *tombstone;
-
-	copy.header_crc = 0;
-	return crc32_le(~0, (const u8 *)&copy, sizeof(copy));
-}
-
 void q3n_xor_page(u8 *parity, const u8 *data, size_t len)
 {
 	size_t i;
@@ -178,43 +169,6 @@ int q3n_unpack_parity_oob(const u8 *logical_oob, size_t oob_len,
 
 	memcpy(manifest, logical_oob + 1, sizeof(*manifest));
 	return q3n_validate_manifest(manifest);
-}
-
-int q3n_pack_unprotected_oob(u8 *logical_oob, size_t oob_len,
-			     const struct q3n_unprotected_tombstone *tombstone)
-{
-	struct q3n_unprotected_tombstone encoded;
-
-	if (!logical_oob || !tombstone || oob_len < Q3N_LOGICAL_OOB_SIZE ||
-	    tombstone->reason < Q3N_UNPROTECTED_INVALID_METADATA ||
-	    tombstone->reason > Q3N_UNPROTECTED_REBUILD)
-		return -EINVAL;
-
-	encoded = *tombstone;
-	encoded.magic = cpu_to_le16(Q3N_RAID_TOMBSTONE_MAGIC);
-	encoded.version = Q3N_RAID_META_VERSION;
-	encoded.header_crc = cpu_to_le32(q3n_tombstone_header_crc(&encoded));
-	memset(logical_oob, 0xff, Q3N_LOGICAL_OOB_SIZE);
-	memcpy(logical_oob + 1, &encoded, sizeof(encoded));
-	return 0;
-}
-
-int q3n_unpack_unprotected_oob(const u8 *logical_oob, size_t oob_len,
-			       struct q3n_unprotected_tombstone *tombstone)
-{
-	if (!logical_oob || !tombstone || oob_len < Q3N_LOGICAL_OOB_SIZE)
-		return -EINVAL;
-
-	memcpy(tombstone, logical_oob + 1, sizeof(*tombstone));
-	if (le16_to_cpu(tombstone->magic) != Q3N_RAID_TOMBSTONE_MAGIC ||
-	    tombstone->version != Q3N_RAID_META_VERSION ||
-	    tombstone->reason < Q3N_UNPROTECTED_INVALID_METADATA ||
-	    tombstone->reason > Q3N_UNPROTECTED_REBUILD ||
-	    le32_to_cpu(tombstone->header_crc) !=
-		q3n_tombstone_header_crc(tombstone))
-		return -EBADMSG;
-
-	return 0;
 }
 
 int q3n_recover_page(u8 *out, const u8 *parity, const u8 * const *members,

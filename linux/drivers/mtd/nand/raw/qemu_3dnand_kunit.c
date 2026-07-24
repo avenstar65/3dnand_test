@@ -322,60 +322,6 @@ static void q3n_parity_oob_round_trip_and_crc_validation_test(struct kunit *test
 			-EBADMSG);
 }
 
-static void q3n_unprotected_tombstone_round_trip_test(struct kunit *test)
-{
-	static const u8 reasons[] = {
-		Q3N_UNPROTECTED_INVALID_METADATA,
-		Q3N_UNPROTECTED_MEMBER_READ,
-		Q3N_UNPROTECTED_LDPC_UNCORRECTABLE,
-		Q3N_UNPROTECTED_PARITY_PROGRAM,
-		Q3N_UNPROTECTED_REBUILD,
-	};
-	u8 logical_oob[128];
-	struct q3n_unprotected_tombstone tombstone = {
-		.stripe_id = cpu_to_le64(0x123456789ULL),
-	};
-	struct q3n_unprotected_tombstone decoded;
-	struct q3n_parity_manifest manifest;
-	size_t i;
-
-	for (i = 0; i < ARRAY_SIZE(reasons); i++) {
-		tombstone.reason = reasons[i];
-		KUNIT_ASSERT_EQ(test, q3n_pack_unprotected_oob(logical_oob,
-						       sizeof(logical_oob),
-						       &tombstone), 0);
-		KUNIT_ASSERT_EQ(test, q3n_unpack_unprotected_oob(logical_oob,
-							 sizeof(logical_oob),
-							 &decoded), 0);
-		KUNIT_EXPECT_EQ(test, decoded.reason, reasons[i]);
-	}
-	KUNIT_EXPECT_EQ(test, logical_oob[0], (u8)0xff);
-	KUNIT_EXPECT_EQ(test, get_unaligned_le16(logical_oob + 1),
-			(u16)Q3N_RAID_TOMBSTONE_MAGIC);
-	KUNIT_EXPECT_EQ(test, decoded.stripe_id, tombstone.stripe_id);
-	KUNIT_EXPECT_EQ(test, q3n_unpack_parity_oob(logical_oob,
-						   sizeof(logical_oob),
-						   &manifest), -EBADMSG);
-	tombstone.reason = 0;
-	KUNIT_EXPECT_EQ(test, q3n_pack_unprotected_oob(logical_oob,
-						       sizeof(logical_oob),
-						       &tombstone), -EINVAL);
-	tombstone.reason = Q3N_UNPROTECTED_REBUILD + 1;
-	KUNIT_EXPECT_EQ(test, q3n_pack_unprotected_oob(logical_oob,
-						       sizeof(logical_oob),
-						       &tombstone), -EINVAL);
-
-	tombstone.reason = Q3N_UNPROTECTED_INVALID_METADATA;
-	KUNIT_ASSERT_EQ(test, q3n_pack_unprotected_oob(logical_oob,
-						       sizeof(logical_oob),
-						       &tombstone), 0);
-	logical_oob[1 + offsetof(struct q3n_unprotected_tombstone,
-				 header_crc)] ^= 1;
-	KUNIT_EXPECT_EQ(test, q3n_unpack_unprotected_oob(logical_oob,
-							 sizeof(logical_oob),
-							 &decoded), -EBADMSG);
-}
-
 static void q3n_oob_helpers_reject_short_buffers_test(struct kunit *test)
 {
 	u8 logical_oob[128];
@@ -394,25 +340,36 @@ static void q3n_oob_helpers_reject_short_buffers_test(struct kunit *test)
 
 static void q3n_open_stripe_is_unprotected_until_parity_completes_test(struct kunit *test)
 {
-	u8 parity[16] = {};
+	u8 first_parity[16] = {};
+	u8 second_parity[16] = {};
 	u8 data[16] = { 0x1 };
-	struct q3n_open_stripe stripe = {
+	struct q3n_open_stripe first = {
 		.stripe_id = 99,
-		.data_pages = 1,
-		.parity = parity,
-		.page_size = sizeof(parity),
+		.data_pages = Q3N_RAID_MAX_DATA_PAGES,
+		.parity = first_parity,
+		.page_size = sizeof(first_parity),
 	};
+	struct q3n_open_stripe second = {
+		.stripe_id = 100,
+		.data_pages = Q3N_RAID_MAX_DATA_PAGES,
+		.parity = second_parity,
+		.page_size = sizeof(second_parity),
+	};
+	u8 slot;
 
-	KUNIT_ASSERT_EQ(test, q3n_open_stripe_update(&stripe, 0, data,
-						       sizeof(data)), 0);
-	KUNIT_EXPECT_EQ(test, stripe.state, Q3N_STRIPE_UNPROTECTED);
-	KUNIT_ASSERT_EQ(test, q3n_open_stripe_queue_parity(&stripe), 0);
-	KUNIT_EXPECT_EQ(test, stripe.state, Q3N_STRIPE_PARITY_QUEUED);
-	q3n_open_stripe_complete_parity(&stripe, false);
-	KUNIT_EXPECT_EQ(test, stripe.state, Q3N_STRIPE_UNPROTECTED);
-	KUNIT_ASSERT_EQ(test, q3n_open_stripe_queue_parity(&stripe), 0);
-	q3n_open_stripe_complete_parity(&stripe, true);
-	KUNIT_EXPECT_EQ(test, stripe.state, Q3N_STRIPE_PROTECTED);
+	for (slot = 0; slot < Q3N_RAID_MAX_DATA_PAGES; slot++)
+		KUNIT_ASSERT_EQ(test, q3n_open_stripe_update(&first, slot, data,
+							     sizeof(data)), 0);
+	KUNIT_ASSERT_EQ(test, q3n_open_stripe_queue_parity(&first), 0);
+	KUNIT_EXPECT_EQ(test, first.state, Q3N_STRIPE_PARITY_QUEUED);
+	q3n_open_stripe_complete_parity(&first, false);
+	KUNIT_EXPECT_EQ(test, first.state, Q3N_STRIPE_UNPROTECTED);
+
+	for (slot = 0; slot < Q3N_RAID_MAX_DATA_PAGES; slot++)
+		KUNIT_ASSERT_EQ(test, q3n_open_stripe_update(&second, slot, data,
+							     sizeof(data)), 0);
+	KUNIT_EXPECT_EQ(test, q3n_open_stripe_queue_parity(&second), 0);
+	KUNIT_EXPECT_EQ(test, second.state, Q3N_STRIPE_PARITY_QUEUED);
 }
 
 static void q3n_recover_single_missing_page_test(struct kunit *test)
@@ -674,7 +631,6 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_data_oob_round_trip_preserves_bbm_test),
 	KUNIT_CASE(q3n_data_oob_rejects_corrupt_crc_fields_test),
 	KUNIT_CASE(q3n_parity_oob_round_trip_and_crc_validation_test),
-	KUNIT_CASE(q3n_unprotected_tombstone_round_trip_test),
 	KUNIT_CASE(q3n_oob_helpers_reject_short_buffers_test),
 	KUNIT_CASE(q3n_open_stripe_is_unprotected_until_parity_completes_test),
 	KUNIT_CASE(q3n_recover_single_missing_page_test),

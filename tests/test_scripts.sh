@@ -436,8 +436,6 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_scheduler_tr
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_data_oob_round_trip_preserves_bbm_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_parity_oob_round_trip_and_crc_validation_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c \
-	'q3n_unprotected_tombstone_round_trip_test'
-assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c \
 	'q3n_ecc_accumulate_uses_max_and_sums_corrected_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c \
 	'q3n_ecc_accumulate_defers_failure_accounting_once_test'
@@ -466,12 +464,11 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_progr
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_READ_PAGE_OOB'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_PROGRAM_PAGE_OOB'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_validate_replay_members_locked'
+assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'tombstone'
+assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'tombstone'
+assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_priv.h 'TOMBSTONE'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
-	'qemu_3dnand_program_unprotected_tombstone_locked'
-assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_priv.h \
-	'Q3N_UNPROTECTED_LDPC_UNCORRECTABLE'
-assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_priv.h \
-	'Q3N_UNPROTECTED_PARITY_PROGRAM'
+	'qemu_3dnand_account_queue_failure'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
 	'ecc\.uncorrectable'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
