@@ -30,7 +30,6 @@
 struct qemu_3dnand_data_block_meta {
 	u32 generation;
 	bool bad;
-	bool erased;
 	struct q3n_block_barrier parity_barrier;
 };
 
@@ -529,7 +528,6 @@ static int qemu_3dnand_restore_media_locked(struct qemu_3dnand *q3n)
 			return ret;
 
 		meta->bad = status & Q3N_BLOCK_STATUS_BAD;
-		meta->erased = status & Q3N_BLOCK_STATUS_ERASED;
 	}
 
 	return 0;
@@ -1048,7 +1046,6 @@ static int qemu_3dnand_program_logical_page(struct qemu_3dnand *q3n,
 
 	q3n->data_page_valid[qemu_3dnand_data_page_index(q3n, block,
 							      page)] = 1;
-	q3n->data_meta[block].erased = false;
 	if (page == 0 && logical_oob[0] != 0xff)
 		q3n->data_meta[block].bad = true;
 	stripe = page / Q3N_STRIPE_PAGES;
@@ -1241,7 +1238,6 @@ static int qemu_3dnand_mtd_erase(struct mtd_info *mtd,
 		q3n->data_meta[block].generation++;
 		if (!q3n->data_meta[block].generation)
 			q3n->data_meta[block].generation = 1;
-		q3n->data_meta[block].erased = true;
 		q3n->generation_updates++;
 		qemu_3dnand_invalidate_block_parity(q3n, block);
 		q3n_block_cancel_end(&q3n->data_meta[block].parity_barrier);
@@ -1977,7 +1973,6 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 
 	for (ret = 0; ret < q3n->data_block_count; ret++) {
 		q3n->data_meta[ret].generation = 1;
-		q3n->data_meta[ret].erased = true;
 		q3n_block_barrier_init(&q3n->data_meta[ret].parity_barrier);
 	}
 	if (q3n->cap & Q3N_CAP_PERSISTENT_MEDIA) {

@@ -80,7 +80,6 @@
 #define Q3N_CAP_BAD_BLOCK_MARKER       BIT(2)
 
 #define Q3N_BLOCK_STATUS_BAD           BIT(0)
-#define Q3N_BLOCK_STATUS_ERASED        BIT(1)
 
 #define Q3N_STATUS_READY               BIT(0)
 #define Q3N_STATUS_ERROR               BIT(1)
