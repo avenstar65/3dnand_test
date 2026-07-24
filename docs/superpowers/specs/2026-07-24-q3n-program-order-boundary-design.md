@@ -34,6 +34,12 @@ QEMU 不再：
 - 统计页序错误；
 - 根据 program frontier 判断页面是否擦除。
 
+为保持稀疏镜像，page slot 在后端使用反码表示：后端字节 `0x00` 对应物理
+NAND 字节 `0xff`。读取 page slot 后逐字节取反得到物理 main/OOB；PROGRAM
+在物理视图执行 `old & incoming`，再取反写回；ERASE 将对应后端 page slot
+写零或 discard。该编码只属于 Q3NMEDIA 内部表示，不改变 controller、LDPC、
+BBM 或 Linux 看到的字节。bitflip overlay 本身仍以全零表示无翻转，不取反。
+
 controller 需要判断 LDPC 擦除态时，直接检查读取到的 main 和 physical OOB。
 main 与完整 physical OOB 都为 `0xff` 才是擦除码字。正常 PROGRAM 即使 main
 全为 `0xff`，controller 也会生成确定性 LDPC，因此不依赖额外逐页状态来区分。
@@ -114,9 +120,10 @@ bitflip、`-EUCLEAN`、`-EBADMSG` 和最终 `ecc_stats` 规则不变。
 program frontier 或逐页状态。
 
 Q3NMEDIA v2 不再保存 block `next_prog_page` 数组和逐页 state 数组。介质只需
-持久化 header、main+physical OOB 以及 bitflip overlay。由于当前 v2 尚处开发
-阶段，本次直接修订 v2 布局，不再引入额外版本号；旧的开发期 v2 镜像可以明确
-拒绝并重新创建。
+持久化 header、反码编码的 main+physical OOB 以及原始 bitflip overlay。header
+增加 `page_slot_encoding=1`，其中1固定表示反码编码。由于当前 v2 尚处开发阶段，
+本次直接修订 v2 布局，不再引入额外版本号；旧的开发期 v2 镜像可以明确拒绝并
+重新创建。
 
 ## 7. 验证要求
 
