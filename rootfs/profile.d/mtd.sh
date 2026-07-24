@@ -29,7 +29,7 @@ mtd_q3n_stats() {
 mtd_q3n_parity_stats() {
   mtd_load_q3n || return 1
   stats=/sys/kernel/debug/qemu_3dnand
-  for counter in foreground_ops parity_reads parity_writes order_errors \
+  for counter in foreground_ops parity_reads parity_writes \
                  protected_stripes unprotected_stripes failed_stripes \
                  pending_parity max_pending_parity; do
     [ -r "$stats/$counter" ] || {
@@ -132,7 +132,7 @@ mtd_q3n_serial_smoke() {
   [ -n "$mtd_num" ] || return 1
   mtd_dev="/dev/mtd${mtd_num}"
   stats=/sys/kernel/debug/qemu_3dnand
-  for counter in foreground_ops parity_reads parity_writes order_errors \
+  for counter in foreground_ops parity_reads parity_writes \
                  protected_stripes unprotected_stripes failed_stripes \
                  pending_parity reserved_parity max_pending_parity parity_paused \
                  parity_pause_block parity_pause_enable \
@@ -184,8 +184,6 @@ mtd_q3n_serial_smoke() {
   mtd_q3n_wait_gt "$stats/parity_continuation_paused" 0 \
     "P1 continuation pause" || return 1
   [ "$(cat "$stats/pending_parity")" -gt 0 ] || return 1
-  unprotected_queued=$(cat "$stats/unprotected_stripes") || return 1
-  [ "$unprotected_queued" -gt "$unprotected_before" ] || return 1
   p0_foreground_before=$(cat "$stats/foreground_ops") || return 1
   p0_parity_before=$(cat "$stats/parity_reads") || return 1
   mtd_q3n_serial_read_page 0 || return 1
@@ -259,8 +257,19 @@ mtd_q3n_serial_smoke() {
   [ "$protected_failed" -eq "$protected_before_fail" ] || return 1
   echo "one-shot fault acceptance passed"
 
+  # A failed stripe-0 parity PROGRAM leaves no persistent placeholder. Logical
+  # page 7 maps to stripe-1 D0 at physical page 8 and must still make progress.
+  parity_writes_after_fail=$(cat "$stats/parity_writes") || return 1
+  mtd_q3n_serial_write_read_page 7 || return 1
+  [ "$(cat "$stats/unprotected_stripes")" -eq "$unprotected_after" ] || \
+    return 1
+  [ "$(cat "$stats/protected_stripes")" -eq "$protected_failed" ] || return 1
+  [ "$(cat "$stats/parity_writes")" -eq "$parity_writes_after_fail" ] || \
+    return 1
+  echo "q3n no-frontier stripe progress passed"
+
   page=0
-  while [ "$page" -lt 7 ]; do
+  while [ "$page" -lt 8 ]; do
     mtd_q3n_serial_read_page "$page" || return 1
     page=$((page + 1))
   done
@@ -379,18 +388,16 @@ mtd_q3n_serial_smoke() {
   foreground_after=$(cat "$stats/foreground_ops") || return 1
   parity_reads_after=$(cat "$stats/parity_reads") || return 1
   parity_writes_after=$(cat "$stats/parity_writes") || return 1
-  order_errors=$(cat "$stats/order_errors") || return 1
   max_pending=$(cat "$stats/max_pending_parity") || return 1
   [ "$foreground_after" -gt "$foreground_before" ] || return 1
   [ "$parity_reads_after" -gt "$parity_reads_before" ] || return 1
   [ "$parity_writes_after" -gt "$parity_writes_before" ] || return 1
-  [ "$order_errors" -eq 0 ] || return 1
   [ "$max_pending" -gt 0 ] || return 1
   [ "$(cat "$stats/reserved_parity")" -eq 0 ] || return 1
 
   trap - 0 HUP INT TERM
   mtd_q3n_parity_stats || return 1
-  echo "q3n serial smoke passed: protected=$protected_later unprotected=$unprotected_after failed=$failed_after faults=$faults_after order_errors=$order_errors max_pending=$max_pending"
+  echo "q3n serial smoke passed: protected=$protected_later unprotected=$unprotected_after failed=$failed_after faults=$faults_after max_pending=$max_pending"
 }
 
 mtd_q3n_markbad_smoke() {
@@ -500,41 +507,6 @@ mtd_q3n_oob_bbm_test() {
   [ "$(mtd_badblock get "$mtd_dev" "$raw_offset")" = "0" ] || return 1
   echo "RAW main+OOB passed"
 
-  # An OOB-only D0 lacks valid driver metadata. D6 queues background parity;
-  # the worker must program a tombstone at hidden P so replay and the next D0
-  # can proceed instead of leaving the physical frontier at P.
-  tombstone_offset=$((4 * erasesize))
-  tombstone_page=$((tombstone_offset / writesize))
-  flash_erase -q "$mtd_dev" "$tombstone_offset" 1 || return 1
-  failed_before=$(cat "$stats/failed_stripes") || return 1
-  protected_before=$(cat "$stats/protected_stripes") || return 1
-  unprotected_before=$(cat "$stats/unprotected_stripes") || return 1
-  mtd_badblock oob-write raw "$mtd_dev" "$tombstone_offset" 100 1 0xa5 || \
-    return 1
-  dd if=/dev/zero of=/tmp/q3n-tombstone-main.bin bs="$writesize" count=6 \
-    2>/dev/null || return 1
-  dd if=/tmp/q3n-tombstone-main.bin of="$mtd_dev" bs="$writesize" count=6 \
-    seek=$((tombstone_page + 1)) 2>/tmp/q3n-tombstone-write.err || return 1
-  mtd_q3n_wait_eq "$stats/pending_parity" 0 "tombstone pending parity" || \
-    return 1
-  [ "$(cat "$stats/failed_stripes")" -eq $((failed_before + 1)) ] || \
-    return 1
-  [ "$(cat "$stats/protected_stripes")" -eq "$protected_before" ] || \
-    return 1
-  [ "$(cat "$stats/unprotected_stripes")" -eq \
-    $((unprotected_before + 1)) ] || return 1
-
-  rmmod qemu_3dnand || return 1
-  mtd_load_q3n || return 1
-  mtd_num=$(mtd_find_q3n)
-  [ -n "$mtd_num" ] || return 1
-  mtd_dev="/dev/mtd${mtd_num}"
-  dd if=/dev/zero of=/tmp/q3n-tombstone-next.bin bs="$writesize" count=1 \
-    2>/dev/null || return 1
-  dd if=/tmp/q3n-tombstone-next.bin of="$mtd_dev" bs="$writesize" count=1 \
-    seek=$((tombstone_page + 7)) 2>/tmp/q3n-tombstone-next.err || return 1
-  echo "tombstone frontier passed"
-
   # Keep the direct writable-BBM acceptance on a separate block so the
   # good-page rewrite case above is not masked by bad-block rejection.
   flash_erase -q "$mtd_dev" 0 1 || return 1
@@ -565,17 +537,15 @@ mtd_q3n_persist_prepare() {
   mtd_num=$(mtd_find_q3n)
   [ -n "$mtd_num" ] || return 1
   mtd_dev="/dev/mtd${mtd_num}"
-  stats=/sys/kernel/debug/qemu_3dnand
   erasesize=$(cat "/sys/class/mtd/mtd${mtd_num}/erasesize") || return 1
-  parity_before=$(cat "$stats/parity_written") || return 1
+  writesize=$(cat "/sys/class/mtd/mtd${mtd_num}/writesize") || return 1
+  stats=/sys/kernel/debug/qemu_3dnand
 
   flash_erase -q "$mtd_dev" 0 1 || return 1
-  dd if=/dev/zero of=/tmp/q3n-persist.bin bs=16384 count=8 \
-    2>/dev/null || return 1
-  dd if=/tmp/q3n-persist.bin of="$mtd_dev" bs=16384 count=8 \
-    2>/dev/null || return 1
-  parity_after=$(cat "$stats/parity_written") || return 1
-  [ "$parity_after" -gt "$parity_before" ] || return 1
+  mtd_badblock page-write raw "$mtd_dev" 0 0x5a 100 1 0xa5 || return 1
+  mtd_badblock page-write raw "$mtd_dev" "$writesize" \
+    0x3c 101 1 0xc3 || return 1
+  echo "$writesize" > "$stats/inject_data_loss" || return 1
   mtd_badblock set "$mtd_dev" "$erasesize" >/dev/null || return 1
   [ "$(mtd_badblock get "$mtd_dev" "$erasesize")" = "1" ] || return 1
   sync
@@ -587,26 +557,19 @@ mtd_q3n_persist_verify() {
   mtd_num=$(mtd_find_q3n)
   [ -n "$mtd_num" ] || return 1
   mtd_dev="/dev/mtd${mtd_num}"
-  stats=/sys/kernel/debug/qemu_3dnand
   erasesize=$(cat "/sys/class/mtd/mtd${mtd_num}/erasesize") || return 1
-  bad_page_seek=$((erasesize / 16384))
+  writesize=$(cat "/sys/class/mtd/mtd${mtd_num}/writesize") || return 1
+  bad_page_seek=$((erasesize / writesize))
 
-  dd if=/dev/zero of=/tmp/q3n-persist-expected.bin bs=16384 count=8 \
-    2>/dev/null || return 1
-  dd if="$mtd_dev" of=/tmp/q3n-persist-read.bin bs=16384 count=8 \
-    2>/dev/null || return 1
-  cmp /tmp/q3n-persist-expected.bin /tmp/q3n-persist-read.bin || return 1
-
-  recovered_before=$(cat "$stats/raid_recovered") || return 1
-  echo 0 > "$stats/inject_data_loss" || return 1
-  dd if="$mtd_dev" of=/tmp/q3n-persist-recovered.bin bs=16384 count=1 \
-    2>/dev/null || return 1
-  cmp /dev/zero /tmp/q3n-persist-recovered.bin -n 16384 || return 1
-  recovered_after=$(cat "$stats/raid_recovered") || return 1
-  [ "$recovered_after" -gt "$recovered_before" ] || return 1
+  mtd_badblock page-read raw "$mtd_dev" 0 0x5a 100 1 0xa5 || return 1
+  if mtd_badblock oob-read raw "$mtd_dev" "$writesize" 101 1 \
+       >/tmp/q3n-persist-overlay.out 2>/tmp/q3n-persist-overlay.err; then
+    echo "q3n persistence verify: persisted uncorrectable overlay was ignored"
+    return 1
+  fi
 
   [ "$(mtd_badblock get "$mtd_dev" "$erasesize")" = "1" ] || return 1
-  if dd if=/dev/zero of="$mtd_dev" bs=16384 count=1 \
+  if dd if=/dev/zero of="$mtd_dev" bs="$writesize" count=1 \
        seek="$bad_page_seek" 2>/tmp/q3n-persist-bad-write.err; then
     return 1
   fi
@@ -614,83 +577,7 @@ mtd_q3n_persist_verify() {
     >/tmp/q3n-persist-bad-erase.err 2>&1 || true
   grep -q 'MTD Erase failure' /tmp/q3n-persist-bad-erase.err || return 1
 
-  dd if=/dev/zero of="$mtd_dev" bs=16384 count=1 seek=8 \
-    2>/dev/null || return 1
-  sync
   echo "q3n persistence verify passed"
-}
-
-mtd_q3n_tail_prepare() {
-  inject_loss=${1:-0}
-  mtd_load_q3n || return 1
-  mtd_num=$(mtd_find_q3n)
-  [ -n "$mtd_num" ] || return 1
-  mtd_dev="/dev/mtd${mtd_num}"
-  stats=/sys/kernel/debug/qemu_3dnand
-
-  flash_erase -q "$mtd_dev" 0 1 || return 1
-  echo 0 > "$stats/parity_pause_block" || return 1
-  echo 1 > "$stats/parity_pause_enable" || return 1
-  dd if=/dev/zero of=/tmp/q3n-tail.bin bs=16384 count=7 \
-    2>/dev/null || return 1
-  dd if=/tmp/q3n-tail.bin of="$mtd_dev" bs=16384 count=7 \
-    2>/tmp/q3n-tail-write.err &
-
-  tries=0
-  while [ "$(cat "$stats/parity_paused")" -eq 0 ] && [ "$tries" -lt 20 ]; do
-    sleep 1
-    tries=$((tries + 1))
-  done
-  [ "$(cat "$stats/parity_paused")" -gt 0 ] || return 1
-  if [ "$inject_loss" -eq 1 ]; then
-    echo 0 > "$stats/inject_data_loss" || return 1
-    echo "q3n tail failure prepare passed"
-  else
-    echo "q3n tail prepare passed"
-  fi
-  poweroff -f
-}
-
-mtd_q3n_tail_verify() {
-  mtd_load_q3n || return 1
-  mtd_num=$(mtd_find_q3n)
-  [ -n "$mtd_num" ] || return 1
-  mtd_dev="/dev/mtd${mtd_num}"
-  stats=/sys/kernel/debug/qemu_3dnand
-
-  [ "$(cat "$stats/parity_written")" -eq 1 ] || return 1
-  dd if="$mtd_dev" of=/tmp/q3n-tail-read.bin bs=16384 count=7 \
-    2>/dev/null || return 1
-  cmp /dev/zero /tmp/q3n-tail-read.bin -n 114688 || return 1
-  echo "q3n tail verify passed"
-}
-
-mtd_q3n_tail_fail_verify() {
-  mtd_load_q3n || return 1
-  mtd_num=$(mtd_find_q3n)
-  [ -n "$mtd_num" ] || return 1
-  mtd_dev="/dev/mtd${mtd_num}"
-  stats=/sys/kernel/debug/qemu_3dnand
-  writesize=$(cat "/sys/class/mtd/mtd${mtd_num}/writesize") || return 1
-
-  tail_raid_failed=$(cat "$stats/raid_failed") || return 1
-  tail_failed=$(cat "$stats/failed_stripes") || return 1
-  tail_unprotected=$(cat "$stats/unprotected_stripes") || return 1
-  tail_protected=$(cat "$stats/protected_stripes") || return 1
-  [ "$tail_raid_failed" -eq 1 ] || return 1
-  [ "$tail_failed" -eq 1 ] || return 1
-  [ "$tail_unprotected" -eq 1 ] || return 1
-  [ "$tail_protected" -eq 0 ] || return 1
-
-  # Logical page 7 maps to physical page 8.  Its successful first program
-  # proves replay filled hidden P at physical page 7 and advanced the exact
-  # serial frontier from 7 to 8.
-  dd if=/dev/zero of=/tmp/q3n-tail-next.bin bs="$writesize" count=1 \
-    2>/dev/null || return 1
-  dd if=/tmp/q3n-tail-next.bin of="$mtd_dev" bs="$writesize" count=1 \
-    seek=7 2>/tmp/q3n-tail-next.err || return 1
-  echo "q3n tail tombstone replay passed"
-  echo "q3n tail failure verify passed"
 }
 
 mtd_q3n_generation_smoke() {
@@ -942,10 +829,6 @@ case "${1:-}" in
   q3n-oob-bbm-test) mtd_q3n_oob_bbm_test ;;
   q3n-persist-prepare) mtd_q3n_persist_prepare ;;
   q3n-persist-verify) mtd_q3n_persist_verify ;;
-  q3n-tail-prepare) mtd_q3n_tail_prepare 0 ;;
-  q3n-tail-verify) mtd_q3n_tail_verify ;;
-  q3n-tail-fail-prepare) mtd_q3n_tail_prepare 1 ;;
-  q3n-tail-fail-verify) mtd_q3n_tail_fail_verify ;;
   nandsim) mtd_load_simulators; cat /proc/mtd ;;
   ubifs) mtd_ubifs ;;
   clean) mtd_clean ;;

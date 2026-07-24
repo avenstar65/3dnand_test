@@ -370,6 +370,8 @@ static void q3n_open_stripe_is_unprotected_until_parity_completes_test(struct ku
 							     sizeof(data)), 0);
 	KUNIT_EXPECT_EQ(test, q3n_open_stripe_queue_parity(&second), 0);
 	KUNIT_EXPECT_EQ(test, second.state, Q3N_STRIPE_PARITY_QUEUED);
+	q3n_open_stripe_complete_parity(&second, true);
+	KUNIT_EXPECT_EQ(test, second.state, Q3N_STRIPE_PROTECTED);
 }
 
 static void q3n_recover_single_missing_page_test(struct kunit *test)

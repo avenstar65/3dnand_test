@@ -79,26 +79,28 @@ Linux overlay 会注册 `qemu_3dnand` PCI 驱动，并通过直接 MTD 回调暴
 ```
 
 `run-qemu.sh` 默认复用 `work/media/q3n-nand.raw`，因此物理 NAND 的 main、
-OOB、页状态、每块编程前沿和坏块标记会在 QEMU 正常退出后保留。需要全新擦除态
-介质时使用：
+OOB、坏块标记和 bitflip overlay 会在 QEMU 正常退出后保留。需要全新擦除态介质
+时使用：
 
 ```sh
 ./scripts/run-qemu.sh --fresh-nand
 ```
 
 也可以用 `--nand-image PATH` 选择独立镜像。镜像是约 51 GiB 的固定布局 sparse
-raw 文件，实际只为 header、状态和已写物理页分配空间。
+raw 文件，实际只为 header、已写物理页和 overlay 分配空间。
 
-完整的跨重启持久性验收命令为：
+原始介质跨重启持久性验收命令为：
 
 ```sh
 ./scripts/q3n-persistence-smoke.sh
 ```
 
-脚本执行六轮 guest，验证数据/丢页恢复、坏块跨重启、坏块写擦拒绝、物理页序
-前沿继续，以及 frontier=7 尾部 parity 的成功补写和不可恢复时拒绝注册；最后还
-验证损坏状态镜像会被 QEMU 拒绝。QEMU 不解释 `D0..D6,P` 布局，映射、parity
-和恢复始终由 Linux 驱动管理。
+脚本执行两轮 guest，验证 raw main、OOB、坏块标记和 bitflip overlay 跨重启
+保留，以及坏块写擦拒绝。QEMU 不解释 `D0..D6,P` 布局；映射和运行期 parity
+状态始终由 Linux 驱动管理。
+
+QEMU persists raw NAND bytes and bitflip overlays.  The driver does not
+restore Page-RAID runtime state after reload or VM restart in this phase.
 
 自动执行 MTD smoke 并在成功后关闭虚拟机：
 
@@ -214,9 +216,9 @@ dmesg
 ```
 
 输出包括 `foreground_ops`、`parity_reads`、`parity_writes`、
-`order_errors`、`protected_stripes`、`unprotected_stripes`、
-`failed_stripes` 和 `max_pending_parity`。前三类物理命令及页序错误由
-QEMU 计数；stripe 状态事件和 pending 高水位由 Linux 驱动计数。
+`protected_stripes`、`unprotected_stripes`、`failed_stripes` 和
+`max_pending_parity`。前三类物理命令由 QEMU 计数；stripe 状态事件和 pending
+高水位由 Linux 驱动计数。
 
 ## 常见问题
 

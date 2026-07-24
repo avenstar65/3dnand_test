@@ -28,17 +28,17 @@ Implemented base functions:
 | 2 die x 4 plane geometry constants | Implemented |
 | 208/32/3/4 scheme D block-pool defaults | Implemented |
 | Versioned sparse physical NAND image | Implemented (`Q3NMEDIA`, v2) |
-| Normal QEMU restart persistence | Implemented through `BlockBackend` |
+| Raw NAND byte/overlay restart persistence | Implemented through `BlockBackend` |
 | First-page `OOB[0]` bad-block marker | Implemented (`0xff` good, `0x00` bad) |
 | 25MiB data block erase | Implemented |
 | Basic page read/program/block erase commands | Implemented |
 | Combined main+OOB page read/program commands | Implemented |
-| Strict ascending page program order per block | Implemented |
+| Arbitrary/repeated page program with NAND bytewise-AND semantics | Implemented |
 | MMIO data-loss fault injection | Implemented |
 | Basic media statistics | Implemented |
 | Page-raid/parity append/recovery | Not implemented in QEMU |
 | Parity log GC | Not implemented in QEMU |
-| Physical frontier/status replay ABI | Implemented; Linux rebuilds RAID state |
+| Page-RAID runtime-state replay | Not implemented in this phase |
 | Linux PCI probe driver | Implemented |
 | Linux MTD registration | Implemented in the Linux overlay |
 | Linux driver-owned scheme D page-raid | Implemented in the Linux overlay |
@@ -60,9 +60,7 @@ The MMIO interface is intentionally simple for the first bring-up:
 | `Q3N_REG_STAT_*` | `0x0040..0x005c` | Page program/block erase/read-error/fault counters |
 | `Q3N_REG_FAULT_ADDR_LO/HI` | `0x0060/0x0064` | Physical byte address for fault injection |
 | `Q3N_REG_FAULT_CTRL` | `0x0068` | Trigger data loss, next-program failure, or persistent bitflip injection |
-| `Q3N_REG_STAT_ORDER_ERRORS` | `0x007c` | Rejected out-of-order page programs |
-| `Q3N_REG_BLOCK_STATUS` | `0x0080` | Selected physical block bad/erased state |
-| `Q3N_REG_BLOCK_NEXT_PAGE` | `0x0084` | Selected block's persistent program frontier |
+| `Q3N_REG_BLOCK_STATUS` | `0x0080` | Selected physical block bad-block-marker status |
 | `Q3N_REG_ECC_GEOM0/1` | `0x0088/0x008c` | 1024 B/40 bit ECC and 96 B/16 step LDPC profile |
 | `Q3N_REG_ECC_STATUS..FAILED_STEP` | `0x0090..0x009c` | Latched result of the latest page read |
 | `Q3N_REG_FAULT_STEP..REGION` | `0x00a0..0x00ac` | Step, first bit, count, and main/LDPC region for bitflip injection |
@@ -75,9 +73,9 @@ The model exposes a flat physical flash address space:
 physical byte address -> physical block -> page
 ```
 
-After erase, each block accepts page 0 first and advances `next_prog_page` only
-after a successful program. Programs that skip or move backward fail without
-advancing the block state.
+Programs may target any physical page, including an already programmed page.
+Each successful program stores the bytewise AND of the existing main/OOB bytes
+and the incoming bytes, matching NAND's one-way `1` to `0` programming rule.
 
 ## Persistent physical media
 
@@ -85,13 +83,13 @@ The PCI wrapper requires a writable BlockBackend. `scripts/run-qemu.sh` connects
 the default sparse raw image as `q3n-nand-pci,drive=q3n-media`; `--fresh-nand`
 removes that image before QEMU starts and `--nand-image` selects another path.
 
-Image v2 begins with a 4 KiB `Q3NMEDIA` header followed by fixed block-state and
-page-state arrays. Each physical page has a deterministic 16 KiB main + 1664 B
-physical OOB slot: byte 0 is the bad-block marker, bytes 1..1536 hold 16 LDPC
-steps of 96 B each, and bytes 1537..1663 hold metadata. Erased page slots remain
-sparse holes. The first physical page of every block reserves OOB byte 0 as the
-Linux-compatible bad-block marker. A dedicated mark-bad command
-programs only that byte and does not advance `next_prog_page`.
+Image v2 begins with a 4 KiB `Q3NMEDIA` header followed by fixed physical-page
+slots. Each physical page has a deterministic 16 KiB main + 1664 B physical OOB
+slot: byte 0 is the bad-block marker, bytes 1..1536 hold 16 LDPC steps of 96 B
+each, and bytes 1537..1663 hold metadata. Erased page slots remain sparse holes.
+The first physical page of every block reserves OOB byte 0 as the
+Linux-compatible bad-block marker. A dedicated mark-bad command programs only
+that byte.
 
 The page slots are followed by sparse, fixed-size error-overlay slots. Each page
 has a 16384 B main bitmap and a 1536 B LDPC bitmap. Fault injection XORs bits in
@@ -114,11 +112,11 @@ result and failed-step index. Erased pages use implicit all-`0xff` data and do
 not require generated LDPC, but their overlays use the same thresholds.
 
 This format contains no stripe, parity, generation, MTD, UBI, or FTL semantics.
-QEMU persists physical NAND facts only. On probe, the Linux driver queries each
-physical data block, rebuilds its serial Page-RAID index, and completes a tail
-whose frontier is exactly `D0..D6` before registering the MTD device. The current
-durability contract covers normal QEMU shutdown; crash/kill recovery is not
-claimed.
+The current durability contract covers normal QEMU shutdown; crash/kill
+recovery is not claimed.
+
+QEMU persists raw NAND bytes and bitflip overlays.  The driver does not
+restore Page-RAID runtime state after reload or VM restart in this phase.
 
 For x86_64 bring-up, use the PCI wrapper:
 

@@ -169,11 +169,12 @@ assert_contains rootfs/profile.d/mtd.sh 'q3n-inject-loss'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-stats'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-serial-smoke'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-parity-stats'
-for counter in foreground_ops parity_reads parity_writes order_errors \
+for counter in foreground_ops parity_reads parity_writes \
 		protected_stripes unprotected_stripes failed_stripes \
 		max_pending_parity; do
 	assert_contains rootfs/profile.d/mtd.sh "$counter"
 done
+assert_not_contains rootfs/profile.d/mtd.sh 'order_errors'
 assert_contains rootfs/profile.d/mtd.sh 'inject_parity_program_fail'
 assert_contains rootfs/profile.d/mtd.sh 'cancel_parity_program_fail'
 assert_contains rootfs/profile.d/mtd.sh 'reset_controller'
@@ -191,7 +192,7 @@ assert_contains rootfs/profile.d/mtd.sh 'parity_continuation_pause_enable'
 assert_contains rootfs/profile.d/mtd.sh 'parity_continuation_paused'
 assert_contains rootfs/profile.d/mtd.sh 'p0 continuation acceptance passed'
 assert_contains rootfs/profile.d/mtd.sh 'p1 over p2 acceptance passed'
-assert_contains rootfs/profile.d/mtd.sh 'while.*page.*-lt 7'
+assert_contains rootfs/profile.d/mtd.sh 'while.*page.*-lt 8'
 assert_contains rootfs/profile.d/mtd.sh 'cmp.*q3n-serial-page'
 assert_contains rootfs/init 'q3n-serial-smoke.*mtd_q3n_serial_smoke'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-generation-smoke'
@@ -199,29 +200,21 @@ assert_contains rootfs/profile.d/mtd.sh 'q3n-cancel-barrier-smoke'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-markbad-smoke'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-persist-prepare'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-persist-verify'
-assert_contains rootfs/profile.d/mtd.sh 'q3n-tail-prepare'
-assert_contains rootfs/profile.d/mtd.sh 'q3n-tail-verify'
-assert_contains rootfs/profile.d/mtd.sh 'q3n-tail-fail-verify'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-oob-bbm-test'
 assert_not_contains rootfs/profile.d/mtd.sh 'error -EIO: failed to register MTD'
-assert_contains rootfs/profile.d/mtd.sh 'q3n tail tombstone replay passed'
-assert_contains rootfs/profile.d/mtd.sh 'tail_failed.*failed_stripes'
-assert_contains rootfs/profile.d/mtd.sh 'tail_unprotected.*unprotected_stripes'
-assert_contains rootfs/profile.d/mtd.sh 'tail_protected.*protected_stripes'
-assert_contains rootfs/profile.d/mtd.sh 'seek=7'
+assert_contains rootfs/profile.d/mtd.sh 'q3n no-frontier stripe progress passed'
+assert_not_contains rootfs/profile.d/mtd.sh 'tombstone'
+assert_not_contains rootfs/init 'q3n-tail'
 assert_contains rootfs/init 'q3n-persist-prepare.*mtd_q3n_persist_prepare'
 assert_contains rootfs/init 'q3n-persist-verify.*mtd_q3n_persist_verify'
 assert_contains scripts/q3n-persistence-smoke.sh '--fresh-nand'
 assert_contains scripts/q3n-persistence-smoke.sh 'q3n-persist-prepare'
 assert_contains scripts/q3n-persistence-smoke.sh 'q3n-persist-verify'
-assert_contains scripts/q3n-persistence-smoke.sh 'q3n-tail-prepare'
-assert_contains scripts/q3n-persistence-smoke.sh 'q3n-tail-verify'
-assert_contains scripts/q3n-persistence-smoke.sh 'q3n-tail-fail-verify'
-assert_contains scripts/q3n-persistence-smoke.sh \
-	"printf.*\\\\010\\\\000\\\\000\\\\000.*seek=4096"
-assert_contains scripts/q3n-persistence-smoke.sh 'seek=12008'
-assert_contains scripts/q3n-persistence-smoke.sh 'tail_reason_offset=3318660'
-assert_contains scripts/q3n-persistence-smoke.sh 'tail_reason.*-eq 2'
+assert_not_contains scripts/q3n-persistence-smoke.sh 'q3n-tail'
+assert_not_contains scripts/q3n-persistence-smoke.sh 'tail_reason'
+assert_not_contains scripts/q3n-persistence-smoke.sh 'invalid-state'
+assert_contains README.md 'QEMU persists raw NAND bytes and bitflip overlays\.'
+assert_contains qemu/README.md 'QEMU persists raw NAND bytes and bitflip overlays\.'
 assert_contains scripts/build-rootfs.sh 'mtd_badblock.c'
 assert_contains rootfs/helpers/mtd_badblock.c 'MEMREADOOB64'
 assert_contains rootfs/helpers/mtd_badblock.c 'MEMWRITEOOB64'
@@ -241,7 +234,7 @@ assert_contains rootfs/profile.d/mtd.sh 'cross-page OOB passed'
 assert_contains rootfs/profile.d/mtd.sh 'PLACE main\+OOB passed'
 assert_contains rootfs/profile.d/mtd.sh 'RAW main\+OOB passed'
 assert_contains rootfs/profile.d/mtd.sh 'good-page second OOB program rejected'
-assert_contains rootfs/profile.d/mtd.sh 'tombstone frontier passed'
+assert_contains rootfs/profile.d/mtd.sh 'q3n no-frontier stripe progress passed'
 assert_contains rootfs/profile.d/mtd.sh 'cancel_writer_pid=\$!'
 assert_contains rootfs/profile.d/mtd.sh 'wait "\$cancel_writer_pid"'
 assert_contains rootfs/profile.d/mtd.sh 'dd if=/tmp/q3n-cancel\.bin of="\$mtd_dev" bs=16384 count=7 2>/tmp/q3n-cancel-dd\.err[[:space:]]*&[[:space:]]*$'
@@ -275,7 +268,6 @@ for symbol in \
   Q3N_REG_STAT_FG_OPS \
   Q3N_REG_STAT_PARITY_READS \
   Q3N_REG_STAT_PARITY_WRITES \
-  Q3N_REG_STAT_ORDER_ERRORS \
   Q3N_FAULT_FAIL_NEXT_PROGRAM; do
   assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h "$symbol"
   assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
@@ -285,10 +277,15 @@ for symbol in \
   Q3N_CAP_BAD_BLOCK_MARKER \
   Q3N_CMD_GET_BLOCK_STATUS \
   Q3N_CMD_MARK_BAD_BLOCK \
-  Q3N_REG_BLOCK_STATUS \
-  Q3N_REG_BLOCK_NEXT_PAGE; do
+  Q3N_REG_BLOCK_STATUS; do
   assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h "$symbol"
   assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
+done
+for header in \
+  linux/drivers/mtd/nand/raw/qemu_3dnand.h \
+  qemu/include/hw/mtd/q3n-nand.h; do
+  assert_not_contains "$header" 'Q3N_REG_BLOCK_NEXT_PAGE'
+  assert_not_contains "$header" 'Q3N_REG_STAT_ORDER_ERRORS'
 done
 for symbol in \
   Q3N_PHYSICAL_OOB_SIZE Q3N_LOGICAL_OOB_SIZE Q3N_BBM_OOB_OFFSET \
@@ -305,10 +302,16 @@ done
 assert_contains qemu/include/hw/mtd/q3n-media.h 'Q3N_BBM_GOOD.*0xff'
 assert_contains qemu/include/hw/mtd/q3n-media.h 'Q3N_BBM_BAD.*0x00'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_erase_block'
-assert_contains qemu/hw/mtd/q3n-nand.c 'next_prog_page'
-assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_check_program_order'
 assert_contains qemu/hw/mtd/q3n-media.c 'Q3N_BBM_GOOD'
-assert_contains qemu/hw/mtd/q3n-nand.c 'stat_order_errors'
+for source in \
+  qemu/hw/mtd/q3n-nand.c \
+  qemu/hw/mtd/q3n-media.c \
+  linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+  linux/drivers/mtd/nand/raw/qemu_3dnand_map.c \
+  linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c; do
+  assert_not_contains "$source" 'next_prog_page'
+  assert_not_contains "$source" 'tombstone'
+done
 assert_contains qemu/hw/mtd/q3n-nand.c 'fail_next_program'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_disarm_program_fault'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_disarm_program_fault\(s\);'
@@ -338,8 +341,8 @@ assert_contains qemu/hw/mtd/q3n-media.c 'Q3N_METADATA_OOB_OFFSET'
 assert_contains qemu/hw/mtd/q3n-media.c 'blk_truncate'
 assert_contains qemu/hw/mtd/q3n-media.c 'blk_pread'
 assert_contains qemu/hw/mtd/q3n-media.c 'blk_pwrite'
-assert_contains qemu/hw/mtd/q3n-media.c 'inconsistent page state/frontier'
-assert_contains qemu/hw/mtd/q3n-media.c 'm->bad\[block\].*physical_oob\[Q3N_BBM_OOB_OFFSET\]'
+assert_contains qemu/hw/mtd/q3n-media.c \
+  '\*status = marker != Q3N_BBM_GOOD \? Q3N_BLOCK_STATUS_BAD : 0'
 assert_contains qemu/hw/mtd/meson.build 'q3n-pci.c'
 assert_contains qemu/hw/mtd/meson.build 'CONFIG_Q3N_NAND'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'MODULE_DEVICE_TABLE\(pci, qemu_3dnand_id_table\)'
@@ -361,7 +364,7 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_cance
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'wait_event.*pending_parity'
 for name in parity_pause_block parity_pause_enable parity_paused \
 		pending_parity reserved_parity foreground_ops parity_reads \
-		parity_writes order_errors protected_stripes unprotected_stripes \
+		parity_writes protected_stripes unprotected_stripes \
 		failed_stripes max_pending_parity inject_parity_program_fail; do
 	assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
 		"debugfs_create_file.*$name"
@@ -371,7 +374,7 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_READ_PAGE
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_PROGRAM_PAGE'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_ERASE_BLOCK'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'debugfs_create_dir'
-assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_append_parity_locked'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_commit_parity_locked'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_recover_page_locked'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_invalidate_block_parity'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'struct qemu_3dnand_data_block_meta'
@@ -391,7 +394,6 @@ assert_contains linux/drivers/mtd/nand/raw/Kconfig.qemu_3dnand 'config MTD_NAND_
 assert_contains linux/drivers/mtd/nand/raw/Makefile.qemu_3dnand 'qemu_3dnand.o'
 assert_contains linux/drivers/mtd/nand/raw/Makefile.qemu_3dnand 'qemu_3dnand_main.o qemu_3dnand_map.o'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_map.c 'div_u64_rem'
-assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_map.c 'q3n_replay_serial_frontier'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_restore_media_locked'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_GET_BLOCK_STATUS'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_MARK_BAD_BLOCK'
@@ -401,8 +403,6 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_pack_data_oob
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_unpack_data_oob'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_pack_parity_oob'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_unpack_parity_oob'
-assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_pack_unprotected_oob'
-assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_unpack_unprotected_oob'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'manifest->data_crc\[lane\] = cpu_to_le32\(stripe->data_crc\[lane\]\)'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'Q3N_STRIPE_UNPROTECTED'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'q3n->parity_index = kvcalloc'
@@ -431,7 +431,7 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_MAX_PENDING_P
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'done \+= q3n->page_size;'
 assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'IS_ALIGNED\(instr->addr, mtd->erasesize\)'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_map_non_power_of_two_geometry_test'
-assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_program_order_test'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_scheduler_does_not_gate_program_page_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_scheduler_tracks_max_pending_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_data_oob_round_trip_preserves_bbm_test'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c 'q3n_parity_oob_round_trip_and_crc_validation_test'
@@ -463,7 +463,6 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_read_
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_program_phys_page_oob_locked'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_READ_PAGE_OOB'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_PROGRAM_PAGE_OOB'
-assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_validate_replay_members_locked'
 assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'tombstone'
 assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'tombstone'
 assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_priv.h 'TOMBSTONE'
@@ -472,8 +471,7 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
 	'ecc\.uncorrectable'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
-	'u8 \*failure_reason'
-assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'le32_to_cpu\(manifest->data_crc\[lane\]\) != data_crc'
+	'le32_to_cpu\(meta\.data_crc\) != crc'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'get_unaligned_le32'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'put_unaligned_le32'
 assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'u32 \*oob_words'
