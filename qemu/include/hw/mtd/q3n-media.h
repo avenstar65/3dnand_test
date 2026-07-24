@@ -23,13 +23,11 @@ int q3n_media_program_page(Q3NMedia *media, uint32_t block, uint32_t page,
                            const uint8_t *data,
                            const uint8_t *physical_oob);
 int q3n_media_erase_block(Q3NMedia *media, uint32_t block);
-int q3n_media_inject_loss(Q3NMedia *media, uint32_t block, uint32_t page);
 int q3n_media_inject_bitflips(Q3NMedia *media, uint32_t block, uint32_t page,
                               uint32_t step, uint32_t region,
                               uint32_t first_bit, uint32_t count);
-uint32_t q3n_media_next_prog_page(const Q3NMedia *media, uint32_t block);
 int q3n_media_get_block_status(Q3NMedia *media, uint32_t block,
-                               uint32_t *status, uint32_t *next_page);
+                               uint32_t *status);
 int q3n_media_mark_bad(Q3NMedia *media, uint32_t block);
 
 #endif

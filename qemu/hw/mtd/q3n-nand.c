@@ -10,6 +10,7 @@
 #include "qemu/osdep.h"
 #include "hw/mtd/q3n-media.h"
 #include "hw/mtd/q3n-nand.h"
+#include "q3n-media-overlay.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
 #include "hw/core/sysbus.h"
@@ -150,7 +151,6 @@ typedef struct Q3NStats {
     uint64_t fg_ops;
     uint64_t parity_reads;
     uint64_t parity_writes;
-    uint64_t stat_order_errors;
     uint64_t ldpc_corrected_bits;
     uint64_t ldpc_uncorrectable_pages;
     uint64_t ldpc_failed_steps;
@@ -184,7 +184,6 @@ struct Q3NNandState {
     uint64_t fail_program_addr;
     bool fail_next_program;
     uint32_t block_status;
-    uint32_t block_next_page;
     uint32_t ecc_status;
     uint32_t ecc_max_bitflips;
     uint32_t ecc_corrected_bits;
@@ -224,7 +223,7 @@ static int q3n_read_page(Q3NNandState *s, uint32_t block, uint32_t page,
                          uint8_t *buf, uint8_t *oob)
 {
     uint64_t page_key = (uint64_t)block * Q3N_PAGES_PER_BLOCK + page;
-    bool erased = page >= q3n_media_next_prog_page(s->media, block);
+    bool erased;
     Q3NEccResult result;
     int ret;
 
@@ -235,6 +234,9 @@ static int q3n_read_page(Q3NNandState *s, uint32_t block, uint32_t page,
         s->stats.page_read_errors++;
         return ret;
     }
+
+    erased = q3n_media_is_erased(buf, Q3N_PAGE_SIZE) &&
+             q3n_media_is_erased(s->physical_oob, Q3N_PHYSICAL_OOB_SIZE);
 
     result = q3n_decode_ldpc(page_key, buf, s->physical_oob,
                              s->main_overlay, s->ldpc_overlay, erased);
@@ -257,17 +259,6 @@ static int q3n_read_page(Q3NNandState *s, uint32_t block, uint32_t page,
     return 0;
 }
 
-static bool q3n_check_program_order(Q3NNandState *s, uint32_t block,
-                                    uint32_t page)
-{
-    if (page != q3n_media_next_prog_page(s->media, block)) {
-        s->stats.stat_order_errors++;
-        return false;
-    }
-
-    return true;
-}
-
 static void q3n_disarm_program_fault(Q3NNandState *s)
 {
     s->fail_next_program = false;
@@ -285,9 +276,6 @@ static bool q3n_program_page(Q3NNandState *s, uint32_t block,
     int ret;
 
     if (block >= s->physical_block_count || page >= Q3N_PAGES_PER_BLOCK) {
-        return false;
-    }
-    if (!q3n_check_program_order(s, block, page)) {
         return false;
     }
     if (s->fail_next_program && s->addr == s->fail_program_addr) {
@@ -323,7 +311,9 @@ static bool q3n_inject_data_loss(Q3NNandState *s, uint64_t byte_addr)
     uint32_t page;
     uint32_t column;
     if (!q3n_decode_addr(s, byte_addr, &block, &page, &column) || column != 0 ||
-        q3n_media_inject_loss(s->media, block, page)) {
+        q3n_media_inject_bitflips(s->media, block, page, 0,
+                                  Q3N_FAULT_REGION_MAIN, 0,
+                                  Q3N_ECC_STRENGTH + 1)) {
         return false;
     }
 
@@ -539,8 +529,7 @@ static void q3n_cmd_get_block_status(Q3NNandState *s)
     uint32_t block;
 
     if (!q3n_decode_block_addr(s, &block) ||
-        q3n_media_get_block_status(s->media, block, &s->block_status,
-                                   &s->block_next_page)) {
+        q3n_media_get_block_status(s->media, block, &s->block_status)) {
         q3n_finish_error(s);
         return;
     }
@@ -714,12 +703,8 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
         return (uint32_t)s->stats.parity_reads;
     case Q3N_REG_STAT_PARITY_WRITES:
         return (uint32_t)s->stats.parity_writes;
-    case Q3N_REG_STAT_ORDER_ERRORS:
-        return (uint32_t)s->stats.stat_order_errors;
     case Q3N_REG_BLOCK_STATUS:
         return s->block_status;
-    case Q3N_REG_BLOCK_NEXT_PAGE:
-        return s->block_next_page;
     case Q3N_REG_FAULT_ADDR_LO:
         return (uint32_t)s->fault_addr;
     case Q3N_REG_FAULT_ADDR_HI:

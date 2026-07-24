@@ -8,6 +8,38 @@
 #define Q3N_MEDIA_OVERLAY_STRIDE      \
     (Q3N_MEDIA_MAIN_OVERLAY_BYTES + Q3N_MEDIA_LDPC_OVERLAY_BYTES)
 
+static inline void q3n_media_merge_program(uint8_t *stored,
+                                           const uint8_t *incoming,
+                                           size_t length)
+{
+    size_t i;
+
+    for (i = 0; i < length; i++) {
+        stored[i] &= incoming[i];
+    }
+}
+
+static inline bool q3n_media_is_erased(const uint8_t *data, size_t length)
+{
+    size_t i;
+
+    for (i = 0; i < length; i++) {
+        if (data[i] != 0xff) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static inline void q3n_media_invert(uint8_t *data, size_t length)
+{
+    size_t i;
+
+    for (i = 0; i < length; i++) {
+        data[i] = ~data[i];
+    }
+}
+
 static inline bool q3n_media_overlay_range(uint32_t step, uint32_t region,
                                            uint32_t first_bit, uint32_t count,
                                            uint32_t *overlay_first_bit)

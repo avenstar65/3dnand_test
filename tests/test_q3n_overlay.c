@@ -49,6 +49,34 @@ static void assert_single_toggle(uint32_t step, uint32_t region,
     assert(guarded.after == 0x5a);
 }
 
+static void test_merge_program_is_bitwise_and(void)
+{
+    uint8_t stored[] = { 0xff, 0xf0, 0x55, 0x00 };
+    const uint8_t incoming[] = { 0x0f, 0xcc, 0xaa, 0xff };
+    const uint8_t expected[] = { 0x0f, 0xc0, 0x00, 0x00 };
+
+    q3n_media_merge_program(stored, incoming, sizeof(stored));
+    assert(!memcmp(stored, expected, sizeof(stored)));
+}
+
+static void test_erased_detection_reads_bytes(void)
+{
+    uint8_t bytes[32];
+
+    memset(bytes, 0xff, sizeof(bytes));
+    assert(q3n_media_is_erased(bytes, sizeof(bytes)));
+    bytes[17] = 0xfe;
+    assert(!q3n_media_is_erased(bytes, sizeof(bytes)));
+}
+
+static void test_sparse_zero_decodes_as_erased(void)
+{
+    uint8_t stored[32] = { 0 };
+
+    q3n_media_invert(stored, sizeof(stored));
+    assert(q3n_media_is_erased(stored, sizeof(stored)));
+}
+
 int main(void)
 {
     static const uint32_t steps[] = { 0, 1, 2, 15 };
@@ -88,6 +116,10 @@ int main(void)
     assert(!q3n_media_overlay_xor(overlay, 0, Q3N_FAULT_REGION_LDPC,
                                    Q3N_LDPC_BYTES_PER_STEP * 8 - 1, 2));
 
-    puts("ok: q3n overlay layout and xor behavior verified");
+    test_merge_program_is_bitwise_and();
+    test_erased_detection_reads_bytes();
+    test_sparse_zero_decodes_as_erased();
+
+    puts("ok: q3n media overlay mapping verified");
     return 0;
 }

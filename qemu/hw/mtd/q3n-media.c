@@ -19,9 +19,7 @@
 #define Q3N_MEDIA_MAGIC             "Q3NMEDIA"
 #define Q3N_MEDIA_VERSION           2
 #define Q3N_MEDIA_HEADER_SIZE       4096
-#define Q3N_MEDIA_PAGE_ERASED       0
-#define Q3N_MEDIA_PAGE_PRESENT      1
-#define Q3N_MEDIA_PAGE_LOST         2
+#define Q3N_MEDIA_PAGE_SLOT_COMPLEMENTED 1
 
 typedef struct Q3NMediaHeader {
     uint8_t magic[8];
@@ -45,7 +43,8 @@ typedef struct Q3NMediaHeader {
     uint64_t overlay_slots_offset;
     uint64_t overlay_stride;
     uint64_t overlay_slots_length;
-    uint8_t reserved[3968];
+    uint32_t page_slot_encoding;
+    uint8_t reserved[3964];
 } Q3NMediaHeader;
 
 QEMU_BUILD_BUG_ON(sizeof(Q3NMediaHeader) != Q3N_MEDIA_HEADER_SIZE);
@@ -59,19 +58,12 @@ struct Q3NMedia {
     uint32_t page_size;
     uint32_t physical_oob_size;
     uint64_t page_count;
-    uint64_t block_state_offset;
-    uint64_t block_state_length;
-    uint64_t page_state_offset;
-    uint64_t page_state_length;
     uint64_t page_slots_offset;
     uint64_t page_stride;
     uint64_t overlay_slots_offset;
     uint64_t overlay_stride;
     uint64_t overlay_slots_length;
     uint64_t image_size;
-    uint32_t *next_prog_page;
-    uint8_t *page_state;
-    bool *bad;
 };
 
 static uint64_t q3n_media_page_index(const Q3NMedia *m, uint32_t block,
@@ -94,6 +86,30 @@ static uint64_t q3n_media_overlay_slot_offset(const Q3NMedia *m,
            q3n_media_page_index(m, block, page) * m->overlay_stride;
 }
 
+static int q3n_media_read_bbm(Q3NMedia *m, uint32_t block, uint8_t *marker)
+{
+    int ret;
+
+    ret = blk_pread(m->blk,
+                    q3n_media_slot_offset(m, block, 0) + m->page_size +
+                    Q3N_BBM_OOB_OFFSET,
+                    1, marker, 0);
+    if (ret < 0) {
+        return ret;
+    }
+    q3n_media_invert(marker, 1);
+    return 0;
+}
+
+static int q3n_media_write_bbm(Q3NMedia *m, uint32_t block, uint8_t marker)
+{
+    q3n_media_invert(&marker, 1);
+    return blk_pwrite(m->blk,
+                      q3n_media_slot_offset(m, block, 0) + m->page_size +
+                      Q3N_BBM_OOB_OFFSET,
+                      1, &marker, 0);
+}
+
 static int q3n_media_write_header(Q3NMedia *m)
 {
     Q3NMediaHeader h = { 0 };
@@ -105,10 +121,10 @@ static int q3n_media_write_header(Q3NMedia *m)
     h.pages_per_block = cpu_to_le32(m->pages_per_block);
     h.page_size = cpu_to_le32(m->page_size);
     h.oob_size = cpu_to_le32(m->physical_oob_size);
-    h.block_state_offset = cpu_to_le64(m->block_state_offset);
-    h.block_state_length = cpu_to_le64(m->block_state_length);
-    h.page_state_offset = cpu_to_le64(m->page_state_offset);
-    h.page_state_length = cpu_to_le64(m->page_state_length);
+    h.block_state_offset = 0;
+    h.block_state_length = 0;
+    h.page_state_offset = 0;
+    h.page_state_length = 0;
     h.page_slots_offset = cpu_to_le64(m->page_slots_offset);
     h.page_stride = cpu_to_le64(m->page_stride);
     h.image_size = cpu_to_le64(m->image_size);
@@ -119,6 +135,7 @@ static int q3n_media_write_header(Q3NMedia *m)
     h.overlay_slots_offset = cpu_to_le64(m->overlay_slots_offset);
     h.overlay_stride = cpu_to_le64(m->overlay_stride);
     h.overlay_slots_length = cpu_to_le64(m->overlay_slots_length);
+    h.page_slot_encoding = cpu_to_le32(Q3N_MEDIA_PAGE_SLOT_COMPLEMENTED);
 
     return blk_pwrite(m->blk, 0, sizeof(h), &h, 0);
 }
@@ -143,19 +160,8 @@ static bool q3n_media_calculate_layout(Q3NMedia *m)
                         &m->page_count)) {
         return false;
     }
-    m->block_state_offset = Q3N_MEDIA_HEADER_SIZE;
-    if (umul64_overflow(m->block_count, sizeof(uint32_t),
-                        &m->block_state_length) ||
-        uadd64_overflow(m->block_state_offset, m->block_state_length,
-                        &m->page_state_offset)) {
-        return false;
-    }
-    m->page_state_length = m->page_count;
-    if (uadd64_overflow(m->page_state_offset, m->page_state_length,
-                        &page_slots_end) ||
-        !q3n_media_align_up(page_slots_end, Q3N_MEDIA_HEADER_SIZE,
-                            &m->page_slots_offset) ||
-        uadd64_overflow(m->page_size, Q3N_PHYSICAL_OOB_SIZE,
+    m->page_slots_offset = Q3N_MEDIA_HEADER_SIZE;
+    if (uadd64_overflow(m->page_size, Q3N_PHYSICAL_OOB_SIZE,
                         &m->page_stride) ||
         umul64_overflow(m->page_count, m->page_stride, &page_slots_end) ||
         uadd64_overflow(m->page_slots_offset, page_slots_end,
@@ -177,8 +183,6 @@ static bool q3n_media_calculate_layout(Q3NMedia *m)
 
 static int q3n_media_create(Q3NMedia *m, Error **errp)
 {
-    uint8_t marker = Q3N_BBM_GOOD;
-    uint32_t block;
     int ret;
 
     ret = blk_truncate(m->blk, m->image_size, true, PREALLOC_MODE_OFF, 0,
@@ -189,28 +193,6 @@ static int q3n_media_create(Q3NMedia *m, Error **errp)
     ret = q3n_media_write_header(m);
     if (ret < 0) {
         return ret;
-    }
-    ret = blk_pwrite(m->blk, m->block_state_offset,
-                     (int64_t)m->block_count * sizeof(uint32_t),
-                     m->next_prog_page, 0);
-    if (ret < 0) {
-        return ret;
-    }
-    ret = blk_pwrite(m->blk, m->page_state_offset, m->page_count,
-                     m->page_state, 0);
-    if (ret < 0) {
-        return ret;
-    }
-
-    /* OOB[0] of the first physical page is the persistent bad-block marker. */
-    for (block = 0; block < m->block_count; block++) {
-        ret = blk_pwrite(m->blk,
-                         q3n_media_slot_offset(m, block, 0) + m->page_size +
-                         Q3N_BBM_OOB_OFFSET,
-                         1, &marker, 0);
-        if (ret < 0) {
-            return ret;
-        }
     }
     return blk_flush(m->blk);
 }
@@ -224,10 +206,10 @@ static bool q3n_media_header_matches(Q3NMedia *m, const Q3NMediaHeader *h)
            le32_to_cpu(h->pages_per_block) == m->pages_per_block &&
            le32_to_cpu(h->page_size) == m->page_size &&
            le32_to_cpu(h->oob_size) == m->physical_oob_size &&
-           le64_to_cpu(h->block_state_offset) == m->block_state_offset &&
-           le64_to_cpu(h->block_state_length) == m->block_state_length &&
-           le64_to_cpu(h->page_state_offset) == m->page_state_offset &&
-           le64_to_cpu(h->page_state_length) == m->page_state_length &&
+           le64_to_cpu(h->block_state_offset) == 0 &&
+           le64_to_cpu(h->block_state_length) == 0 &&
+           le64_to_cpu(h->page_state_offset) == 0 &&
+           le64_to_cpu(h->page_state_length) == 0 &&
            le64_to_cpu(h->page_slots_offset) == m->page_slots_offset &&
            le64_to_cpu(h->page_stride) == m->page_stride &&
            le32_to_cpu(h->physical_oob_size) == m->physical_oob_size &&
@@ -237,15 +219,14 @@ static bool q3n_media_header_matches(Q3NMedia *m, const Q3NMediaHeader *h)
            le64_to_cpu(h->overlay_slots_offset) == m->overlay_slots_offset &&
            le64_to_cpu(h->overlay_stride) == m->overlay_stride &&
            le64_to_cpu(h->overlay_slots_length) == m->overlay_slots_length &&
+           le32_to_cpu(h->page_slot_encoding) ==
+               Q3N_MEDIA_PAGE_SLOT_COMPLEMENTED &&
            le64_to_cpu(h->image_size) == m->image_size;
 }
 
 static int q3n_media_load(Q3NMedia *m, int64_t length, Error **errp)
 {
     Q3NMediaHeader h;
-    uint8_t marker;
-    uint32_t block;
-    uint32_t page;
     int ret;
 
     ret = blk_pread(m->blk, 0, sizeof(h), &h, 0);
@@ -261,49 +242,6 @@ static int q3n_media_load(Q3NMedia *m, int64_t length, Error **errp)
     if (!q3n_media_header_matches(m, &h) || length != m->image_size) {
         error_setg(errp, "q3n NAND image has incompatible header or size");
         return -EINVAL;
-    }
-    ret = blk_pread(m->blk, m->block_state_offset,
-                    (int64_t)m->block_count * sizeof(uint32_t),
-                    m->next_prog_page, 0);
-    if (ret < 0) {
-        return ret;
-    }
-    ret = blk_pread(m->blk, m->page_state_offset, m->page_count,
-                    m->page_state, 0);
-    if (ret < 0) {
-        return ret;
-    }
-    for (block = 0; block < m->block_count; block++) {
-        m->next_prog_page[block] = le32_to_cpu(m->next_prog_page[block]);
-        if (m->next_prog_page[block] > m->pages_per_block) {
-            error_setg(errp, "q3n NAND image has invalid program frontier");
-            return -EINVAL;
-        }
-        for (page = 0; page < m->pages_per_block; page++) {
-            uint8_t state = m->page_state[
-                q3n_media_page_index(m, block, page)];
-
-            if (state > Q3N_MEDIA_PAGE_LOST) {
-                error_setg(errp, "q3n NAND image has invalid page state");
-                return -EINVAL;
-            }
-            if ((page < m->next_prog_page[block] &&
-                 state == Q3N_MEDIA_PAGE_ERASED) ||
-                (page >= m->next_prog_page[block] &&
-                 state != Q3N_MEDIA_PAGE_ERASED)) {
-                error_setg(errp,
-                           "q3n NAND image has inconsistent page state/frontier");
-                return -EINVAL;
-            }
-        }
-        ret = blk_pread(m->blk,
-                        q3n_media_slot_offset(m, block, 0) + m->page_size +
-                        Q3N_BBM_OOB_OFFSET,
-                        1, &marker, 0);
-        if (ret < 0) {
-            return ret;
-        }
-        m->bad[block] = marker != Q3N_BBM_GOOD;
     }
     return 0;
 }
@@ -344,10 +282,6 @@ Q3NMedia *q3n_media_open(BlockBackend *blk, uint32_t block_count,
         error_setg(errp, "q3n NAND image layout exceeds INT64_MAX");
         goto fail;
     }
-    m->next_prog_page = g_new0(uint32_t, block_count);
-    m->page_state = g_new0(uint8_t, m->page_count);
-    m->bad = g_new0(bool, block_count);
-
     length = blk_getlength(blk);
     if (length < 0) {
         error_setg_errno(errp, -length, "cannot get q3n NAND image size");
@@ -382,9 +316,6 @@ void q3n_media_close(Q3NMedia *m)
                          strerror(-ret));
         }
     }
-    g_free(m->bad);
-    g_free(m->page_state);
-    g_free(m->next_prog_page);
     g_free(m);
 }
 
@@ -392,7 +323,6 @@ int q3n_media_read_page(Q3NMedia *m, uint32_t block, uint32_t page,
                         uint8_t *data, uint8_t *physical_oob,
                         uint8_t *main_overlay, uint8_t *ldpc_overlay)
 {
-    uint64_t index;
     uint64_t overlay_slot;
     uint64_t slot;
     int ret;
@@ -400,36 +330,19 @@ int q3n_media_read_page(Q3NMedia *m, uint32_t block, uint32_t page,
     if (block >= m->block_count || page >= m->pages_per_block) {
         return -EINVAL;
     }
-    index = q3n_media_page_index(m, block, page);
-    if (m->page_state[index] == Q3N_MEDIA_PAGE_LOST) {
-        return -EIO;
-    }
     slot = q3n_media_slot_offset(m, block, page);
-    if (m->page_state[index] == Q3N_MEDIA_PAGE_PRESENT) {
-        ret = blk_pread(m->blk, slot, m->page_size, data, 0);
+    ret = blk_pread(m->blk, slot, m->page_size, data, 0);
+    if (ret < 0) {
+        return ret;
+    }
+    q3n_media_invert(data, m->page_size);
+    if (physical_oob) {
+        ret = blk_pread(m->blk, slot + m->page_size,
+                        m->physical_oob_size, physical_oob, 0);
         if (ret < 0) {
             return ret;
         }
-        if (physical_oob) {
-            ret = blk_pread(m->blk, slot + m->page_size,
-                            m->physical_oob_size, physical_oob, 0);
-            if (ret < 0) {
-                return ret;
-            }
-        }
-    } else {
-        memset(data, 0xff, m->page_size);
-        if (physical_oob) {
-            memset(physical_oob, 0xff, m->physical_oob_size);
-            if (page == 0) {
-                ret = blk_pread(m->blk,
-                                slot + m->page_size + Q3N_BBM_OOB_OFFSET,
-                                1, physical_oob + Q3N_BBM_OOB_OFFSET, 0);
-                if (ret < 0) {
-                    return ret;
-                }
-            }
-        }
+        q3n_media_invert(physical_oob, m->physical_oob_size);
     }
 
     overlay_slot = q3n_media_overlay_slot_offset(m, block, page);
@@ -456,96 +369,72 @@ int q3n_media_program_page(Q3NMedia *m, uint32_t block, uint32_t page,
                            const uint8_t *data,
                            const uint8_t *physical_oob)
 {
-    uint64_t index;
     uint64_t slot;
     uint8_t *storage;
-    uint8_t present = Q3N_MEDIA_PAGE_PRESENT;
-    uint32_t next;
-    uint32_t next_le;
+    uint8_t marker;
     int ret;
 
     if (block >= m->block_count || page >= m->pages_per_block) {
         return -EINVAL;
     }
-    if (m->bad[block]) {
+    ret = q3n_media_read_bbm(m, block, &marker);
+    if (ret < 0) {
+        return ret;
+    }
+    if (marker != Q3N_BBM_GOOD) {
         return -EIO;
-    }
-    index = q3n_media_page_index(m, block, page);
-    if (page != m->next_prog_page[block]) {
-        return -ERANGE;
-    }
-    if (m->page_state[index] != Q3N_MEDIA_PAGE_ERASED) {
-        return -EEXIST;
     }
 
     storage = g_malloc(m->page_stride);
-    memcpy(storage, data, m->page_size);
-    if (physical_oob) {
-        memcpy(storage + m->page_size, physical_oob,
-               m->physical_oob_size);
-    } else {
-        memset(storage + m->page_size, 0xff, m->physical_oob_size);
-    }
     slot = q3n_media_slot_offset(m, block, page);
+    ret = blk_pread(m->blk, slot, m->page_stride, storage, 0);
+    if (ret < 0) {
+        goto out;
+    }
+    q3n_media_invert(storage, m->page_stride);
+    q3n_media_merge_program(storage, data, m->page_size);
+    if (physical_oob) {
+        q3n_media_merge_program(storage + m->page_size, physical_oob,
+                                m->physical_oob_size);
+    }
+    q3n_media_invert(storage, m->page_stride);
     ret = blk_pwrite(m->blk, slot, m->page_stride, storage, 0);
+out:
     g_free(storage);
-    if (ret < 0) {
-        return ret;
-    }
-    ret = blk_pwrite(m->blk, m->page_state_offset + index, 1,
-                     &present, 0);
-    if (ret < 0) {
-        return ret;
-    }
-    next = m->next_prog_page[block] + 1;
-    next_le = cpu_to_le32(next);
-    ret = blk_pwrite(m->blk,
-                     m->block_state_offset + block * sizeof(next_le),
-                     sizeof(next_le), &next_le, 0);
-    if (ret < 0) {
-        return ret;
-    }
-    m->page_state[index] = present;
-    m->next_prog_page[block] = next;
-    if (page == 0) {
-        m->bad[block] = physical_oob && physical_oob[Q3N_BBM_OOB_OFFSET] !=
-                        Q3N_BBM_GOOD;
-    }
-    return 0;
+    return ret;
 }
 
 int q3n_media_erase_block(Q3NMedia *m, uint32_t block)
 {
-    uint64_t first;
+    uint64_t page_block_length;
     uint64_t overlay_block_length;
     uint8_t *clear_overlay;
-    uint8_t *erased;
-    uint32_t next_le = 0;
+    uint8_t *clear_pages;
+    uint8_t marker;
     int ret;
 
     if (block >= m->block_count) {
         return -EINVAL;
     }
-    if (m->bad[block]) {
+    ret = q3n_media_read_bbm(m, block, &marker);
+    if (ret < 0) {
+        return ret;
+    }
+    if (marker != Q3N_BBM_GOOD) {
         return -EIO;
     }
-    first = q3n_media_page_index(m, block, 0);
-    erased = g_new0(uint8_t, m->pages_per_block);
-    ret = blk_pwrite(m->blk, m->page_state_offset + first,
-                     m->pages_per_block, erased, 0);
-    g_free(erased);
-    if (ret < 0) {
-        return ret;
-    }
-    ret = blk_pwrite(m->blk,
-                     m->block_state_offset + block * sizeof(next_le),
-                     sizeof(next_le), &next_le, 0);
-    if (ret < 0) {
-        return ret;
-    }
-    if (umul64_overflow(m->pages_per_block, m->overlay_stride,
+    if (umul64_overflow(m->pages_per_block, m->page_stride,
+                        &page_block_length) ||
+        umul64_overflow(m->pages_per_block, m->overlay_stride,
                         &overlay_block_length)) {
         return -EOVERFLOW;
+    }
+    clear_pages = g_malloc0(page_block_length);
+    ret = blk_pwrite(m->blk, q3n_media_slot_offset(m, block, 0),
+                     page_block_length, clear_pages, 0);
+    g_free(clear_pages);
+    if (ret < 0) {
+        return ret;
     }
     clear_overlay = g_malloc0(overlay_block_length);
     ret = blk_pwrite(m->blk,
@@ -555,30 +444,6 @@ int q3n_media_erase_block(Q3NMedia *m, uint32_t block)
     if (ret < 0) {
         return ret;
     }
-    memset(&m->page_state[first], Q3N_MEDIA_PAGE_ERASED,
-           m->pages_per_block);
-    m->next_prog_page[block] = 0;
-    return 0;
-}
-
-int q3n_media_inject_loss(Q3NMedia *m, uint32_t block, uint32_t page)
-{
-    uint64_t index;
-    uint8_t lost = Q3N_MEDIA_PAGE_LOST;
-    int ret;
-
-    if (block >= m->block_count || page >= m->pages_per_block) {
-        return -EINVAL;
-    }
-    index = q3n_media_page_index(m, block, page);
-    if (m->page_state[index] != Q3N_MEDIA_PAGE_PRESENT) {
-        return -ENOENT;
-    }
-    ret = blk_pwrite(m->blk, m->page_state_offset + index, 1, &lost, 0);
-    if (ret < 0) {
-        return ret;
-    }
-    m->page_state[index] = lost;
     return 0;
 }
 
@@ -617,60 +482,42 @@ int q3n_media_inject_bitflips(Q3NMedia *m, uint32_t block, uint32_t page,
     return blk_flush(m->blk);
 }
 
-uint32_t q3n_media_next_prog_page(const Q3NMedia *m, uint32_t block)
-{
-    return block < m->block_count ? m->next_prog_page[block] : UINT32_MAX;
-}
-
 int q3n_media_get_block_status(Q3NMedia *m, uint32_t block,
-                               uint32_t *status, uint32_t *next_page)
+                               uint32_t *status)
 {
     uint8_t marker;
     int ret;
 
-    if (block >= m->block_count || !status || !next_page) {
+    if (block >= m->block_count || !status) {
         return -EINVAL;
     }
-    ret = blk_pread(m->blk,
-                    q3n_media_slot_offset(m, block, 0) + m->page_size +
-                    Q3N_BBM_OOB_OFFSET,
-                    1, &marker, 0);
+    ret = q3n_media_read_bbm(m, block, &marker);
     if (ret < 0) {
         return ret;
     }
-    m->bad[block] = marker != Q3N_BBM_GOOD;
-    *status = m->bad[block] ? Q3N_BLOCK_STATUS_BAD : 0;
-    if (m->next_prog_page[block] == 0) {
-        *status |= Q3N_BLOCK_STATUS_ERASED;
-    }
-    *next_page = m->next_prog_page[block];
+    *status = marker != Q3N_BBM_GOOD ? Q3N_BLOCK_STATUS_BAD : 0;
     return 0;
 }
 
 int q3n_media_mark_bad(Q3NMedia *m, uint32_t block)
 {
-    uint64_t marker_offset;
     uint8_t marker;
     int ret;
 
     if (block >= m->block_count) {
         return -EINVAL;
     }
-    marker_offset = q3n_media_slot_offset(m, block, 0) + m->page_size +
-                    Q3N_BBM_OOB_OFFSET;
-    ret = blk_pread(m->blk, marker_offset, 1, &marker, 0);
+    ret = q3n_media_read_bbm(m, block, &marker);
     if (ret < 0) {
         return ret;
     }
     if (marker != Q3N_BBM_GOOD) {
-        m->bad[block] = true;
         return 0;
     }
     marker = Q3N_BBM_BAD;
-    ret = blk_pwrite(m->blk, marker_offset, 1, &marker, 0);
+    ret = q3n_media_write_bbm(m, block, marker);
     if (ret < 0) {
         return ret;
     }
-    m->bad[block] = true;
     return 0;
 }
