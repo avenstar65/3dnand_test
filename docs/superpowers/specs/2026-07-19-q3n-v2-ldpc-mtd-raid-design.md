@@ -1,5 +1,10 @@
 # Q3N v2 持久化 LDPC、MTD ECC 与串行 Page-RAID 组合设计
 
+> **后续修订：** 关于 `next_prog_page`、逐页状态、块内编程顺序、
+> `order_errors`、重启前沿恢复和 UNPROTECTED tombstone 的内容，已由
+> `2026-07-24-q3n-program-order-boundary-design.md` 覆盖。QEMU 与驱动均不
+> 强制页序，本阶段也不考虑重启恢复。
+
 ## 1. 目标与工程基线
 
 本设计针对 `/Users/yangyu/Documents/3dnand-page-raid-serial-worktree` 的 `codex/page-raid-serial-async-priority` 分支。现有实现已经具备：
