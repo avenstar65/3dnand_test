@@ -60,48 +60,39 @@ static void q3n_map_rejects_invalid_input_test(struct kunit *test)
 			-EINVAL);
 }
 
-static void q3n_replay_serial_frontier_test(struct kunit *test)
+static void q3n_scheduler_does_not_gate_program_page_test(struct kunit *test)
 {
-	u8 data_valid[16] = {};
-	u8 parity_valid[2] = {};
-	bool needs_tail;
+	struct q3n_sched sched;
+	struct q3n_request p8 = {
+		.class = Q3N_REQ_FOREGROUND,
+		.op = Q3N_REQ_PROGRAM,
+		.page = 8,
+	};
 
-	KUNIT_ASSERT_EQ(test, q3n_replay_serial_frontier(16, 10,
-						 data_valid, parity_valid,
-						 &needs_tail), 0);
-	KUNIT_EXPECT_EQ(test, data_valid[0], 1);
-	KUNIT_EXPECT_EQ(test, data_valid[6], 1);
-	KUNIT_EXPECT_EQ(test, data_valid[7], 0);
-	KUNIT_EXPECT_EQ(test, data_valid[8], 1);
-	KUNIT_EXPECT_EQ(test, data_valid[9], 1);
-	KUNIT_EXPECT_EQ(test, parity_valid[0], 1);
-	KUNIT_EXPECT_EQ(test, parity_valid[1], 0);
-	KUNIT_EXPECT_FALSE(test, needs_tail);
-
-	memset(data_valid, 0, sizeof(data_valid));
-	memset(parity_valid, 0, sizeof(parity_valid));
-	KUNIT_ASSERT_EQ(test, q3n_replay_serial_frontier(16, 7,
-						 data_valid, parity_valid,
-						 &needs_tail), 0);
-	KUNIT_EXPECT_TRUE(test, needs_tail);
-	KUNIT_EXPECT_EQ(test, q3n_replay_serial_frontier(16, 17,
-						 data_valid, parity_valid,
-						 &needs_tail), -EINVAL);
-	KUNIT_EXPECT_EQ(test, q3n_replay_serial_frontier(15, 0,
-						 data_valid, parity_valid,
-						 &needs_tail), -EINVAL);
-	KUNIT_EXPECT_EQ(test, q3n_replay_serial_frontier(16, 0, NULL,
-						 parity_valid, &needs_tail),
-			-EINVAL);
+	q3n_sched_init(&sched);
+	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &p8), 0);
+	KUNIT_EXPECT_EQ(test, q3n_sched_try_start(&sched, &p8), 0);
 }
 
-static void q3n_program_order_test(struct kunit *test)
+static void q3n_next_stripe_data_preempts_previous_parity_test(struct kunit *test)
 {
-	struct q3n_block_state state = { .next_prog_page = 17 };
+	struct q3n_sched sched;
+	struct q3n_request parity = {
+		.class = Q3N_REQ_PARITY_WRITE,
+		.op = Q3N_REQ_PROGRAM,
+		.page = 7,
+	};
+	struct q3n_request next_data = {
+		.class = Q3N_REQ_FOREGROUND,
+		.op = Q3N_REQ_PROGRAM,
+		.page = 8,
+	};
 
-	KUNIT_EXPECT_TRUE(test, q3n_program_order_ready(&state, 17));
-	KUNIT_EXPECT_FALSE(test, q3n_program_order_ready(&state, 16));
-	KUNIT_EXPECT_FALSE(test, q3n_program_order_ready(&state, 18));
+	q3n_sched_init(&sched);
+	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &parity), 0);
+	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &next_data), 0);
+	KUNIT_EXPECT_EQ(test, q3n_sched_try_start(&sched, &next_data), 0);
+	KUNIT_EXPECT_EQ(test, q3n_sched_try_start(&sched, &parity), 0);
 }
 
 static void q3n_serial_same_block_mapping_test(struct kunit *test)
@@ -467,60 +458,16 @@ static void q3n_rebuild_rejects_stale_generation_test(struct kunit *test)
 static void q3n_scheduler_prioritizes_ready_foreground_test(struct kunit *test)
 {
 	struct q3n_sched sched;
-	struct q3n_block_state state = { .next_prog_page = 0 };
 	struct q3n_request foreground = { .class = Q3N_REQ_FOREGROUND,
 		.op = Q3N_REQ_READ };
 	struct q3n_request parity = { .class = Q3N_REQ_PARITY_WRITE,
-		.op = Q3N_REQ_PROGRAM, .block_state = &state };
+		.op = Q3N_REQ_PROGRAM };
 
 	q3n_sched_init(&sched);
 	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &parity), 0);
 	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &foreground), 0);
 	KUNIT_EXPECT_PTR_EQ(test, q3n_sched_pick_next(&sched), &foreground);
 	KUNIT_EXPECT_PTR_EQ(test, q3n_sched_pick_next(&sched), &parity);
-}
-
-static void q3n_scheduler_skips_unready_foreground_program_test(struct kunit *test)
-{
-	struct q3n_sched sched;
-	struct q3n_block_state state = { .next_prog_page = 4 };
-	struct q3n_request unready_fg = { .class = Q3N_REQ_FOREGROUND,
-		.op = Q3N_REQ_PROGRAM, .block_state = &state, .page = 5 };
-	struct q3n_request ready_parity = { .class = Q3N_REQ_PARITY_WRITE,
-		.op = Q3N_REQ_PROGRAM, .block_state = &state, .page = 4 };
-
-	q3n_sched_init(&sched);
-	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &unready_fg), 0);
-	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &ready_parity), 0);
-	KUNIT_EXPECT_PTR_EQ(test, q3n_sched_pick_next(&sched), &ready_parity);
-	state.next_prog_page = 5;
-	KUNIT_EXPECT_PTR_EQ(test, q3n_sched_pick_next(&sched), &unready_fg);
-}
-
-static void q3n_scheduler_rejects_program_without_predecessor_test(struct kunit *test)
-{
-	struct q3n_sched sched;
-	struct q3n_block_state state = { .next_prog_page = 0 };
-	struct q3n_request skipped = { .class = Q3N_REQ_FOREGROUND,
-		.op = Q3N_REQ_PROGRAM, .block_state = &state, .page = 1 };
-
-	q3n_sched_init(&sched);
-	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &skipped), 0);
-	KUNIT_EXPECT_EQ(test, q3n_sched_try_start(&sched, &skipped), -ERANGE);
-	KUNIT_EXPECT_TRUE(test, list_empty(&skipped.node));
-}
-
-static void q3n_scheduler_rejects_stale_program_test(struct kunit *test)
-{
-	struct q3n_sched sched;
-	struct q3n_block_state state = { .next_prog_page = 2 };
-	struct q3n_request stale = { .class = Q3N_REQ_FOREGROUND,
-		.op = Q3N_REQ_PROGRAM, .block_state = &state, .page = 1 };
-
-	q3n_sched_init(&sched);
-	KUNIT_ASSERT_EQ(test, q3n_sched_enqueue(&sched, &stale), 0);
-	KUNIT_EXPECT_EQ(test, q3n_sched_try_start(&sched, &stale), -ESTALE);
-	KUNIT_EXPECT_TRUE(test, list_empty(&stale.node));
 }
 
 static void q3n_scheduler_prioritizes_parity_read_test(struct kunit *test)
@@ -715,8 +662,8 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_map_separate_parity_block_test),
 	KUNIT_CASE(q3n_map_non_power_of_two_geometry_test),
 	KUNIT_CASE(q3n_map_rejects_invalid_input_test),
-	KUNIT_CASE(q3n_replay_serial_frontier_test),
-	KUNIT_CASE(q3n_program_order_test),
+	KUNIT_CASE(q3n_scheduler_does_not_gate_program_page_test),
+	KUNIT_CASE(q3n_next_stripe_data_preempts_previous_parity_test),
 	KUNIT_CASE(q3n_serial_same_block_mapping_test),
 	KUNIT_CASE(q3n_incremental_xor_test),
 	KUNIT_CASE(q3n_ecc_accumulate_clean_test),
@@ -734,9 +681,6 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_rebuild_processes_one_member_per_step_test),
 	KUNIT_CASE(q3n_rebuild_rejects_stale_generation_test),
 	KUNIT_CASE(q3n_scheduler_prioritizes_ready_foreground_test),
-	KUNIT_CASE(q3n_scheduler_skips_unready_foreground_program_test),
-	KUNIT_CASE(q3n_scheduler_rejects_program_without_predecessor_test),
-	KUNIT_CASE(q3n_scheduler_rejects_stale_program_test),
 	KUNIT_CASE(q3n_scheduler_prioritizes_parity_read_test),
 	KUNIT_CASE(q3n_scheduler_foreground_preempts_requeued_rebuild_test),
 	KUNIT_CASE(q3n_scheduler_p1_claim_preserves_foreground_test),

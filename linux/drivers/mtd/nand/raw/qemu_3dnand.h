@@ -58,9 +58,7 @@
 #define Q3N_REG_STAT_FG_OPS            0x0070
 #define Q3N_REG_STAT_PARITY_READS      0x0074
 #define Q3N_REG_STAT_PARITY_WRITES     0x0078
-#define Q3N_REG_STAT_ORDER_ERRORS      0x007c
 #define Q3N_REG_BLOCK_STATUS           0x0080
-#define Q3N_REG_BLOCK_NEXT_PAGE        0x0084
 #define Q3N_REG_ECC_GEOM0               0x0088
 #define Q3N_REG_ECC_GEOM1               0x008c
 #define Q3N_REG_ECC_STATUS              0x0090

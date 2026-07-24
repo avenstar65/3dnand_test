@@ -5,16 +5,6 @@
 
 #include "qemu_3dnand_priv.h"
 
-static bool q3n_req_ready(const struct q3n_request *req)
-{
-	if (req->op == Q3N_REQ_READ)
-		return true;
-	if (!req->block_state)
-		return false;
-
-	return q3n_program_order_ready(req->block_state, req->page);
-}
-
 static struct list_head *q3n_sched_queue(struct q3n_sched *sched,
 					 enum q3n_req_class class)
 {
@@ -28,46 +18,6 @@ static struct list_head *q3n_sched_queue(struct q3n_sched *sched,
 	default:
 		return NULL;
 	}
-}
-
-static struct q3n_request *q3n_sched_pick_ready(struct list_head *queue)
-{
-	struct q3n_request *req;
-
-	list_for_each_entry(req, queue, node) {
-		if (q3n_req_ready(req))
-			return req;
-	}
-
-	return NULL;
-}
-
-static bool q3n_queue_has_frontier_dependency(struct list_head *queue,
-					      const struct q3n_block_state *state,
-					      u32 page)
-{
-	struct q3n_request *req;
-
-	list_for_each_entry(req, queue, node) {
-		if (req->block_state == state && req->page == page &&
-		    (req->op == Q3N_REQ_PROGRAM ||
-		     req->class == Q3N_REQ_PARITY_READ))
-			return true;
-	}
-	return false;
-}
-
-static bool q3n_sched_has_frontier_dependency(struct q3n_sched *sched,
-					       const struct q3n_request *req)
-{
-	u32 page = req->block_state->next_prog_page;
-
-	return q3n_queue_has_frontier_dependency(&sched->foreground_queue,
-						 req->block_state, page) ||
-		q3n_queue_has_frontier_dependency(&sched->parity_read_queue,
-						  req->block_state, page) ||
-		q3n_queue_has_frontier_dependency(&sched->parity_write_queue,
-						  req->block_state, page);
 }
 
 static void q3n_sched_remove_locked(struct q3n_sched *sched,
@@ -261,29 +211,14 @@ int q3n_sched_try_start_seq(struct q3n_sched *sched, struct q3n_request *req,
 		return -EINVAL;
 
 	spin_lock_irqsave(&sched->lock, flags);
-	if (req->op == Q3N_REQ_PROGRAM) {
-		if (!req->block_state) {
-			q3n_sched_remove_locked(sched, req);
-			ret = -EINVAL;
-			goto changed;
-		}
-		if (req->page < req->block_state->next_prog_page) {
-			q3n_sched_remove_locked(sched, req);
-			ret = -ESTALE;
-			goto changed;
-		}
-		if (req->page > req->block_state->next_prog_page &&
-		    !q3n_sched_has_frontier_dependency(sched, req)) {
-			q3n_sched_remove_locked(sched, req);
-			ret = -ERANGE;
-			goto changed;
-		}
-	}
-	next = q3n_sched_pick_ready(&sched->foreground_queue);
+	next = list_first_entry_or_null(&sched->foreground_queue,
+					struct q3n_request, node);
 	if (!next)
-		next = q3n_sched_pick_ready(&sched->parity_read_queue);
+		next = list_first_entry_or_null(&sched->parity_read_queue,
+						struct q3n_request, node);
 	if (!next)
-		next = q3n_sched_pick_ready(&sched->parity_write_queue);
+		next = list_first_entry_or_null(&sched->parity_write_queue,
+						struct q3n_request, node);
 	if (next != req) {
 		if (next && next->class == Q3N_REQ_PARITY_READ &&
 		    req->class == Q3N_REQ_PARITY_WRITE)
@@ -296,7 +231,6 @@ int q3n_sched_try_start_seq(struct q3n_sched *sched, struct q3n_request *req,
 
 	q3n_sched_remove_locked(sched, req);
 
-changed:
 	q3n_sched_changed_locked(sched);
 	if (sequence)
 		*sequence = atomic64_read(&sched->sequence);
@@ -335,11 +269,14 @@ struct q3n_request *q3n_sched_pick_next(struct q3n_sched *sched)
 		return NULL;
 
 	spin_lock_irqsave(&sched->lock, flags);
-	req = q3n_sched_pick_ready(&sched->foreground_queue);
+	req = list_first_entry_or_null(&sched->foreground_queue,
+					struct q3n_request, node);
 	if (!req)
-		req = q3n_sched_pick_ready(&sched->parity_read_queue);
+		req = list_first_entry_or_null(&sched->parity_read_queue,
+						struct q3n_request, node);
 	if (!req)
-		req = q3n_sched_pick_ready(&sched->parity_write_queue);
+		req = list_first_entry_or_null(&sched->parity_write_queue,
+						struct q3n_request, node);
 	if (req) {
 		list_del_init(&req->node);
 		if (req->class != Q3N_REQ_FOREGROUND)

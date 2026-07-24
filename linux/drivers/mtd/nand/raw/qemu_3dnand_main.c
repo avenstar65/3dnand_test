@@ -68,7 +68,6 @@ struct qemu_3dnand {
 	u8 *page_buf;
 	u8 *raid_buf;
 	u8 *data_page_valid;
-	struct q3n_block_state *program_state;
 	struct qemu_3dnand_data_block_meta *data_meta;
 	struct qemu_3dnand_parity_entry *parity_index;
 
@@ -314,10 +313,6 @@ static int qemu_3dnand_program_phys_page_oob_locked(
 
 	qemu_3dnand_writel(q3n, Q3N_REG_CMD, Q3N_CMD_PROGRAM_PAGE_OOB);
 	ret = qemu_3dnand_wait_ready(q3n);
-	if (!ret && block < q3n->data_block_count) {
-		q3n->program_state[block].next_prog_page = page + 1;
-		q3n_sched_notify(&q3n->sched);
-	}
 	return ret;
 }
 
@@ -340,11 +335,11 @@ static int qemu_3dnand_mark_phys_block_bad_locked(struct qemu_3dnand *q3n,
 }
 
 static int qemu_3dnand_get_phys_block_status_locked(
-		struct qemu_3dnand *q3n, u32 block, u32 *status, u32 *next_page)
+		struct qemu_3dnand *q3n, u32 block, u32 *status)
 {
 	int ret;
 
-	if (block >= q3n->data_block_count || !status || !next_page)
+	if (block >= q3n->data_block_count || !status)
 		return -EINVAL;
 
 	qemu_3dnand_set_addr(q3n, qemu_3dnand_phys_addr(q3n, block, 0));
@@ -354,7 +349,6 @@ static int qemu_3dnand_get_phys_block_status_locked(
 		return ret;
 
 	*status = qemu_3dnand_readl(q3n, Q3N_REG_BLOCK_STATUS);
-	*next_page = qemu_3dnand_readl(q3n, Q3N_REG_BLOCK_NEXT_PAGE);
 	return 0;
 }
 
@@ -413,38 +407,6 @@ static int qemu_3dnand_validate_data_metadata(
 
 	if (data_crc)
 		*data_crc = crc;
-	return 0;
-}
-
-static int qemu_3dnand_validate_replay_members_locked(
-		struct qemu_3dnand *q3n, u32 block, u32 stripe,
-		const struct q3n_parity_manifest *manifest)
-{
-	u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
-	struct q3n_ecc_result ecc;
-	u32 data_crc;
-	u32 lane;
-	int ret;
-
-	for (lane = 0; lane < Q3N_DATA_PAGES; lane++) {
-		ret = qemu_3dnand_read_phys_page_oob_locked(q3n, block,
-			stripe * Q3N_STRIPE_PAGES + lane, q3n->page_buf,
-			logical_oob, Q3N_OP_PARITY_READ, &ecc);
-		if (ret)
-			return ret;
-		qemu_3dnand_account_background_ecc(q3n, &ecc);
-		if (ecc.uncorrectable)
-			return -EBADMSG;
-		ret = qemu_3dnand_validate_data_metadata(q3n->page_buf,
-			q3n->page_size, logical_oob,
-			qemu_3dnand_stripe_id(q3n, block, stripe), lane,
-			&data_crc);
-		if (ret)
-			return ret;
-		if (le32_to_cpu(manifest->data_crc[lane]) != data_crc)
-			return -EBADMSG;
-	}
-
 	return 0;
 }
 
@@ -551,205 +513,26 @@ static int qemu_3dnand_program_unprotected_tombstone_locked(
 		logical_oob, Q3N_OP_PARITY_WRITE);
 }
 
-static int qemu_3dnand_append_parity_locked(struct qemu_3dnand *q3n,
-					    u32 block, u32 stripe,
-					    u8 *failure_reason)
-{
-	struct qemu_3dnand_parity_entry *entry;
-	u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
-	u32 data_crc[Q3N_DATA_PAGES];
-	struct q3n_ecc_result ecc;
-	u32 lane;
-	u32 i;
-	int ret;
-
-	if (!failure_reason)
-		return -EINVAL;
-	*failure_reason = Q3N_UNPROTECTED_INVALID_METADATA;
-	if (!qemu_3dnand_stripe_full(q3n, block, stripe))
-		return 0;
-
-	entry = &q3n->parity_index[qemu_3dnand_parity_index(q3n, block, stripe)];
-	memset(q3n->raid_buf, 0, q3n->page_size);
-	for (lane = 0; lane < Q3N_DATA_PAGES; lane++) {
-		*failure_reason = Q3N_UNPROTECTED_MEMBER_READ;
-		ret = qemu_3dnand_read_phys_page_oob_locked(q3n, block,
-				 stripe * Q3N_STRIPE_PAGES + lane,
-						q3n->page_buf, logical_oob,
-						Q3N_OP_PARITY_READ, &ecc);
-		if (ret)
-			return ret;
-		qemu_3dnand_account_background_ecc(q3n, &ecc);
-		if (ecc.uncorrectable) {
-			*failure_reason = Q3N_UNPROTECTED_LDPC_UNCORRECTABLE;
-			return -EBADMSG;
-		}
-		*failure_reason = Q3N_UNPROTECTED_INVALID_METADATA;
-		ret = qemu_3dnand_validate_data_metadata(q3n->page_buf,
-			q3n->page_size, logical_oob,
-			qemu_3dnand_stripe_id(q3n, block, stripe), lane,
-			&data_crc[lane]);
-		if (ret)
-			return ret;
-		for (i = 0; i < q3n->page_size; i++)
-			q3n->raid_buf[i] ^= q3n->page_buf[i];
-	}
-
-	*failure_reason = Q3N_UNPROTECTED_PARITY_PROGRAM;
-	return qemu_3dnand_commit_parity_locked(q3n, block, stripe, entry,
-						q3n->raid_buf, data_crc);
-}
-
 static int qemu_3dnand_restore_media_locked(struct qemu_3dnand *q3n)
 {
-	u32 stripes_per_block = q3n->pages_per_block / Q3N_STRIPE_PAGES;
-	u8 *parity_valid;
 	u32 block;
-	int ret = 0;
-
-	parity_valid = kcalloc(stripes_per_block, sizeof(*parity_valid),
-			       GFP_KERNEL);
-	if (!parity_valid)
-		return -ENOMEM;
+	int ret;
 
 	for (block = 0; block < q3n->data_block_count; block++) {
 		struct qemu_3dnand_data_block_meta *meta =
 			&q3n->data_meta[block];
-		u8 *data_valid = &q3n->data_page_valid[
-			qemu_3dnand_data_page_index(q3n, block, 0)];
 		u32 status;
-		u32 next_page;
-		u32 stripe;
-		bool needs_tail_parity;
 
 		ret = qemu_3dnand_get_phys_block_status_locked(q3n, block,
-							     &status, &next_page);
+							     &status);
 		if (ret)
-			break;
+			return ret;
 
 		meta->bad = status & Q3N_BLOCK_STATUS_BAD;
 		meta->erased = status & Q3N_BLOCK_STATUS_ERASED;
-		q3n->program_state[block].next_prog_page = next_page;
-		if (meta->bad)
-			continue;
-
-		ret = q3n_replay_serial_frontier(q3n->pages_per_block,
-						 next_page, data_valid,
-						 parity_valid,
-						 &needs_tail_parity);
-		if (ret)
-			break;
-
-		for (stripe = 0; stripe < stripes_per_block; stripe++) {
-			struct qemu_3dnand_parity_entry *entry;
-			u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
-			struct q3n_parity_manifest manifest;
-			struct q3n_unprotected_tombstone tombstone;
-			struct q3n_ecc_result ecc;
-			u32 lane;
-
-			if (!parity_valid[stripe])
-				continue;
-			entry = &q3n->parity_index[
-				qemu_3dnand_parity_index(q3n, block, stripe)];
-			ret = qemu_3dnand_read_phys_page_oob_locked(q3n, block,
-				stripe * Q3N_STRIPE_PAGES + Q3N_DATA_PAGES,
-				q3n->page_buf, logical_oob, Q3N_OP_PARITY_READ,
-				&ecc);
-			if (ret)
-				break;
-			qemu_3dnand_account_background_ecc(q3n, &ecc);
-			if (ecc.uncorrectable) {
-				entry->valid = false;
-				q3n->raid_failed++;
-				atomic64_inc(&q3n->failed_stripes);
-				atomic64_inc(&q3n->unprotected_stripes);
-				continue;
-			}
-			if (get_unaligned_le16(logical_oob + 1) ==
-			    Q3N_RAID_TOMBSTONE_MAGIC) {
-				ret = q3n_unpack_unprotected_oob(logical_oob,
-							 sizeof(logical_oob),
-							 &tombstone);
-				if (!ret && le64_to_cpu(tombstone.stripe_id) !=
-				    qemu_3dnand_stripe_id(q3n, block, stripe))
-					ret = -EBADMSG;
-				entry->valid = false;
-				atomic64_inc(&q3n->failed_stripes);
-				atomic64_inc(&q3n->unprotected_stripes);
-				if (ret)
-					q3n->raid_failed++;
-				ret = 0;
-				continue;
-			}
-			ret = q3n_unpack_parity_oob(logical_oob,
-						    sizeof(logical_oob), &manifest);
-			if (!ret && manifest.data_pages != Q3N_DATA_PAGES)
-				ret = -EBADMSG;
-			if (!ret && le64_to_cpu(manifest.stripe_id) !=
-				qemu_3dnand_stripe_id(q3n, block, stripe))
-				ret = -EBADMSG;
-			if (!ret && le32_to_cpu(manifest.parity_crc) !=
-				crc32_le(~0, q3n->page_buf, q3n->page_size))
-				ret = -EBADMSG;
-			if (!ret)
-				ret = qemu_3dnand_validate_replay_members_locked(
-					q3n, block, stripe, &manifest);
-			if (ret) {
-				entry->valid = false;
-				q3n->raid_failed++;
-				atomic64_inc(&q3n->failed_stripes);
-				atomic64_inc(&q3n->unprotected_stripes);
-				ret = 0;
-				continue;
-			}
-			entry->physical_block = block;
-			entry->page = stripe * Q3N_STRIPE_PAGES +
-				      Q3N_DATA_PAGES;
-			entry->data_block_generation[0] = meta->generation;
-			for (lane = 0; lane < Q3N_DATA_PAGES; lane++)
-				entry->data_crc[lane] =
-					le32_to_cpu(manifest.data_crc[lane]);
-			entry->parity_crc = le32_to_cpu(manifest.parity_crc);
-			entry->parity_version = 1;
-			entry->sequence = ++q3n->parity_sequence;
-			entry->valid = true;
-		}
-		if (ret)
-			break;
-
-		if (needs_tail_parity) {
-			u32 restored_status;
-			u32 restored_next;
-			u8 failure_reason;
-
-			stripe = next_page / Q3N_STRIPE_PAGES;
-			ret = qemu_3dnand_append_parity_locked(q3n, block,
-							  stripe,
-							  &failure_reason);
-			if (ret) {
-				ret = qemu_3dnand_program_unprotected_tombstone_locked(
-					q3n, block, stripe, failure_reason,
-					q3n->page_buf);
-				if (ret)
-					break;
-				q3n->raid_failed++;
-				atomic64_inc(&q3n->failed_stripes);
-				atomic64_inc(&q3n->unprotected_stripes);
-			}
-			ret = qemu_3dnand_get_phys_block_status_locked(
-				q3n, block, &restored_status, &restored_next);
-			if (ret)
-				break;
-			if (restored_next != next_page + 1) {
-				ret = -EIO;
-				break;
-			}
-		}
 	}
 
-	kfree(parity_valid);
-	return ret;
+	return 0;
 }
 
 static void qemu_3dnand_parity_worker(struct work_struct *work)
@@ -966,7 +749,6 @@ static int qemu_3dnand_queue_parity_locked(struct qemu_3dnand *q3n,
 	parity->rebuild.page_size = q3n->page_size;
 	parity->request.class = Q3N_REQ_PARITY_READ;
 	parity->request.op = Q3N_REQ_READ;
-	parity->request.block_state = &q3n->program_state[block];
 	parity->request.page = stripe * Q3N_STRIPE_PAGES + Q3N_DATA_PAGES;
 	INIT_WORK(&parity->work, qemu_3dnand_parity_worker);
 	if (q3n_sched_requeue_p1(&q3n->sched, &parity->request)) {
@@ -1208,7 +990,6 @@ static int qemu_3dnand_program_logical_page(struct qemu_3dnand *q3n,
 	struct q3n_request req = {
 		.class = Q3N_REQ_FOREGROUND,
 		.op = Q3N_REQ_PROGRAM,
-		.block_state = &q3n->program_state[block],
 		.page = page,
 	};
 	struct q3n_data_meta page_meta;
@@ -1461,7 +1242,6 @@ static int qemu_3dnand_mtd_erase(struct mtd_info *mtd,
 		if (!q3n->data_meta[block].generation)
 			q3n->data_meta[block].generation = 1;
 		q3n->data_meta[block].erased = true;
-		q3n->program_state[block].next_prog_page = 0;
 		q3n->generation_updates++;
 		qemu_3dnand_invalidate_block_parity(q3n, block);
 		q3n_block_cancel_end(&q3n->data_meta[block].parity_barrier);
@@ -1487,7 +1267,6 @@ static int qemu_3dnand_mtd_block_isbad(struct mtd_info *mtd, loff_t ofs)
 	struct qemu_3dnand *q3n = mtd->priv;
 	u64 block;
 	u32 status;
-	u32 next_page;
 	int ret;
 	int bad;
 
@@ -1498,8 +1277,7 @@ static int qemu_3dnand_mtd_block_isbad(struct mtd_info *mtd, loff_t ofs)
 		return -EINVAL;
 
 	mutex_lock(&q3n->mtd_lock);
-	ret = qemu_3dnand_get_phys_block_status_locked(q3n, block, &status,
-						       &next_page);
+	ret = qemu_3dnand_get_phys_block_status_locked(q3n, block, &status);
 	if (ret) {
 		bad = ret;
 	} else {
@@ -1691,8 +1469,6 @@ static int qemu_3dnand_##_name##_get(void *data, u64 *value) \
 Q3N_MMIO_STAT_GETTER(foreground_ops, Q3N_REG_STAT_FG_OPS)
 Q3N_MMIO_STAT_GETTER(parity_reads, Q3N_REG_STAT_PARITY_READS)
 Q3N_MMIO_STAT_GETTER(parity_writes, Q3N_REG_STAT_PARITY_WRITES)
-Q3N_MMIO_STAT_GETTER(order_errors, Q3N_REG_STAT_ORDER_ERRORS)
-
 static int qemu_3dnand_raid_recovered_get(void *data, u64 *value)
 {
 	struct qemu_3dnand *q3n = data;
@@ -1961,8 +1737,6 @@ DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_parity_reads_fops,
 			 qemu_3dnand_parity_reads_get, NULL, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_parity_writes_fops,
 			 qemu_3dnand_parity_writes_get, NULL, "%llu\n");
-DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_order_errors_fops,
-			 qemu_3dnand_order_errors_get, NULL, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_raid_recovered_fops,
 			 qemu_3dnand_raid_recovered_get, NULL, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(qemu_3dnand_raid_failed_fops,
@@ -2040,8 +1814,6 @@ static void qemu_3dnand_debugfs_init(struct qemu_3dnand *q3n)
 			    &qemu_3dnand_parity_reads_fops);
 	debugfs_create_file("parity_writes", 0400, q3n->debugfs_dir, q3n,
 			    &qemu_3dnand_parity_writes_fops);
-	debugfs_create_file("order_errors", 0400, q3n->debugfs_dir, q3n,
-			    &qemu_3dnand_order_errors_fops);
 	debugfs_create_file("raid_recovered", 0400, q3n->debugfs_dir, q3n,
 			    &qemu_3dnand_raid_recovered_fops);
 	debugfs_create_file("raid_failed", 0400, q3n->debugfs_dir, q3n,
@@ -2192,15 +1964,13 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 					  GFP_KERNEL);
 	q3n->data_meta = devm_kcalloc(dev, q3n->data_block_count,
 				      sizeof(*q3n->data_meta), GFP_KERNEL);
-	q3n->program_state = devm_kcalloc(dev, q3n->data_block_count,
-					  sizeof(*q3n->program_state), GFP_KERNEL);
 	q3n->parity_index = kvcalloc(q3n->data_block_count *
 					     (q3n->pages_per_block /
 					      Q3N_STRIPE_PAGES),
 					     sizeof(*q3n->parity_index),
 					     GFP_KERNEL);
 	if (!q3n->page_buf || !q3n->raid_buf || !q3n->data_page_valid ||
-	    !q3n->program_state || !q3n->data_meta || !q3n->parity_index) {
+	    !q3n->data_meta || !q3n->parity_index) {
 		ret = -ENOMEM;
 		goto err_free_metadata;
 	}
