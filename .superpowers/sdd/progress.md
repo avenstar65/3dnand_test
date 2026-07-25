@@ -33,7 +33,7 @@ Minor review note: qemu/README.md still describes removed frontier/order ABI and
 Task 2: complete (commits 6b4ca0b..915c71d, review clean after BBM-only status fix)
 Minor review note: Task 2 GREEN report overstates KUnit case-name visibility; kernel build and no-failure guest evidence are valid.
 Task 3: complete (commits 915c71d..239e230, review clean after queue-failure accounting fix)
-Minor review note: later-stripe KUnit proves independent parity queueing but does not assert successful PROTECTED completion; final review should decide whether to extend coverage.
+Task 4: complete (commits 239e230..a348b96, review clean after precise uncorrectable-OOB acceptance fix)
 
 Program-order boundary revision
 Task 1: complete
