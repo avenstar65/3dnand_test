@@ -13,12 +13,13 @@ static int usage(const char *prog)
 	fprintf(stderr,
 		"usage: %s get|set DEVICE OFFSET\n"
 		"       %s oob-read MODE DEVICE PAGE_OFFSET OOB_OFFSET LENGTH\n"
+		"       %s oob-read-uncorrectable MODE DEVICE PAGE_OFFSET OOB_OFFSET LENGTH\n"
 		"       %s oob-read-unchecked MODE DEVICE PAGE_OFFSET OOB_OFFSET LENGTH\n"
 		"       %s oob-write MODE DEVICE PAGE_OFFSET OOB_OFFSET LENGTH BYTE\n"
 		"       %s page-read|page-write MODE DEVICE PAGE_OFFSET DATA_BYTE OOB_OFFSET OOB_LENGTH OOB_BYTE\n"
 		"       %s span-read|span-write MODE DEVICE PAGE_OFFSET PAGE_COUNT OOB_OFFSET OOB_BYTE\n"
 		"MODE is place or raw; page OOB commands never wrap to another page.\n",
-		prog, prog, prog, prog, prog, prog);
+		prog, prog, prog, prog, prog, prog, prog);
 	return 2;
 }
 
@@ -89,7 +90,7 @@ static int set_oob_file_mode(int fd, uint8_t mode)
 static int oob_io(int fd, int write, uint8_t mode,
 		  const struct mtd_info_user *info, uint64_t page_offset,
 		  uint64_t oob_offset, uint64_t length, unsigned char value,
-		  int validate_logical_bounds)
+		  int validate_logical_bounds, int expect_uncorrectable)
 {
 	struct mtd_oob_buf64 req;
 	unsigned char *buf;
@@ -112,8 +113,27 @@ static int oob_io(int fd, int write, uint8_t mode,
 	req.length = length;
 	req.usr_ptr = (uintptr_t)buf;
 	ret = set_oob_file_mode(fd, mode);
-	if (!ret)
+	if (!ret) {
 		ret = ioctl(fd, write ? MEMWRITEOOB64 : MEMREADOOB64, &req);
+		if (expect_uncorrectable) {
+			if (ret < 0 && errno == EBADMSG) {
+				errno = 0;
+				free(buf);
+				return 0;
+			}
+			if (!ret && req.length == 0) {
+				errno = 0;
+				free(buf);
+				return 0;
+			}
+			if (!ret)
+				errno = ENODATA;
+			else if (ret > 0)
+				errno = EIO;
+			free(buf);
+			return -1;
+		}
+	}
 	if (!ret && req.length != length) {
 		errno = EIO;
 		ret = -1;
@@ -261,6 +281,7 @@ static int run_extended(int argc, char **argv)
 	uint8_t mode;
 	int write;
 	int unchecked;
+	int expect_uncorrectable;
 	int fd;
 	int ret;
 
@@ -268,6 +289,7 @@ static int run_extended(int argc, char **argv)
 		return usage(argv[0]);
 	write = strstr(argv[1], "write") != NULL;
 	unchecked = !strcmp(argv[1], "oob-read-unchecked");
+	expect_uncorrectable = !strcmp(argv[1], "oob-read-uncorrectable");
 	if (parse_mode(argv[2], &mode) || parse_u64(argv[4], &page_offset))
 		return usage(argv[0]);
 	fd = open(argv[3], O_RDWR);
@@ -282,7 +304,7 @@ static int run_extended(int argc, char **argv)
 	}
 
 	if (!strcmp(argv[1], "oob-read") || !strcmp(argv[1], "oob-write") ||
-	    unchecked) {
+	    unchecked || expect_uncorrectable) {
 		if (argc != (write ? 8 : 7) || parse_u64(argv[5], &first) ||
 		    parse_u64(argv[6], &second) ||
 		    (write && parse_byte(argv[7], &oob_value))) {
@@ -290,7 +312,8 @@ static int run_extended(int argc, char **argv)
 			return usage(argv[0]);
 		}
 		ret = oob_io(fd, write, mode, &info, page_offset, first,
-			     second, write ? oob_value : 0, !unchecked);
+			     second, write ? oob_value : 0, !unchecked,
+			     expect_uncorrectable);
 	} else if (!strcmp(argv[1], "page-read") ||
 		   !strcmp(argv[1], "page-write")) {
 		if (argc != 9 || parse_byte(argv[5], &data_value) ||

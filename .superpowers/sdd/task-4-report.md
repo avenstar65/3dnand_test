@@ -115,3 +115,82 @@ still verifies exact raw main and OOB byte values.
   wheel directory; the final full build then passed. No compiled host artifact
   or generated build output is included in the commit.
 - QEMU and kernel build commands must run through `scripts/shell.sh` on macOS.
+
+## Formal review fix: precise persisted-overlay result
+
+The formal review identified that the persistence guest accepted any failure
+from its page-1 OOB read as proof that the persisted overlay was
+uncorrectable. A dedicated helper mode now verifies the observable kernel ABI
+instead:
+
+- `oob-read-uncorrectable` issues exactly one `MEMREADOOB64` read ioctl;
+- it succeeds if the ioctl exposes `-1/EBADMSG`;
+- it also succeeds if Linux 7.0.12 suppresses that ECC error and returns
+  success with `req.length == 0`;
+- it fails for every other errno and for normal success with a nonzero returned
+  length, using `ENODATA` for that unexpected normal-success case.
+
+The zero-length success case is specific enough for this driver: corrected
+`-EUCLEAN` reads copy OOB data and report a nonzero length.
+
+### RED evidence
+
+The first focused static assertion was added before the helper implementation:
+
+```text
+$ ./scripts/smoke-test.sh
+FAIL: rootfs/helpers/mtd_badblock.c does not contain pattern: oob-read-ebadmsg
+```
+
+The initial strict `EBADMSG`-only implementation made host smoke and rootfs
+build pass, but the real persistence verify guest failed before its marker.
+Temporary diagnostic output showed:
+
+```text
+ioctl: No data available
+MTD smoke 测试失败，进入 shell
+错误: q3n-persist-verify marker missing
+```
+
+This was the helper's intentional `ENODATA` for unexpected ioctl success.
+Inspection of Linux 7.0.12 `mtdchar_readoob()` confirmed why:
+`mtd_read_oob()` returns `-EBADMSG`, but mtdchar explicitly returns ioctl
+success for `mtd_is_bitflip_or_eccerr(ret)`. Because the driver copied no OOB
+bytes for the uncorrectable page, the returned length is zero. The previous
+generic helper failed only because its later short-length check converted that
+result to `EIO`.
+
+After revising the mode name and contract to the observable ABI, the renamed
+static assertion was again verified RED before production edits:
+
+```text
+$ ./scripts/smoke-test.sh
+FAIL: rootfs/helpers/mtd_badblock.c does not contain pattern: oob-read-uncorrectable
+```
+
+### GREEN evidence
+
+```text
+$ ./scripts/smoke-test.sh
+ok: q3n controller OOB and LDPC behavior verified
+ok: script structure verified
+ok: q3n media overlay mapping verified
+ok: smoke test passed
+
+$ ./scripts/shell.sh ./scripts/build-rootfs.sh
+==> 生成 initramfs: /workspace/work/rootfs/initramfs.cpio.gz
+==> 完成: /workspace/work/rootfs/initramfs.cpio.gz
+
+$ ./scripts/q3n-persistence-smoke.sh
+q3n persistence prepare passed
+q3n persistence verify passed
+==> q3n persistence smoke passed
+
+$ git diff --check
+[exit 0, no output]
+```
+
+Self-review confirmed the mode accepts only the two uncorrectable signatures,
+does not mistake raw-mode setup errors for read errors, invokes one read ioctl,
+preserves every existing helper mode, and leaves no diagnostic instrumentation
+or `oob-read-ebadmsg` name behind.

@@ -562,11 +562,8 @@ mtd_q3n_persist_verify() {
   bad_page_seek=$((erasesize / writesize))
 
   mtd_badblock page-read raw "$mtd_dev" 0 0x5a 100 1 0xa5 || return 1
-  if mtd_badblock oob-read raw "$mtd_dev" "$writesize" 101 1 \
-       >/tmp/q3n-persist-overlay.out 2>/tmp/q3n-persist-overlay.err; then
-    echo "q3n persistence verify: persisted uncorrectable overlay was ignored"
-    return 1
-  fi
+  mtd_badblock oob-read-uncorrectable raw "$mtd_dev" "$writesize" 101 1 \
+    >/tmp/q3n-persist-overlay.out 2>/tmp/q3n-persist-overlay.err || return 1
 
   [ "$(mtd_badblock get "$mtd_dev" "$erasesize")" = "1" ] || return 1
   if dd if=/dev/zero of="$mtd_dev" bs="$writesize" count=1 \
