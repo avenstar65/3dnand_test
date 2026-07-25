@@ -244,9 +244,11 @@ mtd_q3n_serial_smoke() {
   failed_before=$(cat "$stats/failed_stripes") || return 1
   unprotected_before=$(cat "$stats/unprotected_stripes") || return 1
   protected_before_fail=$(cat "$stats/protected_stripes") || return 1
+  parity_writes_before_fail=$(cat "$stats/parity_writes") || return 1
   echo 0 > "$stats/inject_parity_program_fail" || return 1
   mtd_q3n_serial_write_read_page 6 || return 1
   mtd_q3n_wait_eq "$stats/pending_parity" 0 "failed pending parity" || return 1
+  parity_writes_after_fail=$(cat "$stats/parity_writes") || return 1
   faults_after=$(cat "$stats/faults_injected") || return 1
   failed_after=$(cat "$stats/failed_stripes") || return 1
   unprotected_after=$(cat "$stats/unprotected_stripes") || return 1
@@ -255,11 +257,12 @@ mtd_q3n_serial_smoke() {
   [ "$failed_after" -eq $((failed_before + 1)) ] || return 1
   [ "$unprotected_after" -eq $((unprotected_before + 1)) ] || return 1
   [ "$protected_failed" -eq "$protected_before_fail" ] || return 1
+  [ "$parity_writes_after_fail" -eq $((parity_writes_before_fail + 1)) ] || \
+    return 1
   echo "one-shot fault acceptance passed"
 
   # A failed stripe-0 parity PROGRAM leaves no persistent placeholder. Logical
   # page 7 maps to stripe-1 D0 at physical page 8 and must still make progress.
-  parity_writes_after_fail=$(cat "$stats/parity_writes") || return 1
   mtd_q3n_serial_write_read_page 7 || return 1
   [ "$(cat "$stats/unprotected_stripes")" -eq "$unprotected_after" ] || \
     return 1
