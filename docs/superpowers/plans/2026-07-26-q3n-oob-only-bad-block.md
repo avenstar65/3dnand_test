@@ -75,17 +75,17 @@
 Add to `tests/test_scripts.sh`:
 
 ```sh
-for header in \
-  qemu/include/hw/mtd/q3n-nand.h \
-  linux/drivers/mtd/nand/raw/qemu_3dnand.h; do
-  assert_contains "$header" 'Q3N_PHYSICAL_OOB_HEAD_OFFSET[[:space:]]+Q3N_PAGE_SIZE'
-  assert_contains "$header" 'Q3N_PHYSICAL_OOB_HEAD_SIZE[[:space:]]+1U'
-  assert_contains "$header" 'Q3N_PHYSICAL_LDPC_OFFSET'
-  assert_contains "$header" 'Q3N_PHYSICAL_OOB_TAIL_OFFSET'
-  assert_contains "$header" 'Q3N_PHYSICAL_OOB_TAIL_SIZE'
-  assert_contains "$header" 'Q3N_PHYSICAL_PAGE_SIZE'
-done
+header=qemu/include/hw/mtd/q3n-nand.h
+assert_contains "$header" 'Q3N_PHYSICAL_OOB_HEAD_OFFSET[[:space:]]+Q3N_PAGE_SIZE'
+assert_contains "$header" 'Q3N_PHYSICAL_OOB_HEAD_SIZE[[:space:]]+1U'
+assert_contains "$header" 'Q3N_PHYSICAL_LDPC_OFFSET'
+assert_contains "$header" 'Q3N_PHYSICAL_OOB_TAIL_OFFSET'
+assert_contains "$header" 'Q3N_PHYSICAL_OOB_TAIL_SIZE'
+assert_contains "$header" 'Q3N_PHYSICAL_PAGE_SIZE'
 ```
+
+The Linux header receives and verifies the same constants in Task 3, when the
+Linux ABI is updated.
 
 Add forbidden legacy media-path assertions:
 
@@ -281,15 +281,15 @@ Add to `tests/test_scripts.sh`:
 ```sh
 for file in \
   qemu/include/hw/mtd/q3n-nand.h \
-  qemu/hw/mtd/q3n-nand.c \
-  linux/drivers/mtd/nand/raw/qemu_3dnand.h \
-  linux/drivers/mtd/nand/raw/qemu_3dnand_main.c; do
+  qemu/hw/mtd/q3n-nand.c; do
   assert_not_contains "$file" 'Q3N_CMD_MARK_BAD_BLOCK'
 done
 assert_not_contains qemu/hw/mtd/q3n-nand.c 'q3n_cmd_mark_bad_block'
 assert_contains qemu/hw/mtd/q3n-nand.c \
   'data_count = Q3N_LOGICAL_OOB_SIZE'
 ```
+
+The Linux command definition and helper are removed and verified in Task 3.
 
 Add assertions rejecting any 16 KiB count in OOB command handlers.
 
@@ -689,12 +689,16 @@ Run:
 ```sh
 if rg -n \
   'Q3N_CMD_MARK_BAD_BLOCK|q3n_cmd_mark_bad_block|q3n_media_mark_bad|q3n_media_write_bbm|qemu_3dnand_mark_phys_block_bad_locked' \
-  qemu linux rootfs scripts tests README.md docs; then
+  qemu linux rootfs scripts tests README.md \
+  docs/qemu-3dnand-register-reference.md; then
     exit 1
 fi
 ```
 
-Also require all documented offsets and constants to match the shared headers.
+Historical design specifications and implementation plans are intentionally
+excluded because they describe the removed ABI as background or a forbidden
+symbol. Also require all current documented offsets and constants to match the
+shared headers.
 
 - [ ] **Step 8: Commit Task 4**
 
