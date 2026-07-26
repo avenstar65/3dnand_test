@@ -9,6 +9,16 @@
 #define Q3N_LDPC_BYTES_PER_STEP    96U
 #define Q3N_LDPC_STEPS             16U
 #define Q3N_LDPC_TOTAL_BYTES       1536U
+#define Q3N_PHYSICAL_OOB_HEAD_OFFSET Q3N_PAGE_SIZE
+#define Q3N_PHYSICAL_OOB_HEAD_SIZE   1U
+#define Q3N_PHYSICAL_LDPC_OFFSET     \
+    (Q3N_PHYSICAL_OOB_HEAD_OFFSET + Q3N_PHYSICAL_OOB_HEAD_SIZE)
+#define Q3N_PHYSICAL_LDPC_SIZE       Q3N_LDPC_TOTAL_BYTES
+#define Q3N_PHYSICAL_OOB_TAIL_OFFSET \
+    (Q3N_PHYSICAL_LDPC_OFFSET + Q3N_PHYSICAL_LDPC_SIZE)
+#define Q3N_PHYSICAL_OOB_TAIL_SIZE   (Q3N_LOGICAL_OOB_SIZE - 1U)
+#define Q3N_PHYSICAL_PAGE_SIZE       \
+    (Q3N_PHYSICAL_OOB_TAIL_OFFSET + Q3N_PHYSICAL_OOB_TAIL_SIZE)
 #define Q3N_ECC_STEP_SIZE          1024U
 #define Q3N_ECC_STRENGTH           40U
 #define Q3N_ECC_NO_FAILED_STEP     UINT32_MAX
@@ -37,6 +47,24 @@ static uint32_t crc32c(uint32_t crc, const uint8_t *data,
 }
 
 #include "q3n-controller-helpers.inc"
+
+static void q3n_media_merge_program(uint8_t *stored,
+                                    const uint8_t *incoming, size_t length)
+{
+    for (size_t i = 0; i < length; i++) {
+        stored[i] &= incoming[i];
+    }
+}
+
+#include "q3n-media-layout-helpers.inc"
+
+static void assert_all_equal(const uint8_t *bytes, uint32_t first,
+                             uint32_t end, uint8_t expected)
+{
+    for (uint32_t i = first; i < end; i++) {
+        assert(bytes[i] == expected);
+    }
+}
 
 static void set_first_bits(uint8_t *overlay, uint32_t count)
 {
@@ -152,12 +180,48 @@ static void test_oob_transfers_are_independent_of_main_length(void)
     assert(!q3n_oob_transfer_valid(0, Q3N_LOGICAL_OOB_SIZE - 1, false));
 }
 
+static void test_physical_page_oob_mapping_preserves_main_and_ldpc(void)
+{
+    uint8_t physical_page[Q3N_PHYSICAL_PAGE_SIZE];
+    uint8_t programmed_page[Q3N_PHYSICAL_PAGE_SIZE];
+    uint8_t logical[Q3N_LOGICAL_OOB_SIZE];
+    const uint8_t main_sentinel = 0xa5;
+    const uint8_t ldpc_sentinel = 0x5a;
+
+    memset(physical_page, 0xff, sizeof(physical_page));
+    memset(physical_page, main_sentinel, Q3N_PAGE_SIZE);
+    memset(physical_page + Q3N_PHYSICAL_LDPC_OFFSET, ldpc_sentinel,
+           Q3N_PHYSICAL_LDPC_SIZE);
+    physical_page[0x4000] = 0x3c;
+    for (uint32_t i = 0; i < Q3N_PHYSICAL_OOB_TAIL_SIZE; i++) {
+        physical_page[0x4601 + i] = (uint8_t)(i ^ 0x5a);
+    }
+
+    q3n_media_extract_logical_oob(physical_page, logical);
+    assert(logical[0] == physical_page[0x4000]);
+    assert(!memcmp(logical + 1, physical_page + 0x4601, 127));
+    assert_all_equal(physical_page, 0, 0x4000, main_sentinel);
+    assert_all_equal(physical_page, 0x4001, 0x4601, ldpc_sentinel);
+
+    memset(programmed_page, 0xff, sizeof(programmed_page));
+    memset(programmed_page, main_sentinel, Q3N_PAGE_SIZE);
+    memset(programmed_page + Q3N_PHYSICAL_LDPC_OFFSET, ldpc_sentinel,
+           Q3N_PHYSICAL_LDPC_SIZE);
+    q3n_media_merge_logical_oob(programmed_page, logical);
+    assert(programmed_page[0x4000] == logical[0]);
+    assert(!memcmp(programmed_page + 0x4601, logical + 1, 127));
+    assert(q3n_media_logical_oob_matches(programmed_page, logical));
+    assert_all_equal(programmed_page, 0, 0x4000, main_sentinel);
+    assert_all_equal(programmed_page, 0x4001, 0x4601, ldpc_sentinel);
+}
+
 int main(void)
 {
     test_decode_thresholds();
     test_decode_aggregates_steps();
     test_ldpc_mismatch_is_uncorrectable();
     test_oob_transfers_are_independent_of_main_length();
+    test_physical_page_oob_mapping_preserves_main_and_ldpc();
     puts("ok: q3n controller OOB and LDPC behavior verified");
     return 0;
 }
