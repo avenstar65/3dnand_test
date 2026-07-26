@@ -37,6 +37,16 @@ OBJECT_DECLARE_SIMPLE_TYPE(Q3NNandState, Q3N_NAND)
 #define Q3N_LDPC_STEPS                16U
 #define Q3N_LDPC_TOTAL_BYTES          1536U
 #define Q3N_METADATA_OOB_OFFSET       1537U
+#define Q3N_PHYSICAL_OOB_HEAD_OFFSET  Q3N_PAGE_SIZE
+#define Q3N_PHYSICAL_OOB_HEAD_SIZE    1U
+#define Q3N_PHYSICAL_LDPC_OFFSET      \
+    (Q3N_PHYSICAL_OOB_HEAD_OFFSET + Q3N_PHYSICAL_OOB_HEAD_SIZE)
+#define Q3N_PHYSICAL_LDPC_SIZE        Q3N_LDPC_TOTAL_BYTES
+#define Q3N_PHYSICAL_OOB_TAIL_OFFSET  \
+    (Q3N_PHYSICAL_LDPC_OFFSET + Q3N_PHYSICAL_LDPC_SIZE)
+#define Q3N_PHYSICAL_OOB_TAIL_SIZE    (Q3N_LOGICAL_OOB_SIZE - 1U)
+#define Q3N_PHYSICAL_PAGE_SIZE        \
+    (Q3N_PHYSICAL_OOB_TAIL_OFFSET + Q3N_PHYSICAL_OOB_TAIL_SIZE)
 #define Q3N_ECC_STEP_SIZE             1024U
 #define Q3N_ECC_STRENGTH              40U
 #define Q3N_OOB_SIZE                  Q3N_PHYSICAL_OOB_SIZE
@@ -45,8 +55,20 @@ OBJECT_DECLARE_SIMPLE_TYPE(Q3NNandState, Q3N_NAND)
 #error "Q3N page must contain one LDPC step per ECC step"
 #endif
 
-#if 1U + Q3N_LDPC_TOTAL_BYTES + 127U != Q3N_PHYSICAL_OOB_SIZE
-#error "Q3N physical OOB layout must be BBM + LDPC + metadata"
+#if Q3N_PHYSICAL_OOB_HEAD_OFFSET != 0x4000U
+#error "Q3N physical OOB head must follow the main page"
+#endif
+
+#if Q3N_PHYSICAL_LDPC_OFFSET != 0x4001U
+#error "Q3N physical LDPC must follow the OOB head"
+#endif
+
+#if Q3N_PHYSICAL_OOB_TAIL_OFFSET != 0x4601U
+#error "Q3N physical OOB tail must follow LDPC"
+#endif
+
+#if Q3N_PHYSICAL_PAGE_SIZE != 0x4680U
+#error "Q3N physical page size must include main, OOB, and LDPC"
 #endif
 
 #if Q3N_LOGICAL_OOB_SIZE != 1U + 127U

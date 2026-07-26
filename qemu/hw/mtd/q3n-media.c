@@ -48,8 +48,10 @@ typedef struct Q3NMediaHeader {
 } Q3NMediaHeader;
 
 QEMU_BUILD_BUG_ON(sizeof(Q3NMediaHeader) != Q3N_MEDIA_HEADER_SIZE);
-QEMU_BUILD_BUG_ON(Q3N_METADATA_OOB_OFFSET + Q3N_LOGICAL_OOB_SIZE - 1 !=
-                  Q3N_PHYSICAL_OOB_SIZE);
+QEMU_BUILD_BUG_ON(Q3N_PHYSICAL_OOB_HEAD_OFFSET != 0x4000U);
+QEMU_BUILD_BUG_ON(Q3N_PHYSICAL_LDPC_OFFSET != 0x4001U);
+QEMU_BUILD_BUG_ON(Q3N_PHYSICAL_OOB_TAIL_OFFSET != 0x4601U);
+QEMU_BUILD_BUG_ON(Q3N_PHYSICAL_PAGE_SIZE != 0x4680U);
 
 struct Q3NMedia {
     BlockBackend *blk;
@@ -86,28 +88,45 @@ static uint64_t q3n_media_overlay_slot_offset(const Q3NMedia *m,
            q3n_media_page_index(m, block, page) * m->overlay_stride;
 }
 
+/* Q3N_MEDIA_LAYOUT_HELPERS_BEGIN */
+static void q3n_media_extract_logical_oob(const uint8_t *page,
+                                          uint8_t *logical)
+{
+    logical[0] = page[Q3N_PHYSICAL_OOB_HEAD_OFFSET];
+    memcpy(logical + 1, page + Q3N_PHYSICAL_OOB_TAIL_OFFSET,
+           Q3N_PHYSICAL_OOB_TAIL_SIZE);
+}
+
+static void q3n_media_merge_logical_oob(uint8_t *page,
+                                        const uint8_t *logical)
+{
+    q3n_media_merge_program(page + Q3N_PHYSICAL_OOB_HEAD_OFFSET,
+                            logical, Q3N_PHYSICAL_OOB_HEAD_SIZE);
+    q3n_media_merge_program(page + Q3N_PHYSICAL_OOB_TAIL_OFFSET,
+                            logical + 1, Q3N_PHYSICAL_OOB_TAIL_SIZE);
+}
+
+static bool q3n_media_logical_oob_matches(const uint8_t *page,
+                                          const uint8_t *logical)
+{
+    uint8_t stored[Q3N_LOGICAL_OOB_SIZE];
+
+    q3n_media_extract_logical_oob(page, stored);
+    return !memcmp(stored, logical, sizeof(stored));
+}
+/* Q3N_MEDIA_LAYOUT_HELPERS_END */
+
 static int q3n_media_read_bbm(Q3NMedia *m, uint32_t block, uint8_t *marker)
 {
+    uint8_t logical_oob[Q3N_LOGICAL_OOB_SIZE];
     int ret;
 
-    ret = blk_pread(m->blk,
-                    q3n_media_slot_offset(m, block, 0) + m->page_size +
-                    Q3N_BBM_OOB_OFFSET,
-                    1, marker, 0);
+    ret = q3n_media_read_logical_oob(m, block, 0, logical_oob);
     if (ret < 0) {
         return ret;
     }
-    q3n_media_invert(marker, 1);
+    *marker = logical_oob[0];
     return 0;
-}
-
-static int q3n_media_write_bbm(Q3NMedia *m, uint32_t block, uint8_t marker)
-{
-    q3n_media_invert(&marker, 1);
-    return blk_pwrite(m->blk,
-                      q3n_media_slot_offset(m, block, 0) + m->page_size +
-                      Q3N_BBM_OOB_OFFSET,
-                      1, &marker, 0);
 }
 
 static int q3n_media_write_header(Q3NMedia *m)
@@ -161,9 +180,8 @@ static bool q3n_media_calculate_layout(Q3NMedia *m)
         return false;
     }
     m->page_slots_offset = Q3N_MEDIA_HEADER_SIZE;
-    if (uadd64_overflow(m->page_size, Q3N_PHYSICAL_OOB_SIZE,
-                        &m->page_stride) ||
-        umul64_overflow(m->page_count, m->page_stride, &page_slots_end) ||
+    m->page_stride = Q3N_PHYSICAL_PAGE_SIZE;
+    if (umul64_overflow(m->page_count, m->page_stride, &page_slots_end) ||
         uadd64_overflow(m->page_slots_offset, page_slots_end,
                         &page_slots_end) ||
         !q3n_media_align_up(page_slots_end, Q3N_MEDIA_HEADER_SIZE,
@@ -320,7 +338,7 @@ void q3n_media_close(Q3NMedia *m)
 }
 
 int q3n_media_read_page(Q3NMedia *m, uint32_t block, uint32_t page,
-                        uint8_t *data, uint8_t *physical_oob,
+                        uint8_t *data, uint8_t *ldpc,
                         uint8_t *main_overlay, uint8_t *ldpc_overlay)
 {
     uint64_t overlay_slot;
@@ -336,13 +354,13 @@ int q3n_media_read_page(Q3NMedia *m, uint32_t block, uint32_t page,
         return ret;
     }
     q3n_media_invert(data, m->page_size);
-    if (physical_oob) {
-        ret = blk_pread(m->blk, slot + m->page_size,
-                        m->physical_oob_size, physical_oob, 0);
+    if (ldpc) {
+        ret = blk_pread(m->blk, slot + Q3N_PHYSICAL_LDPC_OFFSET,
+                        Q3N_PHYSICAL_LDPC_SIZE, ldpc, 0);
         if (ret < 0) {
             return ret;
         }
-        q3n_media_invert(physical_oob, m->physical_oob_size);
+        q3n_media_invert(ldpc, Q3N_PHYSICAL_LDPC_SIZE);
     }
 
     overlay_slot = q3n_media_overlay_slot_offset(m, block, page);
@@ -365,9 +383,70 @@ int q3n_media_read_page(Q3NMedia *m, uint32_t block, uint32_t page,
     return 0;
 }
 
+int q3n_media_read_logical_oob(Q3NMedia *m, uint32_t block, uint32_t page,
+                               uint8_t logical_oob[Q3N_LOGICAL_OOB_SIZE])
+{
+    uint8_t *storage;
+    uint64_t slot;
+    int ret;
+
+    if (block >= m->block_count || page >= m->pages_per_block) {
+        return -EINVAL;
+    }
+    storage = g_malloc(m->page_stride);
+    slot = q3n_media_slot_offset(m, block, page);
+    ret = blk_pread(m->blk, slot, m->page_stride, storage, 0);
+    if (ret < 0) {
+        goto out;
+    }
+    q3n_media_invert(storage, m->page_stride);
+    q3n_media_extract_logical_oob(storage, logical_oob);
+out:
+    g_free(storage);
+    return ret;
+}
+
+int q3n_media_program_logical_oob(Q3NMedia *m, uint32_t block,
+                                  uint32_t page,
+                                  const uint8_t logical_oob
+                                      [Q3N_LOGICAL_OOB_SIZE])
+{
+    uint64_t slot;
+    uint8_t *storage;
+    uint8_t marker;
+    int ret;
+
+    if (block >= m->block_count || page >= m->pages_per_block) {
+        return -EINVAL;
+    }
+    ret = q3n_media_read_bbm(m, block, &marker);
+    if (ret < 0) {
+        return ret;
+    }
+    storage = g_malloc(m->page_stride);
+    slot = q3n_media_slot_offset(m, block, page);
+    ret = blk_pread(m->blk, slot, m->page_stride, storage, 0);
+    if (ret < 0) {
+        goto out;
+    }
+    q3n_media_invert(storage, m->page_stride);
+    if (marker != Q3N_BBM_GOOD) {
+        ret = page == 0 && q3n_media_logical_oob_matches(storage,
+                                                           logical_oob) ?
+            0 : -EIO;
+        goto out;
+    }
+    q3n_media_merge_logical_oob(storage, logical_oob);
+    q3n_media_invert(storage, m->page_stride);
+    ret = blk_pwrite(m->blk, slot, m->page_stride, storage, 0);
+out:
+    g_free(storage);
+    return ret;
+}
+
 int q3n_media_program_page(Q3NMedia *m, uint32_t block, uint32_t page,
                            const uint8_t *data,
-                           const uint8_t *physical_oob)
+                           const uint8_t *ldpc)
 {
     uint64_t slot;
     uint8_t *storage;
@@ -393,9 +472,9 @@ int q3n_media_program_page(Q3NMedia *m, uint32_t block, uint32_t page,
     }
     q3n_media_invert(storage, m->page_stride);
     q3n_media_merge_program(storage, data, m->page_size);
-    if (physical_oob) {
-        q3n_media_merge_program(storage + m->page_size, physical_oob,
-                                m->physical_oob_size);
+    if (ldpc) {
+        q3n_media_merge_program(storage + Q3N_PHYSICAL_LDPC_OFFSET, ldpc,
+                                Q3N_PHYSICAL_LDPC_SIZE);
     }
     q3n_media_invert(storage, m->page_stride);
     ret = blk_pwrite(m->blk, slot, m->page_stride, storage, 0);
@@ -496,28 +575,5 @@ int q3n_media_get_block_status(Q3NMedia *m, uint32_t block,
         return ret;
     }
     *status = marker != Q3N_BBM_GOOD ? Q3N_BLOCK_STATUS_BAD : 0;
-    return 0;
-}
-
-int q3n_media_mark_bad(Q3NMedia *m, uint32_t block)
-{
-    uint8_t marker;
-    int ret;
-
-    if (block >= m->block_count) {
-        return -EINVAL;
-    }
-    ret = q3n_media_read_bbm(m, block, &marker);
-    if (ret < 0) {
-        return ret;
-    }
-    if (marker != Q3N_BBM_GOOD) {
-        return 0;
-    }
-    marker = Q3N_BBM_BAD;
-    ret = q3n_media_write_bbm(m, block, marker);
-    if (ret < 0) {
-        return ret;
-    }
     return 0;
 }

@@ -9,6 +9,16 @@
 #define Q3N_LDPC_BYTES_PER_STEP    96U
 #define Q3N_LDPC_STEPS             16U
 #define Q3N_LDPC_TOTAL_BYTES       1536U
+#define Q3N_LOGICAL_OOB_SIZE        128U
+#define Q3N_PHYSICAL_OOB_HEAD_OFFSET  Q3N_PAGE_SIZE
+#define Q3N_PHYSICAL_OOB_HEAD_SIZE    1U
+#define Q3N_PHYSICAL_LDPC_OFFSET      (Q3N_PHYSICAL_OOB_HEAD_OFFSET + 1U)
+#define Q3N_PHYSICAL_LDPC_SIZE        Q3N_LDPC_TOTAL_BYTES
+#define Q3N_PHYSICAL_OOB_TAIL_OFFSET  \
+        (Q3N_PHYSICAL_LDPC_OFFSET + Q3N_PHYSICAL_LDPC_SIZE)
+#define Q3N_PHYSICAL_OOB_TAIL_SIZE    127U
+#define Q3N_PHYSICAL_PAGE_SIZE        \
+        (Q3N_PHYSICAL_OOB_TAIL_OFFSET + Q3N_PHYSICAL_OOB_TAIL_SIZE)
 
 enum {
     Q3N_FAULT_REGION_MAIN = 0,
@@ -16,6 +26,15 @@ enum {
 };
 
 #include "q3n-media-overlay.h"
+#include "q3n-media-layout-helpers.inc"
+
+static void assert_all_equal(const uint8_t *bytes, uint32_t first,
+                             uint32_t end, uint8_t expected)
+{
+    for (uint32_t i = first; i < end; i++) {
+        assert(bytes[i] == expected);
+    }
+}
 
 static void assert_single_toggle(uint32_t step, uint32_t region,
                                  uint32_t first_bit,
@@ -77,6 +96,37 @@ static void test_sparse_zero_decodes_as_erased(void)
     assert(q3n_media_is_erased(stored, sizeof(stored)));
 }
 
+static void test_logical_oob_merge_preserves_main_and_ldpc(void)
+{
+    uint8_t page[Q3N_PHYSICAL_PAGE_SIZE];
+    uint8_t logical_oob[Q3N_LOGICAL_OOB_SIZE];
+    uint8_t roundtrip[Q3N_LOGICAL_OOB_SIZE];
+    const uint8_t main_sentinel = 0xa5;
+    const uint8_t ldpc_sentinel = 0x5a;
+
+    memset(page, 0xff, sizeof(page));
+    memset(page, main_sentinel, Q3N_PAGE_SIZE);
+    memset(page + Q3N_PHYSICAL_LDPC_OFFSET, ldpc_sentinel,
+           Q3N_PHYSICAL_LDPC_SIZE);
+    for (uint32_t i = 0; i < sizeof(logical_oob); i++) {
+        logical_oob[i] = (uint8_t)(i ^ 0x5a);
+    }
+
+    q3n_media_merge_logical_oob(page, logical_oob);
+
+    assert(Q3N_PHYSICAL_OOB_HEAD_OFFSET == 0x4000U);
+    assert(Q3N_PHYSICAL_LDPC_OFFSET == 0x4001U);
+    assert(Q3N_PHYSICAL_OOB_TAIL_OFFSET == 0x4601U);
+    assert(Q3N_PHYSICAL_PAGE_SIZE == 0x4680U);
+    assert(page[0x4000] == logical_oob[0]);
+    assert(!memcmp(page + 0x4601, logical_oob + 1, 127));
+    assert_all_equal(page, 0, 0x4000, main_sentinel);
+    assert_all_equal(page, 0x4001, 0x4601, ldpc_sentinel);
+    q3n_media_extract_logical_oob(page, roundtrip);
+    assert(!memcmp(roundtrip, logical_oob, sizeof(logical_oob)));
+    assert(q3n_media_logical_oob_matches(page, logical_oob));
+}
+
 int main(void)
 {
     static const uint32_t steps[] = { 0, 1, 2, 15 };
@@ -119,6 +169,7 @@ int main(void)
     test_merge_program_is_bitwise_and();
     test_erased_detection_reads_bytes();
     test_sparse_zero_decodes_as_erased();
+    test_logical_oob_merge_preserves_main_and_ldpc();
 
     puts("ok: q3n media overlay mapping verified");
     return 0;
