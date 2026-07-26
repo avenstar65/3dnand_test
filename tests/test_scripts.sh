@@ -248,6 +248,13 @@ assert_contains rootfs/profile.d/mtd.sh \
   'mtd_badblock set "\$mtd_dev" "\$markbad_offset".*return 1'
 assert_contains rootfs/profile.d/mtd.sh \
   'mtd_badblock page-read raw "\$mtd_dev" "\$markbad_offset"'
+assert_not_contains rootfs/profile.d/mtd.sh \
+  'if=/dev/zero of=/tmp/q3n-markbad-main\.bin'
+assert_contains rootfs/profile.d/mtd.sh \
+  'markbad_expected_digest=00ae035cc27f2bf984c1fee26bf8cdeecd7245b4c9e115384ffd429bf79c1b1b'
+assert_contains rootfs/profile.d/mtd.sh '0x69 100 1 0xa5'
+assert_contains rootfs/profile.d/mtd.sh 'markbad_main_digest_before'
+assert_contains rootfs/profile.d/mtd.sh 'markbad_main_digest_after'
 assert_contains rootfs/profile.d/mtd.sh \
   'cmp /tmp/q3n-markbad-main-before\.bin /tmp/q3n-markbad-main-after\.bin'
 assert_not_contains rootfs/profile.d/mtd.sh 'error -EIO: failed to register MTD'

@@ -530,22 +530,37 @@ mtd_q3n_oob_bbm_test() {
   # already-programmed first-page main area.
   markbad_offset=$((8 * erasesize))
   markbad_page_seek=$((markbad_offset / writesize))
+  markbad_expected_digest=00ae035cc27f2bf984c1fee26bf8cdeecd7245b4c9e115384ffd429bf79c1b1b
   flash_erase -q "$mtd_dev" "$markbad_offset" 1 || return 1
-  dd if=/dev/zero of=/tmp/q3n-markbad-main.bin bs="$writesize" count=1 \
-    2>/dev/null || return 1
-  dd if=/tmp/q3n-markbad-main.bin of="$mtd_dev" bs="$writesize" count=1 \
-    seek="$markbad_page_seek" 2>/dev/null || return 1
+  mtd_badblock page-write raw "$mtd_dev" "$markbad_offset" \
+    0x69 100 1 0xa5 || return 1
+  mtd_badblock page-read raw "$mtd_dev" "$markbad_offset" \
+    0x69 100 1 0xa5 || return 1
   dd if="$mtd_dev" of=/tmp/q3n-markbad-main-before.bin bs="$writesize" \
     count=1 skip="$markbad_page_seek" 2>/dev/null || return 1
+  markbad_main_digest_before=$(
+    sha256sum /tmp/q3n-markbad-main-before.bin | awk '{print $1}'
+  ) || return 1
+  [ "$markbad_main_digest_before" = "$markbad_expected_digest" ] || {
+    echo "q3n OOB/BBM test: pre-mark main digest mismatch"
+    return 1
+  }
   mtd_badblock set "$mtd_dev" "$markbad_offset" >/dev/null || return 1
   [ "$(mtd_badblock oob-read raw "$mtd_dev" "$markbad_offset" 0 1)" = "00" ] || {
     echo "q3n OOB/BBM test: MEMSETBADBLOCK did not program BBM 00"
     return 1
   }
   mtd_badblock page-read raw "$mtd_dev" "$markbad_offset" \
-    0x00 0 1 0x00 || return 1
+    0x69 100 1 0xa5 || return 1
   dd if="$mtd_dev" of=/tmp/q3n-markbad-main-after.bin bs="$writesize" \
     count=1 skip="$markbad_page_seek" 2>/dev/null || return 1
+  markbad_main_digest_after=$(
+    sha256sum /tmp/q3n-markbad-main-after.bin | awk '{print $1}'
+  ) || return 1
+  [ "$markbad_main_digest_after" = "$markbad_expected_digest" ] || {
+    echo "q3n OOB/BBM test: post-mark main digest mismatch"
+    return 1
+  }
   cmp /tmp/q3n-markbad-main-before.bin /tmp/q3n-markbad-main-after.bin || {
     echo "q3n OOB/BBM test: markbad changed first-page main data"
     return 1
@@ -555,7 +570,7 @@ mtd_q3n_oob_bbm_test() {
     return 1
   }
   mtd_badblock set "$mtd_dev" "$markbad_offset" >/dev/null || return 1
-  echo "q3n OOB-only markbad main preservation passed"
+  echo "q3n OOB-only markbad main preservation passed: digest=$markbad_main_digest_after"
   echo "q3n OOB/BBM test passed: logical_oob=128 bbm=00"
 }
 
