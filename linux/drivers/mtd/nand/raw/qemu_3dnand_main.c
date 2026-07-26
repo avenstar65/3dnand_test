@@ -930,29 +930,28 @@ static int qemu_3dnand_mtd_read_oob(struct mtd_info *mtd, loff_t from,
 			ret = -EBUSY;
 			break;
 		}
-		if (data_chunk)
+		if (data_chunk) {
 			ret = qemu_3dnand_read_phys_page_locked(q3n, block, page,
 				q3n->page_buf, Q3N_OP_FOREGROUND, &ecc);
-		if (!ret)
-			ret = qemu_3dnand_read_phys_oob_locked(q3n, block, page,
-				logical_oob, Q3N_OP_FOREGROUND);
+			if (ret)
+				break;
+			qemu_3dnand_account_foreground_ecc(q3n, ops->stats, &ecc);
+			q3n_ecc_accumulate(&total, &ecc);
+			memcpy(ops->datbuf + data_done,
+			       q3n->page_buf + column, data_chunk);
+			data_done += data_chunk;
+		}
+		ret = qemu_3dnand_read_phys_oob_locked(q3n, block, page,
+			logical_oob, Q3N_OP_FOREGROUND);
 		if (ret)
 			break;
 		if (data_chunk && ecc.uncorrectable) {
 			ret = -EBADMSG;
 			break;
 		}
-		if (data_chunk) {
-			qemu_3dnand_account_foreground_ecc(q3n, ops->stats, &ecc);
-			q3n_ecc_accumulate(&total, &ecc);
-		}
-		if (data_chunk)
-			memcpy(ops->datbuf + data_done,
-			       q3n->page_buf + column, data_chunk);
 		if (oob_chunk)
 			memcpy(ops->oobbuf + oob_done, logical_oob + ooboffs,
 			       oob_chunk);
-		data_done += data_chunk;
 		oob_done += oob_chunk;
 		logical_page++;
 		column = 0;
@@ -993,7 +992,7 @@ static int qemu_3dnand_program_logical_page(struct qemu_3dnand *q3n,
 	mutex_unlock(&q3n->mtd_lock);
 	if (ret)
 		return ret;
-	if (page % Q3N_STRIPE_PAGES == Q3N_DATA_PAGES - 1) {
+	if (data && page % Q3N_STRIPE_PAGES == Q3N_DATA_PAGES - 1) {
 		ret = qemu_3dnand_reserve_parity(q3n);
 		if (ret)
 			return ret;

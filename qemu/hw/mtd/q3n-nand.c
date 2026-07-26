@@ -131,6 +131,12 @@ static bool q3n_oob_transfer_valid(uint32_t data_count, uint32_t oob_len,
     return oob_len == Q3N_LOGICAL_OOB_SIZE &&
            (!program || data_count >= Q3N_LOGICAL_OOB_SIZE);
 }
+
+static void q3n_reset_oob_staging(uint32_t *data_pos, uint32_t *data_count)
+{
+    *data_pos = 0;
+    *data_count = 0;
+}
 /* Q3N_CONTROLLER_HELPERS_END */
 
 typedef struct Q3NStats {
@@ -739,6 +745,7 @@ static void q3n_mmio_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     case Q3N_REG_OOB_LEN:
         s->oob_len = value;
+        q3n_reset_oob_staging(&s->data_pos, &s->data_count);
         break;
     case Q3N_REG_OP_CLASS:
         if (value <= Q3N_OP_PARITY_WRITE) {

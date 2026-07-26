@@ -180,6 +180,30 @@ static void test_oob_transfers_are_independent_of_main_length(void)
     assert(!q3n_oob_transfer_valid(0, Q3N_LOGICAL_OOB_SIZE - 1, false));
 }
 
+static void test_oob_staging_replaces_completed_main_transfer(void)
+{
+    uint8_t staging[Q3N_PAGE_SIZE + Q3N_LOGICAL_OOB_SIZE];
+    uint8_t logical_oob[Q3N_LOGICAL_OOB_SIZE];
+    uint32_t data_pos = Q3N_PAGE_SIZE;
+    uint32_t data_count = Q3N_PAGE_SIZE;
+
+    memset(staging, 0xa5, sizeof(staging));
+    for (uint32_t i = 0; i < sizeof(logical_oob); i++) {
+        logical_oob[i] = (uint8_t)(i ^ 0x5a);
+    }
+
+    q3n_reset_oob_staging(&data_pos, &data_count);
+    assert(data_pos == 0);
+    assert(data_count == 0);
+    memcpy(staging + data_pos, logical_oob, sizeof(logical_oob));
+    data_pos += sizeof(logical_oob);
+    data_count = data_pos;
+
+    assert(data_count == Q3N_LOGICAL_OOB_SIZE);
+    assert(!memcmp(staging, logical_oob, sizeof(logical_oob)));
+    assert(staging[Q3N_LOGICAL_OOB_SIZE] == 0xa5);
+}
+
 static void test_physical_page_oob_mapping_preserves_main_and_ldpc(void)
 {
     uint8_t physical_page[Q3N_PHYSICAL_PAGE_SIZE];
@@ -221,6 +245,7 @@ int main(void)
     test_decode_aggregates_steps();
     test_ldpc_mismatch_is_uncorrectable();
     test_oob_transfers_are_independent_of_main_length();
+    test_oob_staging_replaces_completed_main_transfer();
     test_physical_page_oob_mapping_preserves_main_and_ldpc();
     puts("ok: q3n controller OOB and LDPC behavior verified");
     return 0;

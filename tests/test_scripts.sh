@@ -366,6 +366,10 @@ assert_function_not_contains qemu/hw/mtd/q3n-nand.c q3n_cmd_read_page \
   'q3n_media_read_logical_oob'
 assert_function_not_contains qemu/hw/mtd/q3n-nand.c q3n_cmd_program_page \
   'q3n_media_program_logical_oob'
+assert_function_contains qemu/hw/mtd/q3n-nand.c q3n_mmio_write \
+  'q3n_reset_oob_staging'
+assert_contains tests/test_q3n_controller.c \
+  'test_oob_staging_replaces_completed_main_transfer'
 for header in \
   linux/drivers/mtd/nand/raw/qemu_3dnand.h \
   qemu/include/hw/mtd/q3n-nand.h; do
@@ -562,6 +566,12 @@ assert_function_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
   qemu_3dnand_program_phys_oob_locked 'i < Q3N_LOGICAL_OOB_SIZE'
 assert_function_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
   qemu_3dnand_program_phys_oob_locked 'Q3N_PAGE_SIZE|q3n->page_size'
+assert_function_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+  qemu_3dnand_program_logical_page \
+  'if \(data && page % Q3N_STRIPE_PAGES == Q3N_DATA_PAGES - 1\)'
+assert_function_precedes linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+  qemu_3dnand_mtd_read_oob 'data_done \+= data_chunk' \
+  'qemu_3dnand_read_phys_oob_locked'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_READ_PAGE_OOB'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_PROGRAM_PAGE_OOB'
 assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'tombstone'
