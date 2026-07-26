@@ -141,7 +141,6 @@ enum q3n_cmd {
     Q3N_CMD_READ_PAGE_OOB = 6,
     Q3N_CMD_PROGRAM_PAGE_OOB = 7,
     Q3N_CMD_GET_BLOCK_STATUS = 8,
-    Q3N_CMD_MARK_BAD_BLOCK = 9,
 };
 
 enum q3n_status {

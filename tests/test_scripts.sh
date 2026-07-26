@@ -294,11 +294,16 @@ for symbol in \
   Q3N_CAP_PERSISTENT_MEDIA \
   Q3N_CAP_BAD_BLOCK_MARKER \
   Q3N_CMD_GET_BLOCK_STATUS \
-  Q3N_CMD_MARK_BAD_BLOCK \
   Q3N_REG_BLOCK_STATUS; do
   assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h "$symbol"
   assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
 done
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h \
+  'Q3N_CMD_MARK_BAD_BLOCK'
+assert_not_contains qemu/include/hw/mtd/q3n-nand.h 'Q3N_CMD_MARK_BAD_BLOCK'
+assert_not_contains qemu/hw/mtd/q3n-nand.c 'Q3N_CMD_MARK_BAD_BLOCK'
+assert_not_contains qemu/hw/mtd/q3n-nand.c 'q3n_cmd_mark_bad_block'
+assert_not_contains qemu/hw/mtd/q3n-nand.c 'q3n_media_mark_bad'
 for header in \
   linux/drivers/mtd/nand/raw/qemu_3dnand.h \
   qemu/include/hw/mtd/q3n-nand.h; do
@@ -338,8 +343,11 @@ assert_contains qemu/hw/mtd/q3n-nand.c 'stats\.parity_reads\+\+'
 assert_contains qemu/hw/mtd/q3n-nand.c 'stats\.parity_writes\+\+'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_inject_data_loss'
 assert_contains qemu/hw/mtd/q3n-nand.c 'faults_injected'
-assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_logical_to_physical_oob'
-assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_physical_to_logical_oob'
+assert_not_contains qemu/hw/mtd/q3n-nand.c 'q3n_logical_to_physical_oob'
+assert_not_contains qemu/hw/mtd/q3n-nand.c 'q3n_physical_to_logical_oob'
+assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_media_read_logical_oob'
+assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_media_program_logical_oob'
+assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_oob_transfer_valid'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_generate_ldpc_step'
 assert_contains qemu/hw/mtd/q3n-nand.c 'q3n_decode_ldpc'
 assert_contains qemu/hw/mtd/q3n-nand.c 'ecc_max_bitflips'

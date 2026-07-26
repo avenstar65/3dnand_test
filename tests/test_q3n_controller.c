@@ -5,14 +5,10 @@
 #include <string.h>
 
 #define Q3N_PAGE_SIZE              16384U
-#define Q3N_PHYSICAL_OOB_SIZE      1664U
 #define Q3N_LOGICAL_OOB_SIZE       128U
-#define Q3N_BBM_OOB_OFFSET         0U
-#define Q3N_LDPC_OOB_OFFSET        1U
 #define Q3N_LDPC_BYTES_PER_STEP    96U
 #define Q3N_LDPC_STEPS             16U
 #define Q3N_LDPC_TOTAL_BYTES       1536U
-#define Q3N_METADATA_OOB_OFFSET    1537U
 #define Q3N_ECC_STEP_SIZE          1024U
 #define Q3N_ECC_STRENGTH           40U
 #define Q3N_ECC_NO_FAILED_STEP     UINT32_MAX
@@ -50,40 +46,15 @@ static void set_first_bits(uint8_t *overlay, uint32_t count)
     }
 }
 
-static void test_oob_mapping_preserves_ldpc(void)
-{
-    uint8_t logical[Q3N_LOGICAL_OOB_SIZE];
-    uint8_t physical[Q3N_PHYSICAL_OOB_SIZE];
-    uint8_t roundtrip[Q3N_LOGICAL_OOB_SIZE];
-
-    for (uint32_t i = 0; i < Q3N_LOGICAL_OOB_SIZE; i++) {
-        logical[i] = (uint8_t)(i ^ 0x5a);
-    }
-    memset(physical, 0xa5, sizeof(physical));
-    q3n_logical_to_physical_oob(logical, physical);
-
-    assert(physical[Q3N_BBM_OOB_OFFSET] == logical[0]);
-    assert(!memcmp(physical + Q3N_METADATA_OOB_OFFSET, logical + 1,
-                   Q3N_LOGICAL_OOB_SIZE - 1));
-    for (uint32_t i = Q3N_LDPC_OOB_OFFSET;
-         i < Q3N_METADATA_OOB_OFFSET; i++) {
-        assert(physical[i] == 0xa5);
-    }
-
-    memset(roundtrip, 0, sizeof(roundtrip));
-    q3n_physical_to_logical_oob(physical, roundtrip);
-    assert(!memcmp(roundtrip, logical, sizeof(logical)));
-}
-
 static Q3NEccResult decode_erased(const uint8_t *main_overlay,
                                   const uint8_t *ldpc_overlay)
 {
     uint8_t data[Q3N_PAGE_SIZE];
-    uint8_t physical_oob[Q3N_PHYSICAL_OOB_SIZE];
+    uint8_t ldpc[Q3N_LDPC_TOTAL_BYTES];
 
     memset(data, 0xff, sizeof(data));
-    memset(physical_oob, 0xff, sizeof(physical_oob));
-    return q3n_decode_ldpc(0, data, physical_oob, main_overlay,
+    memset(ldpc, 0xff, sizeof(ldpc));
+    return q3n_decode_ldpc(0, data, ldpc, main_overlay,
                            ldpc_overlay, true);
 }
 
@@ -146,34 +117,45 @@ static void test_decode_aggregates_steps(void)
 static void test_ldpc_mismatch_is_uncorrectable(void)
 {
     uint8_t data[Q3N_PAGE_SIZE];
-    uint8_t physical_oob[Q3N_PHYSICAL_OOB_SIZE];
+    uint8_t ldpc[Q3N_LDPC_TOTAL_BYTES];
     uint8_t main_overlay[Q3N_PAGE_SIZE] = { 0 };
     uint8_t ldpc_overlay[Q3N_LDPC_TOTAL_BYTES] = { 0 };
     Q3NEccResult result;
 
     memset(data, 0x3c, sizeof(data));
-    memset(physical_oob, 0xff, sizeof(physical_oob));
+    memset(ldpc, 0xff, sizeof(ldpc));
     for (uint32_t step = 0; step < Q3N_LDPC_STEPS; step++) {
         q3n_generate_ldpc_step(7, step,
                                data + step * Q3N_ECC_STEP_SIZE,
-                               physical_oob + Q3N_LDPC_OOB_OFFSET +
-                               step * Q3N_LDPC_BYTES_PER_STEP);
+                               ldpc + step * Q3N_LDPC_BYTES_PER_STEP);
     }
-    physical_oob[Q3N_LDPC_OOB_OFFSET + Q3N_LDPC_BYTES_PER_STEP] ^= 1;
+    ldpc[Q3N_LDPC_BYTES_PER_STEP] ^= 1;
 
-    result = q3n_decode_ldpc(7, data, physical_oob, main_overlay,
+    result = q3n_decode_ldpc(7, data, ldpc, main_overlay,
                              ldpc_overlay, false);
     assert(result.status == Q3N_ECC_STATUS_UNCORRECTABLE);
     assert(result.failed_step == 1);
     assert(result.failed_steps == 1);
 }
 
+static void test_oob_transfers_are_independent_of_main_length(void)
+{
+    assert(q3n_oob_transfer_valid(0, Q3N_LOGICAL_OOB_SIZE, false));
+    assert(q3n_oob_transfer_valid(Q3N_LOGICAL_OOB_SIZE,
+                                  Q3N_LOGICAL_OOB_SIZE, true));
+    assert(!q3n_oob_transfer_valid(Q3N_LOGICAL_OOB_SIZE - 1,
+                                   Q3N_LOGICAL_OOB_SIZE, true));
+    assert(!q3n_oob_transfer_valid(Q3N_LOGICAL_OOB_SIZE + 1,
+                                   Q3N_LOGICAL_OOB_SIZE, true));
+    assert(!q3n_oob_transfer_valid(0, Q3N_LOGICAL_OOB_SIZE - 1, false));
+}
+
 int main(void)
 {
-    test_oob_mapping_preserves_ldpc();
     test_decode_thresholds();
     test_decode_aggregates_steps();
     test_ldpc_mismatch_is_uncorrectable();
+    test_oob_transfers_are_independent_of_main_length();
     puts("ok: q3n controller OOB and LDPC behavior verified");
     return 0;
 }
