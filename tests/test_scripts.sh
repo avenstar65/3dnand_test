@@ -28,6 +28,42 @@ assert_not_contains() {
   ! grep -Eq -- "$pattern" "$repo_root/$file" || fail "$file unexpectedly contains pattern: $pattern"
 }
 
+function_body() {
+  file=$1
+  function=$2
+  sed -n "/^static void $function(/,/^}/p" "$repo_root/$file"
+}
+
+assert_function_contains() {
+  file=$1
+  function=$2
+  pattern=$3
+  function_body "$file" "$function" | grep -Eq -- "$pattern" ||
+    fail "$function in $file does not contain pattern: $pattern"
+}
+
+assert_function_not_contains() {
+  file=$1
+  function=$2
+  pattern=$3
+  ! function_body "$file" "$function" | grep -Eq -- "$pattern" ||
+    fail "$function in $file unexpectedly contains pattern: $pattern"
+}
+
+assert_function_precedes() {
+  file=$1
+  function=$2
+  first_pattern=$3
+  second_pattern=$4
+  body=$(function_body "$file" "$function")
+  first_line=$(printf '%s\n' "$body" | grep -n -m 1 -E -- "$first_pattern" |
+    cut -d: -f1) || fail "$function in $file does not contain pattern: $first_pattern"
+  second_line=$(printf '%s\n' "$body" | grep -n -m 1 -E -- "$second_pattern" |
+    cut -d: -f1) || fail "$function in $file does not contain pattern: $second_pattern"
+  [ "$first_line" -lt "$second_line" ] ||
+    fail "$function in $file does not place $first_pattern before $second_pattern"
+}
+
 for file in \
   Dockerfile \
   .dockerignore \
@@ -304,6 +340,32 @@ assert_not_contains qemu/include/hw/mtd/q3n-nand.h 'Q3N_CMD_MARK_BAD_BLOCK'
 assert_not_contains qemu/hw/mtd/q3n-nand.c 'Q3N_CMD_MARK_BAD_BLOCK'
 assert_not_contains qemu/hw/mtd/q3n-nand.c 'q3n_cmd_mark_bad_block'
 assert_not_contains qemu/hw/mtd/q3n-nand.c 'q3n_media_mark_bad'
+assert_function_contains qemu/hw/mtd/q3n-nand.c q3n_cmd_read_page_oob \
+  'data_count = Q3N_LOGICAL_OOB_SIZE'
+assert_function_not_contains qemu/hw/mtd/q3n-nand.c q3n_cmd_read_page_oob \
+  'Q3N_PAGE_SIZE'
+assert_function_not_contains qemu/hw/mtd/q3n-nand.c q3n_cmd_read_page_oob \
+  'q3n_clear_ecc_result'
+assert_function_not_contains qemu/hw/mtd/q3n-nand.c q3n_cmd_read_page_oob \
+  'q3n_decode_ldpc'
+assert_function_not_contains qemu/hw/mtd/q3n-nand.c q3n_cmd_program_page_oob \
+  'Q3N_PAGE_SIZE'
+assert_function_not_contains qemu/hw/mtd/q3n-nand.c q3n_cmd_program_page_oob \
+  'q3n_generate_ldpc_step'
+assert_function_not_contains qemu/hw/mtd/q3n-nand.c q3n_cmd_program_page_oob \
+  'q3n_program_page\('
+assert_function_contains qemu/hw/mtd/q3n-nand.c q3n_cmd_program_page_oob \
+  's->stats.page_programs\+\+'
+assert_function_precedes qemu/hw/mtd/q3n-nand.c q3n_cmd_program_page_oob \
+  'q3n_media_program_logical_oob' 's->stats.page_programs\+\+'
+assert_function_precedes qemu/hw/mtd/q3n-nand.c q3n_cmd_program_page_oob \
+  'q3n_media_program_logical_oob' 's->stats.parity_writes\+\+'
+assert_function_precedes qemu/hw/mtd/q3n-nand.c q3n_cmd_program_page_oob \
+  'q3n_media_program_logical_oob' 's->stats.fg_ops\+\+'
+assert_function_not_contains qemu/hw/mtd/q3n-nand.c q3n_cmd_read_page \
+  'q3n_media_read_logical_oob'
+assert_function_not_contains qemu/hw/mtd/q3n-nand.c q3n_cmd_program_page \
+  'q3n_media_program_logical_oob'
 for header in \
   linux/drivers/mtd/nand/raw/qemu_3dnand.h \
   qemu/include/hw/mtd/q3n-nand.h; do

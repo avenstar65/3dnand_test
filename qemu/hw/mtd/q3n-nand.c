@@ -129,7 +129,7 @@ static bool q3n_oob_transfer_valid(uint32_t data_count, uint32_t oob_len,
                                    bool program)
 {
     return oob_len == Q3N_LOGICAL_OOB_SIZE &&
-           (!program || data_count == Q3N_LOGICAL_OOB_SIZE);
+           (!program || data_count >= Q3N_LOGICAL_OOB_SIZE);
 }
 /* Q3N_CONTROLLER_HELPERS_END */
 
@@ -461,15 +461,17 @@ static void q3n_cmd_program_page_oob(Q3NNandState *s)
         return;
     }
 
-    if (s->op_class == Q3N_OP_PARITY_WRITE) {
-        s->stats.parity_writes++;
-    } else {
-        s->stats.fg_ops++;
-    }
     if (q3n_media_program_logical_oob(s->media, block, page,
                                       s->data_buf)) {
         q3n_finish_error(s);
         return;
+    }
+
+    s->stats.page_programs++;
+    if (s->op_class == Q3N_OP_PARITY_WRITE) {
+        s->stats.parity_writes++;
+    } else {
+        s->stats.fg_ops++;
     }
 
     q3n_finish_ok(s);

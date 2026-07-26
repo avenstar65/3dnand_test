@@ -145,8 +145,10 @@ static void test_oob_transfers_are_independent_of_main_length(void)
                                   Q3N_LOGICAL_OOB_SIZE, true));
     assert(!q3n_oob_transfer_valid(Q3N_LOGICAL_OOB_SIZE - 1,
                                    Q3N_LOGICAL_OOB_SIZE, true));
-    assert(!q3n_oob_transfer_valid(Q3N_LOGICAL_OOB_SIZE + 1,
-                                   Q3N_LOGICAL_OOB_SIZE, true));
+    assert(q3n_oob_transfer_valid(Q3N_LOGICAL_OOB_SIZE + 1,
+                                  Q3N_LOGICAL_OOB_SIZE, true));
+    assert(q3n_oob_transfer_valid(Q3N_PAGE_SIZE, Q3N_LOGICAL_OOB_SIZE,
+                                  true));
     assert(!q3n_oob_transfer_valid(0, Q3N_LOGICAL_OOB_SIZE - 1, false));
 }
 
