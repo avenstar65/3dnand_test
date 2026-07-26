@@ -89,15 +89,29 @@ OOB、坏块标记和 bitflip overlay 会在 QEMU 正常退出后保留。需要
 也可以用 `--nand-image PATH` 选择独立镜像。镜像是约 51 GiB 的固定布局 sparse
 raw 文件，实际只为 header、已写物理页和 overlay 分配空间。
 
+每个 `0x4680` B 物理页的精确布局为：
+
+```text
+0x0000..0x3fff main
+0x4000         OOB head / BBM / logical OOB[0]
+0x4001..0x4600 LDPC
+0x4601..0x467f OOB tail / logical OOB[1..127]
+```
+
+命令 6/7 各自只传输 128 B logical OOB，不携带 main，也不向 guest 暴露
+LDPC。Linux 标坏通过普通 OOB PROGRAM 将 logical OOB byte 0 编程为 `00`；
+没有专用 mark-bad 命令。OOB PROGRAM 保留 main 与 LDPC，main PROGRAM
+保留 OOB head/tail。
+
 原始介质跨重启持久性验收命令为：
 
 ```sh
 ./scripts/q3n-persistence-smoke.sh
 ```
 
-脚本执行两轮 guest，验证 raw main、OOB、坏块标记和 bitflip overlay 跨重启
-保留，以及坏块写擦拒绝。QEMU 不解释 `D0..D6,P` 布局；映射和运行期 parity
-状态始终由 Linux 驱动管理。
+脚本执行两轮 guest，验证通过 OOB PROGRAM 写入的 BBM、标坏前的 raw main
+摘要和 block-isbad 状态跨重启保留，并验证坏块写擦拒绝。QEMU 不解释
+`D0..D6,P` 布局；映射和运行期 parity 状态始终由 Linux 驱动管理。
 
 QEMU persists raw NAND bytes and bitflip overlays.  The driver does not
 restore Page-RAID runtime state after reload or VM restart in this phase.

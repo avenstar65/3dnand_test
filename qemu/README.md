@@ -32,7 +32,7 @@ Implemented base functions:
 | First-page `OOB[0]` bad-block marker | Implemented (`0xff` good, `0x00` bad) |
 | 25MiB data block erase | Implemented |
 | Basic page read/program/block erase commands | Implemented |
-| Combined main+OOB page read/program commands | Implemented |
+| Independent 128 B logical-OOB read/program commands | Implemented |
 | Arbitrary/repeated page program with NAND bytewise-AND semantics | Implemented |
 | MMIO data-loss fault injection | Implemented |
 | Basic media statistics | Implemented |
@@ -51,12 +51,12 @@ The MMIO interface is intentionally simple for the first bring-up:
 | --- | ---: | --- |
 | `Q3N_REG_ID` | `0x0000` | Returns `Q3N1` |
 | `Q3N_REG_STATUS` | `0x000c` | Ready/error status |
-| `Q3N_REG_CMD` | `0x0010` | Execute base commands and combined main+OOB page commands |
+| `Q3N_REG_CMD` | `0x0010` | Execute base, main-page, or logical-OOB commands |
 | `Q3N_REG_ADDR_LO/HI` | `0x0014/0x0018` | Physical byte address in the simulated media |
 | `Q3N_REG_LEN` | `0x001c` | Resets PIO buffer for a transfer |
 | `Q3N_REG_GEOM0/1` | `0x0020/0x0024` | 16 KiB page/128 B logical OOB and pages/block geometry |
 | `Q3N_REG_POOL0/1` | `0x0028/0x002c` | Data/parity/meta/reserve pool sizes |
-| `Q3N_REG_OOB_LEN` | `0x0030` | Logical OOB bytes transferred by a combined page command (must be 128) |
+| `Q3N_REG_OOB_LEN` | `0x0030` | Logical-OOB transfer length (must be 128; resets PIO staging) |
 | `Q3N_REG_STAT_*` | `0x0040..0x005c` | Page program/block erase/read-error/fault counters |
 | `Q3N_REG_FAULT_ADDR_LO/HI` | `0x0060/0x0064` | Physical byte address for fault injection |
 | `Q3N_REG_FAULT_CTRL` | `0x0068` | Trigger data loss, next-program failure, or persistent bitflip injection |
@@ -84,12 +84,19 @@ the default sparse raw image as `q3n-nand-pci,drive=q3n-media`; `--fresh-nand`
 removes that image before QEMU starts and `--nand-image` selects another path.
 
 Image v2 begins with a 4 KiB `Q3NMEDIA` header followed by fixed physical-page
-slots. Each physical page has a deterministic 16 KiB main + 1664 B physical OOB
-slot: byte 0 is the bad-block marker, bytes 1..1536 hold 16 LDPC steps of 96 B
-each, and bytes 1537..1663 hold metadata. Erased page slots remain sparse holes.
-The first physical page of every block reserves OOB byte 0 as the
-Linux-compatible bad-block marker. A dedicated mark-bad command programs only
-that byte.
+slots. Each physical page is exactly `0x4680` bytes:
+
+```text
+0x0000..0x3fff main
+0x4000         OOB head / BBM / logical OOB[0]
+0x4001..0x4600 LDPC
+0x4601..0x467f OOB tail / logical OOB[1..127]
+```
+
+The first physical page of every block reserves `0x4000` as the
+Linux-compatible bad-block marker. Linux `_block_markbad` constructs a 128 B
+logical OOB buffer with byte 0 cleared and submits the ordinary OOB PROGRAM
+command; there is no dedicated mark-bad command.
 
 The page slots are followed by sparse, fixed-size error-overlay slots. Each page
 has a 16384 B main bitmap and a 1536 B LDPC bitmap. Fault injection XORs bits in
@@ -98,11 +105,13 @@ erasing a block clears all of its overlays. Version 1 images are intentionally
 rejected because their physical-page stride and OOB semantics are incompatible
 with version 2.
 
-The controller exposes only a 128 B logical OOB: byte 0 maps to the physical
-bad-block marker and bytes 1..127 map to physical bytes 1537..1663. Programming
-a page fills the raw OOB with `0xff`, applies that mapping, and deterministically
-generates all 16 simulated LDPC steps from the physical page key, profile,
-step, and 1024 B main-data step. The physical LDPC bytes are never reachable
+The controller exposes only a 128 B logical OOB: byte 0 maps to `0x4000`, and
+bytes 1..127 map to `0x4601..0x467f`. Commands 6 and 7 transfer exactly those
+128 bytes and never transfer main data. OOB PROGRAM applies NAND bytewise-AND
+semantics while preserving main and LDPC. Main PROGRAM independently updates
+the 16 KiB main and deterministically generates all 16 simulated LDPC steps
+from the physical page key, profile, step, and 1024 B main-data step while
+preserving both logical-OOB ranges. Physical LDPC bytes are never reachable
 through the PIO OOB window.
 
 Reads combine the persistent main and LDPC overlay popcounts per step. Up to 40

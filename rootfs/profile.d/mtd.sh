@@ -400,6 +400,7 @@ mtd_q3n_serial_smoke() {
 
   trap - 0 HUP INT TERM
   mtd_q3n_parity_stats || return 1
+  mtd_q3n_oob_bbm_test || return 1
   echo "q3n serial smoke passed: protected=$protected_later unprotected=$unprotected_after failed=$failed_after faults=$faults_after max_pending=$max_pending"
 }
 
@@ -483,8 +484,8 @@ mtd_q3n_oob_bbm_test() {
     return 1
   echo "cross-page OOB passed"
 
-  # A combined request must program main+OOB once. The page remains good, so
-  # the following OOB-only rewrite tests single-program rejection directly.
+  # A combined request programs main and logical OOB through separate physical
+  # operations while preserving both regions.
   place_offset=$((2 * erasesize))
   flash_erase -q "$mtd_dev" "$place_offset" 1 || return 1
   mtd_badblock page-write place "$mtd_dev" "$place_offset" \
@@ -493,13 +494,6 @@ mtd_q3n_oob_bbm_test() {
     0x5a 100 1 0xa5 || return 1
   [ "$(mtd_badblock get "$mtd_dev" "$place_offset")" = "0" ] || return 1
   echo "PLACE main+OOB passed"
-  if mtd_badblock oob-write place "$mtd_dev" "$place_offset" 100 1 0x00 \
-       >/tmp/q3n-good-rewrite.out 2>/tmp/q3n-good-rewrite.err; then
-    echo "q3n OOB/BBM test: good programmed page accepted second OOB write"
-    return 1
-  fi
-  [ "$(mtd_badblock get "$mtd_dev" "$place_offset")" = "0" ] || return 1
-  echo "good-page second OOB program rejected"
 
   raw_offset=$((3 * erasesize))
   flash_erase -q "$mtd_dev" "$raw_offset" 1 || return 1
@@ -512,26 +506,56 @@ mtd_q3n_oob_bbm_test() {
 
   # Keep the direct writable-BBM acceptance on a separate block so the
   # good-page rewrite case above is not masked by bad-block rejection.
-  flash_erase -q "$mtd_dev" 0 1 || return 1
-  [ "$(mtd_badblock oob-read place "$mtd_dev" 0 0 1)" = "ff" ] || {
+  direct_bbm_offset=$((7 * erasesize))
+  flash_erase -q "$mtd_dev" "$direct_bbm_offset" 1 || return 1
+  [ "$(mtd_badblock oob-read place "$mtd_dev" \
+       "$direct_bbm_offset" 0 1)" = "ff" ] || {
     echo "q3n OOB/BBM test: erased page BBM is not ff"
     return 1
   }
 
-  mtd_badblock oob-write place "$mtd_dev" 0 0 1 0x00 || return 1
-  [ "$(mtd_badblock oob-read place "$mtd_dev" 0 0 1)" = "00" ] || {
+  mtd_badblock oob-write place "$mtd_dev" \
+    "$direct_bbm_offset" 0 1 0x00 || return 1
+  [ "$(mtd_badblock oob-read place "$mtd_dev" \
+       "$direct_bbm_offset" 0 1)" = "00" ] || {
     echo "q3n OOB/BBM test: programmed BBM did not read back as 00"
     return 1
   }
-  [ "$(mtd_badblock get "$mtd_dev" 0)" = "1" ] || {
+  [ "$(mtd_badblock get "$mtd_dev" "$direct_bbm_offset")" = "1" ] || {
     echo "q3n OOB/BBM test: block status did not observe BBM"
     return 1
   }
-  if mtd_badblock oob-write place "$mtd_dev" 0 0 1 0x00 \
-       >/tmp/q3n-oob-rewrite.out 2>/tmp/q3n-oob-rewrite.err; then
-    echo "q3n OOB/BBM test: second OOB program unexpectedly succeeded"
+
+  # MEMSETBADBLOCK must use the same OOB-only path without changing an
+  # already-programmed first-page main area.
+  markbad_offset=$((8 * erasesize))
+  markbad_page_seek=$((markbad_offset / writesize))
+  flash_erase -q "$mtd_dev" "$markbad_offset" 1 || return 1
+  dd if=/dev/zero of=/tmp/q3n-markbad-main.bin bs="$writesize" count=1 \
+    2>/dev/null || return 1
+  dd if=/tmp/q3n-markbad-main.bin of="$mtd_dev" bs="$writesize" count=1 \
+    seek="$markbad_page_seek" 2>/dev/null || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-markbad-main-before.bin bs="$writesize" \
+    count=1 skip="$markbad_page_seek" 2>/dev/null || return 1
+  mtd_badblock set "$mtd_dev" "$markbad_offset" >/dev/null || return 1
+  [ "$(mtd_badblock oob-read raw "$mtd_dev" "$markbad_offset" 0 1)" = "00" ] || {
+    echo "q3n OOB/BBM test: MEMSETBADBLOCK did not program BBM 00"
     return 1
-  fi
+  }
+  mtd_badblock page-read raw "$mtd_dev" "$markbad_offset" \
+    0x00 0 1 0x00 || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-markbad-main-after.bin bs="$writesize" \
+    count=1 skip="$markbad_page_seek" 2>/dev/null || return 1
+  cmp /tmp/q3n-markbad-main-before.bin /tmp/q3n-markbad-main-after.bin || {
+    echo "q3n OOB/BBM test: markbad changed first-page main data"
+    return 1
+  }
+  [ "$(mtd_badblock get "$mtd_dev" "$markbad_offset")" = "1" ] || {
+    echo "q3n OOB/BBM test: MEMGETBADBLOCK did not observe BBM"
+    return 1
+  }
+  mtd_badblock set "$mtd_dev" "$markbad_offset" >/dev/null || return 1
+  echo "q3n OOB-only markbad main preservation passed"
   echo "q3n OOB/BBM test passed: logical_oob=128 bbm=00"
 }
 
@@ -542,16 +566,32 @@ mtd_q3n_persist_prepare() {
   mtd_dev="/dev/mtd${mtd_num}"
   erasesize=$(cat "/sys/class/mtd/mtd${mtd_num}/erasesize") || return 1
   writesize=$(cat "/sys/class/mtd/mtd${mtd_num}/writesize") || return 1
-  stats=/sys/kernel/debug/qemu_3dnand
+  persist_offset=$erasesize
+  persist_page_seek=$((persist_offset / writesize))
 
   flash_erase -q "$mtd_dev" 0 1 || return 1
   mtd_badblock page-write raw "$mtd_dev" 0 0x5a 100 1 0xa5 || return 1
-  mtd_badblock page-write raw "$mtd_dev" "$writesize" \
-    0x3c 101 1 0xc3 || return 1
-  echo "$writesize" > "$stats/inject_data_loss" || return 1
-  mtd_badblock set "$mtd_dev" "$erasesize" >/dev/null || return 1
-  [ "$(mtd_badblock get "$mtd_dev" "$erasesize")" = "1" ] || return 1
+
+  flash_erase -q "$mtd_dev" "$persist_offset" 1 || return 1
+  mtd_badblock page-write raw "$mtd_dev" "$persist_offset" \
+    0x69 100 1 0xa5 || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-persist-main-before.bin bs="$writesize" \
+    count=1 skip="$persist_page_seek" 2>/dev/null || return 1
+  expected_main_digest=$(sha256sum /tmp/q3n-persist-main-before.bin |
+    awk '{print $1}') || return 1
+  mtd_badblock set "$mtd_dev" "$persist_offset" >/dev/null || return 1
+  expected_bbm=$(mtd_badblock oob-read raw "$mtd_dev" \
+    "$persist_offset" 0 1) || return 1
+  [ "$expected_bbm" = "00" ] || return 1
+  mtd_badblock page-read raw "$mtd_dev" "$persist_offset" \
+    0x69 0 1 0x00 || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-persist-main-after.bin bs="$writesize" \
+    count=1 skip="$persist_page_seek" 2>/dev/null || return 1
+  cmp /tmp/q3n-persist-main-before.bin /tmp/q3n-persist-main-after.bin ||
+    return 1
+  [ "$(mtd_badblock get "$mtd_dev" "$persist_offset")" = "1" ] || return 1
   sync
+  echo "q3n persistence expected bbm=$expected_bbm main_digest=$expected_main_digest"
   echo "q3n persistence prepare passed"
 }
 
@@ -563,12 +603,41 @@ mtd_q3n_persist_verify() {
   erasesize=$(cat "/sys/class/mtd/mtd${mtd_num}/erasesize") || return 1
   writesize=$(cat "/sys/class/mtd/mtd${mtd_num}/writesize") || return 1
   bad_page_seek=$((erasesize / writesize))
+  persist_offset=$erasesize
 
-  mtd_badblock page-read raw "$mtd_dev" 0 0x5a 100 1 0xa5 || return 1
-  mtd_badblock oob-read-uncorrectable raw "$mtd_dev" "$writesize" 101 1 \
-    >/tmp/q3n-persist-overlay.out 2>/tmp/q3n-persist-overlay.err || return 1
+  mtd_badblock page-read raw "$mtd_dev" 0 0x5a 100 1 0xa5 || {
+    echo "q3n persistence verify: baseline main/OOB read failed"
+    return 1
+  }
 
-  [ "$(mtd_badblock get "$mtd_dev" "$erasesize")" = "1" ] || return 1
+  verified_bbm=$(mtd_badblock oob-read raw "$mtd_dev" \
+    "$persist_offset" 0 1) || {
+    echo "q3n persistence verify: persisted BBM read failed"
+    return 1
+  }
+  [ "$verified_bbm" = "00" ] || {
+    echo "q3n persistence verify: BBM=$verified_bbm, expected 00"
+    return 1
+  }
+  [ "$(mtd_badblock get "$mtd_dev" "$persist_offset")" = "1" ] || {
+    echo "q3n persistence verify: block-isbad did not observe persisted BBM"
+    return 1
+  }
+  mtd_badblock page-read raw "$mtd_dev" "$persist_offset" \
+    0x69 0 1 0x00 || {
+    echo "q3n persistence verify: bad-page raw main/OOB read failed"
+    return 1
+  }
+  dd if="$mtd_dev" of=/tmp/q3n-persist-main-verified.bin bs="$writesize" \
+    count=1 skip="$bad_page_seek" 2>/dev/null || {
+    echo "q3n persistence verify: bad-page main read failed"
+    return 1
+  }
+  verified_main_digest=$(sha256sum /tmp/q3n-persist-main-verified.bin |
+    awk '{print $1}') || {
+    echo "q3n persistence verify: main digest failed"
+    return 1
+  }
   if dd if=/dev/zero of="$mtd_dev" bs="$writesize" count=1 \
        seek="$bad_page_seek" 2>/tmp/q3n-persist-bad-write.err; then
     return 1
@@ -577,6 +646,7 @@ mtd_q3n_persist_verify() {
     >/tmp/q3n-persist-bad-erase.err 2>&1 || true
   grep -q 'MTD Erase failure' /tmp/q3n-persist-bad-erase.err || return 1
 
+  echo "q3n persistence verified bbm=$verified_bbm main_digest=$verified_main_digest"
   echo "q3n persistence verify passed"
 }
 

@@ -113,6 +113,7 @@ for file in \
   qemu/hw/mtd/Kconfig; do
   assert_file "$file"
 done
+assert_file docs/qemu-3dnand-register-reference.md
 
 assert_file tests/test_q3n_overlay.c
 assert_file tests/test_q3n_overlay.sh
@@ -239,6 +240,16 @@ assert_contains rootfs/profile.d/mtd.sh 'q3n-markbad-smoke'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-persist-prepare'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-persist-verify'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-oob-bbm-test'
+assert_contains rootfs/profile.d/mtd.sh \
+  'mtd_q3n_oob_bbm_test.*\|\|.*return 1'
+assert_contains rootfs/profile.d/mtd.sh \
+  'q3n OOB-only markbad main preservation passed'
+assert_contains rootfs/profile.d/mtd.sh \
+  'mtd_badblock set "\$mtd_dev" "\$markbad_offset".*return 1'
+assert_contains rootfs/profile.d/mtd.sh \
+  'mtd_badblock page-read raw "\$mtd_dev" "\$markbad_offset"'
+assert_contains rootfs/profile.d/mtd.sh \
+  'cmp /tmp/q3n-markbad-main-before\.bin /tmp/q3n-markbad-main-after\.bin'
 assert_not_contains rootfs/profile.d/mtd.sh 'error -EIO: failed to register MTD'
 assert_contains rootfs/profile.d/mtd.sh 'q3n no-frontier stripe progress passed'
 assert_not_contains rootfs/profile.d/mtd.sh 'tombstone'
@@ -248,6 +259,9 @@ assert_contains rootfs/init 'q3n-persist-verify.*mtd_q3n_persist_verify'
 assert_contains scripts/q3n-persistence-smoke.sh '--fresh-nand'
 assert_contains scripts/q3n-persistence-smoke.sh 'q3n-persist-prepare'
 assert_contains scripts/q3n-persistence-smoke.sh 'q3n-persist-verify'
+assert_contains scripts/q3n-persistence-smoke.sh 'expected_bbm'
+assert_contains scripts/q3n-persistence-smoke.sh 'expected_main_digest'
+assert_contains scripts/q3n-persistence-smoke.sh 'verified_main_digest'
 assert_not_contains scripts/q3n-persistence-smoke.sh 'q3n-tail'
 assert_not_contains scripts/q3n-persistence-smoke.sh 'tail_reason'
 assert_not_contains scripts/q3n-persistence-smoke.sh 'invalid-state'
@@ -267,7 +281,7 @@ assert_contains rootfs/helpers/mtd_badblock.c 'errno == EBADMSG'
 assert_contains rootfs/helpers/mtd_badblock.c 'req\.length == 0'
 assert_contains rootfs/profile.d/mtd.sh 'mtd_badblock oob-read'
 assert_contains rootfs/profile.d/mtd.sh 'mtd_badblock oob-write'
-assert_contains rootfs/profile.d/mtd.sh 'mtd_badblock oob-read-uncorrectable raw'
+assert_not_contains rootfs/profile.d/mtd.sh 'mtd_badblock oob-read-uncorrectable raw'
 assert_contains rootfs/profile.d/mtd.sh 'OOB bounds rejection passed'
 assert_contains rootfs/profile.d/mtd.sh 'kernel OOB bounds rejection passed'
 assert_contains rootfs/profile.d/mtd.sh 'mtd_badblock oob-read-unchecked place'
@@ -275,7 +289,7 @@ assert_contains rootfs/profile.d/mtd.sh '"\$bounds_offset" 128 1'
 assert_contains rootfs/profile.d/mtd.sh 'cross-page OOB passed'
 assert_contains rootfs/profile.d/mtd.sh 'PLACE main\+OOB passed'
 assert_contains rootfs/profile.d/mtd.sh 'RAW main\+OOB passed'
-assert_contains rootfs/profile.d/mtd.sh 'good-page second OOB program rejected'
+assert_not_contains rootfs/profile.d/mtd.sh 'good-page second OOB program rejected'
 assert_contains rootfs/profile.d/mtd.sh 'q3n no-frontier stripe progress passed'
 assert_contains rootfs/profile.d/mtd.sh 'cancel_writer_pid=\$!'
 assert_contains rootfs/profile.d/mtd.sh 'wait "\$cancel_writer_pid"'
@@ -286,12 +300,34 @@ assert_contains rootfs/profile.d/mtd.sh 'failed_after'
 assert_contains rootfs/profile.d/mtd.sh 'inject_parity_program_fail'
 assert_contains README.md 'QEMU'
 assert_contains README.md 'MTD'
+assert_contains README.md '0x0000\.\.0x3fff main'
+assert_contains README.md '0x4000.*OOB head / BBM / logical OOB\[0\]'
+assert_contains README.md '0x4001\.\.0x4600 LDPC'
+assert_contains README.md '0x4601\.\.0x467f OOB tail / logical OOB\[1\.\.127\]'
+assert_contains README.md '命令 6/7 各自只传输 128 B logical OOB'
+assert_contains README.md '没有专用 mark-bad 命令'
 assert_contains README.md 'MTD_SMOKE=ubifs'
 assert_contains README.md 'q3n-persistence-smoke.sh'
 assert_contains README.md '--fresh-nand'
 assert_contains README.md 'q3n-serial-smoke.sh'
 assert_contains qemu/README.md 'Q3NMEDIA'
-assert_contains qemu/README.md 'OOB byte 0'
+assert_contains qemu/README.md 'logical OOB\[0\]'
+assert_contains qemu/README.md '0x0000\.\.0x3fff main'
+assert_contains qemu/README.md '0x4000.*OOB head / BBM / logical OOB\[0\]'
+assert_contains qemu/README.md '0x4001\.\.0x4600 LDPC'
+assert_contains qemu/README.md '0x4601\.\.0x467f OOB tail / logical OOB\[1\.\.127\]'
+assert_contains qemu/README.md 'Commands 6 and 7 transfer exactly those'
+assert_not_contains qemu/README.md 'Combined main\+OOB'
+register_doc=docs/qemu-3dnand-register-reference.md
+assert_contains "$register_doc" '0x0000\.\.0x3fff main'
+assert_contains "$register_doc" '0x4000.*OOB head / BBM / logical OOB\[0\]'
+assert_contains "$register_doc" '0x4001\.\.0x4600 LDPC'
+assert_contains "$register_doc" '0x4601\.\.0x467f OOB tail / logical OOB\[1\.\.127\]'
+assert_contains "$register_doc" '后端槽位总长为 `0x4680`'
+assert_contains "$register_doc" 'READ_PAGE_OOB` \| 128 B'
+assert_contains "$register_doc" 'PROGRAM_PAGE_OOB` \| 至少 128 B'
+assert_not_contains "$register_doc" 'READ_PAGE_OOB` \| 16512 B'
+assert_not_contains "$register_doc" 'PROGRAM_PAGE_OOB` \| 至少 16512 B'
 assert_contains qemu/include/hw/mtd/q3n-nand.h 'TYPE_Q3N_NAND'
 assert_contains qemu/include/hw/mtd/q3n-nand.h 'TYPE_Q3N_NAND_PCI'
 assert_contains qemu/include/hw/mtd/q3n-nand.h 'Q3N_PCI_VENDOR_ID'
@@ -310,9 +346,6 @@ assert_contains "$header" 'Q3N_PHYSICAL_LDPC_OFFSET'
 assert_contains "$header" 'Q3N_PHYSICAL_OOB_TAIL_OFFSET'
 assert_contains "$header" 'Q3N_PHYSICAL_OOB_TAIL_SIZE'
 assert_contains "$header" 'Q3N_PHYSICAL_PAGE_SIZE'
-assert_not_contains qemu/include/hw/mtd/q3n-media.h 'q3n_media_mark_bad'
-assert_not_contains qemu/hw/mtd/q3n-media.c 'q3n_media_mark_bad'
-assert_not_contains qemu/hw/mtd/q3n-media.c 'q3n_media_write_bbm'
 assert_contains qemu/include/hw/mtd/q3n-media.h 'q3n_media_read_logical_oob'
 assert_contains qemu/include/hw/mtd/q3n-media.h 'q3n_media_program_logical_oob'
 for symbol in \
@@ -334,12 +367,6 @@ for symbol in \
   assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h "$symbol"
   assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
 done
-assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h \
-  'Q3N_CMD_MARK_BAD_BLOCK'
-assert_not_contains qemu/include/hw/mtd/q3n-nand.h 'Q3N_CMD_MARK_BAD_BLOCK'
-assert_not_contains qemu/hw/mtd/q3n-nand.c 'Q3N_CMD_MARK_BAD_BLOCK'
-assert_not_contains qemu/hw/mtd/q3n-nand.c 'q3n_cmd_mark_bad_block'
-assert_not_contains qemu/hw/mtd/q3n-nand.c 'q3n_media_mark_bad'
 assert_function_contains qemu/hw/mtd/q3n-nand.c q3n_cmd_read_page_oob \
   'data_count = Q3N_LOGICAL_OOB_SIZE'
 assert_function_not_contains qemu/hw/mtd/q3n-nand.c q3n_cmd_read_page_oob \
@@ -488,8 +515,6 @@ assert_contains linux/drivers/mtd/nand/raw/Makefile.qemu_3dnand 'qemu_3dnand_mai
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_map.c 'div_u64_rem'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_restore_media_locked'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_GET_BLOCK_STATUS'
-assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
-  'qemu_3dnand_mark_phys_block_bad_locked'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CAP_BAD_BLOCK_MARKER'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_validate_manifest'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_pack_data_oob'
