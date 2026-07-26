@@ -935,6 +935,10 @@ static int qemu_3dnand_mtd_read_oob(struct mtd_info *mtd, loff_t from,
 				q3n->page_buf, Q3N_OP_FOREGROUND, &ecc);
 			if (ret)
 				break;
+			if (ecc.uncorrectable) {
+				ret = -EBADMSG;
+				break;
+			}
 			qemu_3dnand_account_foreground_ecc(q3n, ops->stats, &ecc);
 			q3n_ecc_accumulate(&total, &ecc);
 			memcpy(ops->datbuf + data_done,
@@ -945,10 +949,6 @@ static int qemu_3dnand_mtd_read_oob(struct mtd_info *mtd, loff_t from,
 			logical_oob, Q3N_OP_FOREGROUND);
 		if (ret)
 			break;
-		if (data_chunk && ecc.uncorrectable) {
-			ret = -EBADMSG;
-			break;
-		}
 		if (oob_chunk)
 			memcpy(ops->oobbuf + oob_done, logical_oob + ooboffs,
 			       oob_chunk);
