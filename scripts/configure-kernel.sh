@@ -12,6 +12,8 @@ out_dir="$build_dir/linux-$version"
 kernel_arch=${KERNEL_ARCH:-x86_64}
 cross_compile=${CROSS_COMPILE:-x86_64-linux-gnu-}
 
+"$repo_root/scripts/apply-linux-overlay.sh"
+
 mkdir -p "$out_dir"
 
 info "配置 Linux $version，输出目录: $out_dir"

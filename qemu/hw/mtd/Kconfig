@@ -1,0 +1,4 @@
+config Q3N_NAND
+    bool
+    depends on PCI
+    default y

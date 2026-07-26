@@ -1,6 +1,12 @@
 # QEMU 3D NAND 多 Die 并发与 Page-Raid 地址映射方案
 
-本文档说明一种适合 QEMU 模拟的 3D NAND 控制器地址映射方案。目标是让 Linux 侧驱动保持标准 raw NAND/MTD 语义，同时在 QEMU 控制器内部模拟多 die 并发和 page-raid。
+本文档记录 3D NAND 地址映射与 page-raid 方案演进。当前实现边界已经调整为：
+
+- QEMU 只模拟基础 3D NAND flash 器件和控制器：物理 page read/program、block erase、几何寄存器、统计寄存器、故障注入。
+- Linux `qemu_3dnand` MTD 驱动负责 page-raid、parity log、恢复、stale parity、debugfs 统计以及 MTD 可见容量裁剪。
+- MTD/UBI 原生基础代码不修改，也不感知 stripe/parity/generation。
+
+因此，本文中早期关于“QEMU 控制器内部实现 page-raid”的分析应理解为历史备选方案；当前代码和方案 D 文档以“驱动侧 page-raid、QEMU 基础介质”为准。
 
 ## 0. 设计前提
 
@@ -11,10 +17,10 @@
 | MTD core | 不修改 | 不改 `include/linux/mtd/mtd.h`、`drivers/mtd/mtdcore.c` 等基础逻辑 |
 | raw NAND framework | 不修改 | 不改 `drivers/mtd/nand/raw/nand_base.c` 等通用 raw NAND 路径 |
 | UBI/UBIFS | 不修改 | 不改 `drivers/mtd/ubi/*` 和 UBIFS 对 UBI 的使用方式 |
-| QEMU 3D NAND controller | 可以修改 | 多 die、multi-plane、page-raid、错误注入都在这里实现 |
-| 控制器驱动 | 可以新增 | 新增符合 raw NAND controller 规范的驱动 |
+| QEMU 3D NAND controller | 可以修改 | 仅实现基础 flash/控制器仿真、几何暴露和错误注入 |
+| 控制器驱动 | 可以新增 | 新增符合 MTD 规范的驱动，并在驱动私有逻辑中实现 page-raid |
 
-因此，所有不满足 MTD/UBI 原生假设的能力都必须被 QEMU 控制器模型或控制器驱动私有逻辑吸收，不能要求 MTD/UBI 理解 page-raid stripe、parity page 或非标准最小 I/O 单元。
+因此，所有不满足 MTD/UBI 原生假设的能力都必须被控制器驱动私有逻辑吸收，不能要求 MTD/UBI 理解 page-raid stripe、parity page 或非标准最小 I/O 单元。QEMU 只负责提供可被驱动访问的物理页和物理块。
 
 ## 1. 分层视图
 
@@ -23,11 +29,9 @@ flowchart TB
     UBI["UBI / UBIFS / mtd-utils"]
     MTD["Linux MTD Core"]
     RAW["Linux Raw NAND Framework"]
-    DRV["qemu_3dnand Controller Driver"]
+    DRV["qemu_3dnand Controller Driver<br/>Page-Raid + Mapping"]
     MMIO["MMIO / IRQ / Status Registers"]
-    CTRL["QEMU 3D NAND Controller"]
-    RAID["Page-Raid Engine"]
-    SCH["Die / Plane Scheduler"]
+    CTRL["QEMU 3D NAND Controller<br/>Basic Flash Model"]
     MEDIA["QEMU NAND Media Model"]
 
     UBI --> MTD
@@ -35,10 +39,7 @@ flowchart TB
     RAW --> DRV
     DRV --> MMIO
     MMIO --> CTRL
-    CTRL --> RAID
-    CTRL --> SCH
-    RAID --> MEDIA
-    SCH --> MEDIA
+    CTRL --> MEDIA
 ```
 
 Linux 看到的是一个标准 NAND 设备：
@@ -48,10 +49,10 @@ Linux 看到的是一个标准 NAND 设备：
 | MTD page | 是 | 标准读写单位 |
 | MTD eraseblock | 是 | 标准擦除和坏块管理单位 |
 | OOB | 是 | 由 raw NAND/MTD 使用 |
-| die | 否 | QEMU 控制器内部调度 |
-| plane | 否 | QEMU 控制器内部调度 |
-| parity page | 否 | QEMU page-raid 内部使用 |
-| stripe | 否 | QEMU page-raid 内部使用 |
+| die | 否 | QEMU 几何中存在，策略由驱动解释 |
+| plane | 否 | QEMU 几何中存在，策略由驱动解释 |
+| parity page | 否 | Linux 驱动 page-raid 内部使用 |
+| stripe | 否 | Linux 驱动 page-raid 内部使用 |
 
 ## 2. 目标器件几何
 
@@ -555,7 +556,20 @@ gantt
 
 ## 11. 控制器寄存器建议
 
-Linux 驱动通过私有寄存器配置 QEMU 控制器能力，但 MTD 路径仍走 raw NAND `exec_op()`。
+当前实现中，QEMU 不提供 RAID_CTRL/RAID_STATUS 这类策略寄存器。Linux 驱动通过基础 flash 寄存器访问 QEMU 物理介质，并在驱动内部维护 page-raid 状态。
+
+| 寄存器 | 字段 | 当前用途 |
+| --- | --- | --- |
+| `ID` | magic/version | 设备识别 |
+| `GEOM0/GEOM1` | page/OOB/pages-per-block | 基础 NAND 几何 |
+| `POOL0/POOL1` | data/parity/meta/reserve blocks | 驱动侧方案 D 的 block pool 输入 |
+| `CMD` | read/program/erase/reset | 物理 page/block 命令 |
+| `ADDR_LO/ADDR_HI` | physical byte address | 驱动计算后的物理地址 |
+| `DATA` | PIO data window | page 数据传输 |
+| `STAT_*` | program/erase/read-error/fault | QEMU 基础介质统计 |
+| `FAULT_*` | fault address/control | 物理 page data-loss 注入 |
+
+下面这张表是早期“QEMU 内部实现 page-raid”方案中的历史寄存器建议，不作为当前代码接口：
 
 | 寄存器 | 字段 | 说明 |
 | --- | --- | --- |

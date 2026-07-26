@@ -1,6 +1,8 @@
 # QEMU 3D NAND 方案 A 初步代码设计：四加一架构视图
 
 > 本文中的“四加一视图”指代码架构设计的 4+1 View Model，不是 4 data + 1 parity 的 page-raid 比例。
+>
+> 当前实现说明：本文是早期方案 A 的代码视图设计，默认 page-raid 在 QEMU 内部。当前架构已经调整为 QEMU 只模拟基础 flash 器件和控制器，page-raid、parity 映射与恢复逻辑放在 Linux `qemu_3dnand` MTD 驱动中。需要看当前代码路径时，以方案 D 文档和 Linux 驱动实现为准。
 
 ## 1. 设计范围
 

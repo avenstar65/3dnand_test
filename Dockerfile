@@ -44,12 +44,18 @@ RUN dpkg --add-architecture amd64 \
         git \
         kmod \
         libelf-dev \
+        libglib2.0-dev \
         libncurses-dev \
+        libpixman-1-dev \
         libssl-dev \
+        meson \
         mtd-utils \
+        ninja-build \
         openssl \
+        pkg-config \
         perl \
         python3 \
+        python3-venv \
         qemu-system-x86 \
         rsync \
         strace \
