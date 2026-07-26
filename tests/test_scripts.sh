@@ -31,7 +31,7 @@ assert_not_contains() {
 function_body() {
   file=$1
   function=$2
-  sed -n "/^static void $function(/,/^}/p" "$repo_root/$file"
+  sed -n "/^static .* $function(/,/^}/p" "$repo_root/$file"
 }
 
 assert_function_contains() {
@@ -334,7 +334,7 @@ for symbol in \
   assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h "$symbol"
   assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
 done
-assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h \
+assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h \
   'Q3N_CMD_MARK_BAD_BLOCK'
 assert_not_contains qemu/include/hw/mtd/q3n-nand.h 'Q3N_CMD_MARK_BAD_BLOCK'
 assert_not_contains qemu/hw/mtd/q3n-nand.c 'Q3N_CMD_MARK_BAD_BLOCK'
@@ -484,7 +484,8 @@ assert_contains linux/drivers/mtd/nand/raw/Makefile.qemu_3dnand 'qemu_3dnand_mai
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_map.c 'div_u64_rem'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_restore_media_locked'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_GET_BLOCK_STATUS'
-assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_MARK_BAD_BLOCK'
+assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+  'qemu_3dnand_mark_phys_block_bad_locked'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CAP_BAD_BLOCK_MARKER'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_validate_manifest'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_raid.c 'q3n_pack_data_oob'
@@ -547,8 +548,20 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
 	'Q3N_REG_ECC_GEOM1'
 assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
 	'ecc_stats\.failed'
-assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_read_phys_page_oob_locked'
-assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_program_phys_page_oob_locked'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+  'qemu_3dnand_read_phys_oob_locked'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+  'qemu_3dnand_program_phys_oob_locked'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+  'logical_oob\[0\] = 0x00'
+assert_function_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+  qemu_3dnand_read_phys_oob_locked 'i < Q3N_LOGICAL_OOB_SIZE'
+assert_function_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+  qemu_3dnand_read_phys_oob_locked 'Q3N_PAGE_SIZE|q3n->page_size'
+assert_function_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+  qemu_3dnand_program_phys_oob_locked 'i < Q3N_LOGICAL_OOB_SIZE'
+assert_function_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c \
+  qemu_3dnand_program_phys_oob_locked 'Q3N_PAGE_SIZE|q3n->page_size'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_READ_PAGE_OOB'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'Q3N_CMD_PROGRAM_PAGE_OOB'
 assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'tombstone'

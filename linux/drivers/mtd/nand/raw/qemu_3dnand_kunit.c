@@ -5,6 +5,7 @@
 #include <linux/kthread.h>
 #include <linux/unaligned.h>
 
+#include "qemu_3dnand.h"
 #include "qemu_3dnand_priv.h"
 
 static const struct q3n_geometry q3n_test_geometry = {
@@ -14,6 +15,23 @@ static const struct q3n_geometry q3n_test_geometry = {
 	.data_block_count = 14,
 	.parity_block_count = 2,
 };
+
+static void q3n_build_bad_block_oob(u8 *logical_oob)
+{
+	memset(logical_oob, 0xff, Q3N_LOGICAL_OOB_SIZE);
+	logical_oob[0] = 0x00;
+}
+
+static void q3n_bad_block_oob_marks_only_bbm_test(struct kunit *test)
+{
+	u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
+	u32 i;
+
+	q3n_build_bad_block_oob(logical_oob);
+	KUNIT_EXPECT_EQ(test, logical_oob[0], (u8)0x00);
+	for (i = 1; i < Q3N_LOGICAL_OOB_SIZE; i++)
+		KUNIT_EXPECT_EQ(test, logical_oob[i], (u8)0xff);
+}
 
 static void q3n_map_separate_parity_block_test(struct kunit *test)
 {
@@ -618,6 +636,7 @@ static void q3n_block_barrier_terminal_put_wakes_on_drain_test(struct kunit *tes
 }
 
 static struct kunit_case q3n_map_test_cases[] = {
+	KUNIT_CASE(q3n_bad_block_oob_marks_only_bbm_test),
 	KUNIT_CASE(q3n_map_separate_parity_block_test),
 	KUNIT_CASE(q3n_map_non_power_of_two_geometry_test),
 	KUNIT_CASE(q3n_map_rejects_invalid_input_test),
