@@ -48,6 +48,9 @@ Linux `nand_base` 相关代码，但修改必须以版本化 patch 交付，不�
 - 先按完整 NAND ID 白名单选择厂商 `ids` 表，再把该表传给
   `nand_scan_with_ids()`；
 - 不在 Q3N 驱动中直接实现 MTD `_read`、`_write`、`_erase` 等入口；
+- `mtd->_block_isbad`、`mtd->_block_markbad` 和
+  `mtd->_block_isreserved` 使用 `nand_base.c` 安装的标准实现；
+- 坏块表由 raw NAND core 扫描、查询和更新，Q3N 驱动不维护私有 BBT；
 - 实现 `ecc->read_page`、`ecc->write_page`、raw 页读写和 OOB 回调；
 - 使用 controller `exec_op` 实现 NAND reset、read ID、status 和 erase；
 - 实现 NAND core 驱动的 read retry；
@@ -62,6 +65,9 @@ Linux `nand_base` 相关代码，但修改必须以版本化 patch 交付，不�
 - 不实现 page RAID；
 - 不实现 parity block 分配、校验、恢复或 RAID 调度；
 - 不实现后台 workqueue、异步优先级或并行 page RAID；
+- 不实现 Q3N 私有 `_block_isbad`、`_block_markbad` 或坏块索引；
+- 不使用 `Q3N_CMD_GET_BLOCK_STATUS` 代替 NAND core 的 OOB/BBT
+  坏块判断；
 - 不声明支持非二次幂的多 target 或多 LUN；
 - 不修改通用 MTD core；
 - 不直接修改、提交或依赖 `work/linux/linux-7.0.12` 中的工作副本；
@@ -374,6 +380,108 @@ BBT 和 `block_markbad` 仍由 NAND core 通过 OOB byte 0 实现。Q3N 驱动�
 页读返回介质 bitflip overlay 后的原始主数据，不执行 ECC、不刷新 ECC
 结果寄存器。raw 页写仍由 QEMU 生成隐藏 LDPC，因为 guest 不具备提供
 1536 字节内部校验数据的接口。
+
+### 7.4 坏块接口与坏块表
+
+Q3N 驱动不设置任何 MTD 坏块函数指针。`nand_scan_with_ids()` 进入
+`nand_scan_tail()` 后，由 `nand_base.c` 安装：
+
+```c
+mtd->_block_isreserved = nand_block_isreserved;
+mtd->_block_isbad = nand_block_isbad;
+mtd->_block_markbad = nand_block_markbad;
+```
+
+Q3N 也不覆盖 `chip->legacy.block_bad` 或
+`chip->legacy.block_markbad`。驱动只提供标准 `read_oob`、
+`read_oob_raw`、`write_oob` 和 `write_oob_raw`，供 NAND core 读取和写入
+OOB byte 0 的坏块标记。
+
+#### 7.4.1 BBT 初始化
+
+首期采用 raw NAND core 的默认 RAM-based BBT：
+
+- 不设置 `NAND_SKIP_BBTSCAN`；
+- 不设置 `NAND_BBT_USE_FLASH`；
+- 不设置 `NAND_BBT_NO_OOB_BBM`；
+- 不设置 `NAND_NO_BBM_QUIRK`；
+- OOB byte 0 是唯一持久化坏块标记；
+- RAM BBT 是运行期查询缓存，不是另一份持久化介质格式。
+
+`nand_scan_tail()` 在完成 MTD 回调安装后调用
+`nand_create_bbt(chip)`。该函数位于
+`drivers/mtd/nand/raw/nand_bbt.c`，属于 `nand_base` 所使用的 raw NAND
+core BBT 实现。它遍历全部 1664 个可见擦除块，通过标准
+`mtd_read_oob()` 路径检查 OOB byte 0，并建立 2 bit/block 的 RAM BBT。
+
+本期 BBT 的精确长度为：
+
+```text
+DIV_ROUND_UP(1664 blocks × 2 bits, 8) = 416 bytes
+```
+
+如果 OOB 扫描出现普通 ECC bitflip 或 `-EBADMSG`，BBM 检查沿用 NAND core
+允许的处理；控制器超时、非法访问等非 ECC 错误必须使 scan 失败，不能把
+无法读取的 block 默认当成 good。
+
+#### 7.4.2 `block_isbad` 调用链
+
+```text
+mtd_block_isbad()
+  -> mtd->_block_isbad
+  -> nand_block_isbad()
+  -> nand_block_checkbad()
+  -> nand_isbad_bbt()
+```
+
+正常完成 BBT scan 后 `chip->bbt` 必须存在，因此运行期查询以 NAND core
+的 RAM BBT 为准。如果 BBT 尚未建立，`nand_block_checkbad()` 才回退到
+`nand_isbad_bbm()` 直接读取 OOB 标记。
+
+Q3N 驱动不得在这条调用链中读取私有坏块 bitmap，也不得以
+`Q3N_CMD_GET_BLOCK_STATUS` 的结果覆盖 NAND core BBT。QEMU 如果保留该
+调试命令，其状态必须由 OOB byte 0 派生，不能成为第二个坏块真值来源。
+
+#### 7.4.3 `block_markbad` 调用链
+
+```text
+mtd_block_markbad()
+  -> mtd->_block_markbad
+  -> nand_block_markbad()
+  -> nand_block_markbad_lowlevel()
+     -> nand_markbad_bbm()
+        -> nand_default_block_markbad()
+           -> nand_do_write_oob()
+              -> ecc.write_oob()
+     -> nand_markbad_bbt()
+```
+
+标准 NAND core 流程负责：
+
+1. 检查目标 block 是否已经为 bad；
+2. 尝试擦除目标 block；
+3. 通过 OOB-only write 把 BBM 写为 `0x00`；
+4. 更新 RAM BBT entry 为 worn bad；
+5. 返回第一次发生的实际错误。
+
+因此新实现不再承诺 markbad 后保留目标 block 的主数据；NAND core 在写
+BBM 前会尝试擦除整个 block。重复 markbad 由 core 识别为已坏并返回成功。
+重启后不依赖旧 RAM BBT，`nand_create_bbt()` 会从持久化 OOB BBM 重新构建。
+
+#### 7.4.4 驱动和 QEMU 的底层责任
+
+Q3N 只需保证：
+
+- `read_oob[_raw]` 能读取 page 的完整 128-byte 逻辑 OOB；
+- `write_oob[_raw]` 能进行 OOB-only program；
+- OOB-only program 不意外改写同一页主数据；
+- OOB byte 0 从 `0xff` 编程为 `0x00` 后可持久化；
+- erase 将该 block 的主数据、OOB 和隐藏 LDPC 恢复到 erased state；
+- 非二次幂地址换算把 BBM 定位到正确的 25 MiB block；
+- controller reset 和 read retry 不改变坏块状态。
+
+坏块策略、BBT entry 编码、查询语义、重复 markbad 和 MTD 函数指针均由
+raw NAND core 负责。
 
 ## 8. Read Retry
 
@@ -726,7 +834,9 @@ CI 至少检查：
 - MTD 报告 16 KiB writesize、128 B oobsize、25 MiB erasesize；
 - MTD 报告 41,600 MiB 容量；
 - MTD `_read`、`_write`、`_erase` 指向 NAND core，而不是 Q3N 自定义入口；
-- program/read/erase/OOB/markbad/isbad 均通过。
+- MTD `_block_isbad`、`_block_markbad` 和 `_block_isreserved` 由
+  `nand_scan_tail()` 安装，不指向 Q3N 私有实现；
+- program/read/erase/OOB 均通过。
 
 ### 13.3 非二次幂边界
 
@@ -742,7 +852,28 @@ CI 至少检查：
 - pages-per-block、block count 和 BBT buffer 长度无截断；
 - 不访问 1600..2047 这类由二次幂 row 编码产生的空洞。
 
-### 13.4 ECC 与 raw
+### 13.4 坏块与 BBT
+
+- `chip->options` 不包含 `NAND_SKIP_BBTSCAN` 或 `NAND_NO_BBM_QUIRK`；
+- `chip->bbt_options` 不包含 `NAND_BBT_USE_FLASH` 或
+  `NAND_BBT_NO_OOB_BBM`；
+- 空白介质 scan 后建立 416-byte RAM BBT；
+- scan 前把某 block 的 OOB byte 0 写为 `0x00`，scan 后
+  `mtd_block_isbad()` 返回 bad；
+- 首块、末块及跨 1600-page 边界的坏块索引正确；
+- `mtd_block_markbad()` 尝试擦除目标 block、写 OOB byte 0 并更新 RAM
+  BBT；
+- markbad 后再次 `mtd_block_isbad()` 不重新访问私有状态即可返回 bad；
+- 对同一 block 重复 markbad 返回成功且不产生第二套状态；
+- 重启并重新 scan 后，RAM BBT 能从 OOB BBM 恢复；
+- OOB-only callback 单独验证不改写主数据；但完整 markbad 测试不要求保留
+  主数据，因为 NAND core 会先尝试擦除；
+- 一个 block 的 markbad 不改变其他 block 的 BBM/BBT entry；
+- BBT scan 的非 ECC OOB 读取错误使 `nand_scan_with_ids()` 失败；
+- `Q3N_CMD_GET_BLOCK_STATUS` 不参与 MTD isbad/markbad 调用链；
+- `nand_cleanup()` 释放 RAM BBT，不残留驱动私有坏块内存。
+
+### 13.5 ECC 与 raw
 
 - 无 bitflip 正常读取；
 - 1、40 bit 可在 mode 0 修复；
@@ -753,7 +884,7 @@ CI 至少检查：
 - OOB 1..127 可正常读写；
 - hidden LDPC 不占用逻辑 OOB。
 
-### 13.5 Read Retry
+### 13.6 Read Retry
 
 - 41 bit：mode 1 恢复；
 - 49 bit：mode 2 恢复；
@@ -765,7 +896,7 @@ CI 至少检查：
 - setup retry 失败和 mode reset 失败可观察；
 - retry 后紧接着读取健康页，结果不受前一页 mode 影响。
 
-### 13.6 上层验证
+### 13.7 上层验证
 
 - `mtd_debug` 跨多个 25 MiB block 读写；
 - bad block 标记与重新扫描；
@@ -788,9 +919,12 @@ CI 至少检查：
 9. 实现预探测、`ytmc_nand_match_ids()` 和
    `nand_scan_with_ids(ids)` 数据流；
 10. 实现 ECC page/OOB/raw callbacks；
-11. 增加 QEMU raw-read 和 read-retry mode；
-12. 接入 NAND core read retry；
-13. 完成 MTD、BBT、UBI 和回归验证。
+11. 接入 NAND core 的 isbad/markbad 和默认 RAM BBT，删除 Q3N 私有
+    坏块入口；
+12. 增加坏块、BBT 重建和非二次幂边界测试；
+13. 增加 QEMU raw-read 和 read-retry mode；
+14. 接入 NAND core read retry；
+15. 完成 MTD、BBT、UBI 和回归验证。
 
 驱动重构依赖 Linux patch 已可稳定应用；read retry 依赖标准 page read
 返回契约完成；任何 page RAID 工作不进入本期实施计划。
@@ -804,6 +938,11 @@ CI 至少检查：
 - 接受首期假设 full ID 为 `9c d7 98 a6 51 33 4e 44`；
 - 接受通过 `ytmc_nand.c` 白名单预探测选择传给
   `nand_scan_with_ids()` 的 ids 表；
+- 接受 `_block_isbad`、`_block_markbad`、`_block_isreserved` 和 BBT
+  完全使用 raw NAND core，不保留 Q3N 私有坏块实现；
+- 接受首期使用 OOB BBM 重建的 RAM BBT，不启用 flash-based BBT；
+- 接受标准 `nand_block_markbad_lowlevel()` 会先尝试擦除目标 block，因此
+  markbad 不承诺保留主数据；
 - 接受 Linux 修改以三段 patch series 交付；
 - 接受旧 page RAID image 不做兼容承诺；
 - 接受 retry 成功向上层报告 scrub 提示；
