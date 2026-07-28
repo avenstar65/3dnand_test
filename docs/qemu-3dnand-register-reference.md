@@ -12,7 +12,7 @@
 - 支持的 MMIO 访问宽度：1～4 字节
 - 物理 main page：16 KiB
 - 物理 OOB：1664 B
-- Linux 可见的逻辑 OOB：128 B
+- Linux 可见的逻辑 OOB：1024 B
 - ECC step：1024 B
 - ECC 强度：40 bit/step
 - LDPC 数据：96 B/step，共 16 step
@@ -111,8 +111,8 @@
 | 3 | `Q3N_CMD_PROGRAM_PAGE` | 编程 main，由 QEMU 自动生成 LDPC |
 | 4 | `Q3N_CMD_ERASE_BLOCK` | 擦除物理块及其 bitflip overlay |
 | 5 | `Q3N_CMD_RESET` | 复位命令、PIO、IRQ、ECC 和一次性 PROGRAM 故障状态 |
-| 6 | `Q3N_CMD_READ_PAGE_OOB` | 只读取 128 B logical OOB |
-| 7 | `Q3N_CMD_PROGRAM_PAGE_OOB` | 只编程 128 B logical OOB，保留 main 和 LDPC |
+| 6 | `Q3N_CMD_READ_PAGE_OOB` | 只读取 1024 B logical OOB |
+| 7 | `Q3N_CMD_PROGRAM_PAGE_OOB` | 只编程 1024 B logical OOB，保留 main 和 LDPC |
 | 8 | `Q3N_CMD_GET_BLOCK_STATUS` | 查询目标物理块的 BBM |
 
 ### 5.1 READ_ID 返回值
@@ -183,12 +183,12 @@ page          = physical_page % 1600
 独立 logical OOB 命令要求：
 
 ```text
-Q3N_REG_OOB_LEN = 128
+Q3N_REG_OOB_LEN = 1024
 ```
 
 写 `OOB_LEN` 也会把 PIO `data_pos` 和 `data_count` 复位为 0。随后命令 6
-返回恰好 128 B，命令 7 至少需要 128 B 有效 PIO 数据；两者均不读取或写入
-main，也不生成、解码或清除 LDPC/ECC 结果。长度不为 128 时命令返回
+返回恰好 1024 B，命令 7 至少需要 1024 B 有效 PIO 数据；两者均不读取或写入
+main，也不生成、解码或清除 LDPC/ECC 结果。长度不为 1024 时命令返回
 `STATUS.ERROR`。
 
 ## 7. 几何寄存器
@@ -209,7 +209,7 @@ Q3N_REG_GEOM0 = 0x00804000
 表示：
 
 - page size：`0x4000` = 16384 B；
-- logical OOB：`0x80` = 128 B。
+- logical OOB：`0x80` = 1024 B。
 
 ### 7.2 GEOM1
 
@@ -308,7 +308,7 @@ Q3N_REG_POOL1 = 0x00040003
 当前 QEMU 不维护每页是否已经编程的状态，所以块状态只反映 BBM，不反映
 “块是否擦除”。
 
-Linux `_block_markbad` 不使用专用控制器命令。它构造 128 B logical OOB
+Linux `_block_markbad` 不使用专用控制器命令。它构造 1024 B logical OOB
 （全部为 `0xff`，byte 0 为 `0x00`），并对块首页执行
 `PROGRAM_PAGE_OOB`。因此标坏与普通 OOB 编程共享同一条 NAND
 bytewise-AND 路径；重复标坏是幂等操作，main 和 LDPC 保持不变。
@@ -457,7 +457,7 @@ MMIO 窗口容量：
 尽管窗口在 MMIO 中占据连续地址区间，当前实现使用内部 `data_pos` 顺序
 读写，不会用本次 MMIO offset 作为 buffer 下标。因此驱动可以反复访问
 `Q3N_REG_DATA`。单个命令不会组合 main 与 OOB：main 命令传 16384 B，
-OOB 命令传 128 B。
+OOB 命令传 1024 B。
 
 行为：
 
@@ -474,20 +474,20 @@ OOB 命令传 128 B。
 | `READ_ID` | 8 B |
 | `READ_PAGE` | 16384 B |
 | `PROGRAM_PAGE` | 至少 16384 B |
-| `READ_PAGE_OOB` | 128 B |
-| `PROGRAM_PAGE_OOB` | 至少 128 B |
+| `READ_PAGE_OOB` | 1024 B |
+| `PROGRAM_PAGE_OOB` | 至少 1024 B |
 
 物理 OOB 中的 1536 B LDPC 不会出现在 PIO 窗口中。
 
 ## 16. 物理 OOB 与逻辑 OOB 映射
 
-物理 page 的后端槽位总长为 `0x4680`，布局：
+物理 page 的后端槽位总长为 `0x4a00`，布局：
 
 ```text
 0x0000..0x3fff main
 0x4000         OOB head / BBM / logical OOB[0]
 0x4001..0x4600 LDPC
-0x4601..0x467f OOB tail / logical OOB[1..127]
+0x4601..0x49ff OOB tail / logical OOB[1..1023]
 ```
 
 物理范围：
@@ -496,14 +496,14 @@ OOB 命令传 128 B。
 | --- | ---: | --- |
 | `0x4000` | 1 B | OOB head / BBM |
 | `0x4001..0x4600` | 1536 B | 16 份 LDPC，每份 96 B |
-| `0x4601..0x467f` | 127 B | OOB tail / 软件 metadata |
+| `0x4601..0x49ff` | 1023 B | OOB tail / 软件 metadata |
 
 逻辑 OOB：
 
 | 逻辑 OOB 范围 | 映射 |
 | --- | --- |
 | byte 0 | 物理 `0x4000`，即 BBM |
-| bytes 1～127 | 物理 `0x4601..0x467f` |
+| bytes 1～1023 | 物理 `0x4601..0x49ff` |
 
 因此：
 
@@ -511,7 +511,7 @@ OOB 命令传 128 B。
 - 软件写逻辑 OOB 第一个字节可以标记坏块；
 - LDPC 区域完全由 QEMU 控制器生成和检查；
 - Linux 驱动不能直接读写物理 LDPC 字节；
-- main PROGRAM 保留 `0x4000` 与 `0x4601..0x467f`；
+- main PROGRAM 保留 `0x4000` 与 `0x4601..0x49ff`；
 - OOB PROGRAM 保留 `0x0000..0x3fff` 与 `0x4001..0x4600`。
 
 ## 17. 统计寄存器说明
@@ -542,8 +542,9 @@ OOB 命令传 128 B。
 - 重复 PROGRAM 使用 NAND 的逐字节 `old & incoming` 规则。
 - 块内严格编程顺序由上层文件系统/软件保证。
 - QEMU 不保存 RAID stripe、parity generation 或运行时 unprotected 状态。
-- RAID 布局、parity 调度和恢复策略属于 Linux 驱动。
-- 当前阶段不恢复 VM 重启前的 RAID 运行时状态。
+- 当前 NAND Core 分支的 Linux 驱动不实现 RAID 布局、parity 调度或恢复。
+- QEMU 中保留的 parity operation tag 仅是旧版统计 ABI，不构成 Page RAID
+  实现，也没有需要跨 VM 重启恢复的 RAID 运行时状态。
 
 ## 19. 对应源码
 

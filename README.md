@@ -51,7 +51,11 @@ BASE_IMAGE=your-registry.example.com/library/ubuntu:24.04 ./scripts/build-image.
 默认下载 QEMU 11.0.2，源码放在 `work/qemu/qemu-11.0.2`，构建输出在 `work/build/qemu-11.0.2/qemu-system-x86_64-unsigned`。
 可以用 `QEMU_VERSION` 或 `QEMU_DIR` 覆盖默认源码版本/目录。
 当前 QEMU overlay 会注册 `q3n-nand-pci`，`scripts/run-qemu.sh` 默认把它挂到 q35 PCI 总线上。
-Linux overlay 会注册 `qemu_3dnand` PCI 驱动，并通过直接 MTD 回调暴露名为 `qemu-3dnand` 的 MTD 设备。
+Linux overlay 会注册 `qemu_3dnand` PCI 驱动：先读取完整 8-byte NAND ID，
+从 `ytmc_nand.c` 白名单取得 `nand_flash_dev` 表，再调用
+`nand_scan_with_ids()`。MTD 读写、擦除、坏块和 BBT 均由 Raw NAND Core
+提供，Q3N 驱动只实现 controller `exec_op()`、`chip->ecc.*` 与
+`setup_read_retry()`。
 
 配置并编译内核：
 
@@ -69,7 +73,7 @@ Linux overlay 会注册 `qemu_3dnand` PCI 驱动，并通过直接 MTD 回调暴
 构建 initramfs：
 
 ```sh
-./scripts/build-rootfs.sh
+./scripts/shell.sh ./scripts/build-rootfs.sh
 ```
 
 启动 QEMU：
@@ -89,16 +93,16 @@ OOB、坏块标记和 bitflip overlay 会在 QEMU 正常退出后保留。需要
 也可以用 `--nand-image PATH` 选择独立镜像。镜像是约 51 GiB 的固定布局 sparse
 raw 文件，实际只为 header、已写物理页和 overlay 分配空间。
 
-每个 `0x4680` B 物理页的精确布局为：
+每个 `0x4a00` B 物理页的精确布局为：
 
 ```text
 0x0000..0x3fff main
 0x4000         OOB head / BBM / logical OOB[0]
 0x4001..0x4600 LDPC
-0x4601..0x467f OOB tail / logical OOB[1..127]
+0x4601..0x49ff OOB tail / logical OOB[1..1023]
 ```
 
-命令 6/7 各自只传输 128 B logical OOB，不携带 main，也不向 guest 暴露
+命令 6/7 各自只传输 1024 B logical OOB，不携带 main，也不向 guest 暴露
 LDPC。Linux 标坏通过普通 OOB PROGRAM 将 logical OOB byte 0 编程为 `00`；
 没有专用 mark-bad 命令。OOB PROGRAM 保留 main 与 LDPC，main PROGRAM
 保留 OOB head/tail。
@@ -109,12 +113,14 @@ LDPC。Linux 标坏通过普通 OOB PROGRAM 将 logical OOB byte 0 编程为 `00
 ./scripts/q3n-persistence-smoke.sh
 ```
 
-脚本执行两轮 guest，验证通过 OOB PROGRAM 写入的 BBM、标坏前的 raw main
-摘要和 block-isbad 状态跨重启保留，并验证坏块写擦拒绝。QEMU 不解释
-`D0..D6,P` 布局；映射和运行期 parity 状态始终由 Linux 驱动管理。
+脚本执行两轮 guest，验证 NAND Core 标坏产生的 OOB byte 0、标坏时擦除后的
+main 摘要和 block-isbad 状态跨重启保留，并验证坏块写擦拒绝。本分支不链接、
+不注册、也不保留任何 Page RAID 数据结构、调度器或调试接口。
 
-QEMU persists raw NAND bytes and bitflip overlays.  The driver does not
-restore Page-RAID runtime state after reload or VM restart in this phase.
+read retry 由 NAND Core 调度，共 4 个模式。QEMU 模型按模式提供
+`0/8/16/24` bit 的纠错增益；普通读更新 ECC 结果，raw read 返回原始受损数据
+且不改变最近一次 ECC 结果。自动化在 host 模型和驱动 callback 契约层覆盖
+40、41、49、57、65 bit 边界。
 
 自动执行 MTD smoke 并在成功后关闭虚拟机：
 
@@ -212,27 +218,16 @@ dmesg
 ./scripts/shell.sh ./scripts/run-qemu.sh --append "MTD_SMOKE=ubifs"
 ```
 
-串行同块 `D0..D6,P` Page-RAID 的确定性端到端验收可直接运行：
+Q3N NAND Core 的 guest 持久化与坏块验收可直接运行：
 
 ```sh
-./scripts/q3n-serial-smoke.sh
+./scripts/q3n-persistence-smoke.sh
 ```
 
-该 host wrapper 每次使用 fresh NAND，并严格要求 guest 同时输出串行验收和
-通用 MTD 成功 marker；单凭 QEMU 正常退出不会判定成功。测试逐页使用不同的
-确定性内容，验证真实 worker 的 P0>P1>P2 continuation、parity queue setup
-失败、one-shot program failure 及其 clear/invalid/reset disarm 路径，并确认
-失败后已写 data 仍可读、后续 stripe 可正常保护。guest 内可单独查看从启动
-以来的累计统计：
-
-```sh
-/etc/profile.d/mtd.sh q3n-parity-stats
-```
-
-输出包括 `foreground_ops`、`parity_reads`、`parity_writes`、
-`protected_stripes`、`unprotected_stripes`、`failed_stripes` 和
-`max_pending_parity`。前三类物理命令由 QEMU 计数；stripe 状态事件和 pending
-高水位由 Linux 驱动计数。
+该 host wrapper 使用 fresh NAND 启动第一轮 guest，完成擦除、page/OOB
+编程和 NAND Core 标坏；第二轮复用介质并验证 BBT、BBM、主区摘要以及坏块
+写擦拒绝。基础结构、补丁、地址换算、ID 白名单、控制器、ECC/read retry
+契约可运行 `./scripts/smoke-test.sh` 验证。
 
 ## 常见问题
 

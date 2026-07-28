@@ -8,6 +8,20 @@
 
 **Tech Stack:** Linux 7.0.12 raw NAND/MTD APIs, C11 host behavior tests, KUnit, QEMU 11.0.2 device model, POSIX shell overlay/build scripts, `git apply`.
 
+## Execution Status
+
+| Tasks | Status | Evidence |
+| --- | --- | --- |
+| 1–4 Linux exact-geometry patch pipeline | Complete | Three ordered, idempotent patches; arithmetic and BBT boundary tests |
+| 5–12 driver/model implementation | Complete | Eight-object KO; exact ID whitelist; controller/ECC/raw/read-retry host tests |
+| 13 NAND Core BBT ownership | Complete | Compiled-symbol contract plus guest markbad/BBT rescan |
+| 14 Linux/QEMU builds | Complete | Linux 7.0.12 KO/bzImage and QEMU 11.0.2 x86_64 build |
+| 15 guest integration | Partial | Probe, geometry, read/write/erase, OOB/BBM and persistence pass; guest read-retry fault injection is not exposed |
+| 16 documentation/GitHub | In progress | Documentation reconciled; final fresh verification and PR update remain |
+
+The unchecked boxes below preserve the original RED/GREEN implementation recipe; this
+table records the actual execution outcome after implementation.
+
 ## Global Constraints
 
 - Work only on `codex/nand-core-ecc-read-retry` in the isolated worktree.

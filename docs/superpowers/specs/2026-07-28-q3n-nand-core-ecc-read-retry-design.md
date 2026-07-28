@@ -6,11 +6,63 @@
 
 适用内核基线：Linux 7.0.12
 
-状态：待评审
+状态：已实现并通过 Linux 7.0.12 + QEMU 11.0.2 验证
+
+## 0. 实现记录
+
+本设计已在 `codex/nand-core-ecc-read-retry` 分支实现。生产 KO 由下列 8 个
+对象组成：
+
+```text
+qemu_3dnand_module.o
+qemu_3dnand_init.o
+qemu_3dnand_flash.o
+ytmc_nand.o
+qemu_3dnand_controller.o
+qemu_3dnand_ecc.o
+qemu_3dnand_addr.o
+qemu_3dnand_hw.o
+```
+
+旧 `main/map/raid/sched` 对象不再复制或链接。实现结果如下：
+
+- probe 预读完整 ID `9c d7 98 a6 51 33 4e 44`，精确命中
+  `ytmc_nand.c` 后，把对应的 sentinel-terminated `ids` 表传给
+  `nand_scan_with_ids(&chip, 1, ids)`；
+- MTD 报告 writesize 16384、oobsize 1024、erasesize 26214400、
+  size 43620761600，共 1664 个可见擦除块；
+- KO 不定义 MTD `_read/_write/_erase/_block_isbad/_block_markbad`
+  回调，也不维护私有 BBT；编译产物只引用 NAND Core scan/cleanup 和
+  MTD registration；
+- ECC 层实现 page、raw page、OOB 回调和 4 个 read-retry mode；
+- QEMU read retry 增益为 0/8/16/24 bit，raw read 不更新 ECC result；
+- NAND Core 标坏会先擦除目标块，再通过 OOB byte 0 写入 BBM；重启后
+  由标准 416-byte RAM BBT 重新扫描得到坏块状态；
+- Page RAID、parity、调度器和相关 debugfs 均未进入生产对象。
+
+Linux patch 必须按文件名顺序应用：
+
+1. `0001-mtd-rawnand-add-exact-geometry-helpers.patch`；
+2. `0002-mtd-rawnand-use-exact-geometry-in-io-paths.patch`；
+3. `0003-mtd-rawnand-use-exact-geometry-in-bbt.patch`。
+
+`scripts/apply-linux-patches.sh` 对每个 patch 先做 forward check；已应用时
+通过 reverse check 识别并跳过；两种检查都失败则立即停止。禁止手工修改
+`work/linux/linux-7.0.12` 作为交付方式。
+
+已完成的验证包括 host 边界/契约测试、真实 Linux 7.0.12 KO 与 bzImage
+构建、QEMU 11.0.2 构建、guest NAND Core probe/MTD 注册、读写擦、OOB
+BBM 以及跨重启 BBT 持久化。read-retry 的 40/41/49/57/65 bit 边界在
+QEMU 模型和驱动 callback 测试中确定性覆盖；当前未提供 guest 内的 fault
+注入用户接口，因此不把 guest read-retry 注入列为已完成验收项。
+
+扩展新器件时，只在对应 `<vendor>_nand.c` 中增加完整 ID 与几何表项，再把
+provider 接入 `qemu_3dnand_flash.c`。不得在 controller/hw 层硬编码厂商 ID，
+也不得对前缀 ID 做模糊匹配。
 
 ## 1. 背景
 
-当前 `qemu_3dnand` Linux 驱动直接持有 `struct mtd_info`，并自行实现
+原分支的 `qemu_3dnand` Linux 驱动直接持有 `struct mtd_info`，并自行实现
 `mtd->_read_oob`、`mtd->_write_oob`、`mtd->_erase`、`mtd->_sync`、
 `mtd->_block_isbad`、`mtd->_block_markbad` 等接口。这个结构绕过了 raw NAND
 core 的扫描、页读写、ECC 统计、坏块管理和 read retry 流程。
@@ -204,7 +256,7 @@ static struct nand_flash_dev ytmc_nand_ids[] = {
 		.options = NAND_NO_SUBPAGE_WRITE |
 			   NAND_NON_POWER_OF_2_GEOMETRY,
 		.id_len = 8,
-		.oobsize = 128,
+		.oobsize = 1024,
 		.ecc = NAND_ECC_INFO(40, SZ_1K),
 	},
 	{ .name = NULL },
@@ -289,7 +341,7 @@ scan 前的 READ ID 只用于选择厂商白名单，不能初始化或覆写 MT
 
 - `mtd->writesize = 16 KiB`；
 - `mtd->erasesize = 25 MiB`；
-- `mtd->oobsize = 128 B`；
+- `mtd->oobsize = 1024 B`；
 - target size = 41,600 MiB；
 - pages per eraseblock = 1600；
 - ECC requirement = 40 bit/1024 B；
@@ -685,7 +737,7 @@ q3n_pci_remove()
 
 - 验证 page size 为 16 KiB；
 - 验证 pages per eraseblock 为 1600；
-- 验证 OOB size 为 128 字节；
+- 验证 OOB size 为 1024 字节；
 - 验证只有 1 target 和每 target 1 LUN；
 - 配置 ECC engine type 和全部 ECC 回调；
 - 配置 OOB layout；
@@ -887,7 +939,7 @@ flowchart TD
 
 DATA window 使用显式 little-endian 和 unaligned helper，不能把任意 `u8 *`
 强制转换成 `u32 *`。所有长度必须由 request 给出并与 capability 校验，
-不能在 `hw.c` 重新硬编码 16 KiB/128 B。
+不能在 `hw.c` 重新硬编码 16 KiB/1024 B。
 
 ## 7. ECC 与 OOB 设计
 
@@ -899,7 +951,7 @@ Q3N LDPC 参数：
 - strength：40 bit/step；
 - 每页 step 数：16；
 - 控制器内部 LDPC 数据：96 字节/step，共 1536 字节/页；
-- Linux 可见 OOB：128 字节/页。
+- Linux 可见 OOB：1024 字节/页。
 
 LDPC 数据由控制器内部维护，不占 Linux 可见 OOB，因此配置为：
 
@@ -908,13 +960,13 @@ LDPC 数据由控制器内部维护，不占 Linux 可见 OOB，因此配置为�
 - `ecc.strength = 40`；
 - `ecc.bytes = 0`。
 
-`ecc.bytes` 不能填写 96，否则 NAND core 会将 1536 字节 ECC 数据与 128
+`ecc.bytes` 不能填写 96，否则 NAND core 会将 1536 字节 ECC 数据与 1024
 字节逻辑 OOB 比较并拒绝设备。
 
 ### 7.2 OOB layout
 
 - OOB byte 0：坏块标记，保留；
-- OOB byte 1..127：free region；
+- OOB byte 1..1023：free region；
 - 不暴露 ECC region。
 
 BBT 和 `block_markbad` 仍由 NAND core 通过 OOB byte 0 实现。Q3N 驱动必须
@@ -1034,7 +1086,7 @@ BBM 前会尝试擦除整个 block。重复 markbad 由 core 识别为已坏并�
 
 Q3N 只需保证：
 
-- `read_oob[_raw]` 能读取 page 的完整 128-byte 逻辑 OOB；
+- `read_oob[_raw]` 能读取 page 的完整 1024-byte 逻辑 OOB；
 - `write_oob[_raw]` 能进行 OOB-only program；
 - OOB-only program 不意外改写同一页主数据；
 - OOB byte 0 从 `0xff` 编程为 `0x00` 后可持久化；
@@ -1418,7 +1470,7 @@ CI 至少检查：
 - 确认传给 `nand_scan_with_ids()` 的第三个参数是
   `ytmc_nand_ids`，并成功完成 scan；
 - MTD 几何来自 `ytmc_nand.c` 表和 NAND core 初始化，不是 probe 手工赋值；
-- MTD 报告 16 KiB writesize、128 B oobsize、25 MiB erasesize；
+- MTD 报告 16 KiB writesize、1024 B oobsize、25 MiB erasesize；
 - MTD 报告 41,600 MiB 容量；
 - MTD `_read`、`_write`、`_erase` 指向 NAND core，而不是 Q3N 自定义入口；
 - MTD `_block_isbad`、`_block_markbad` 和 `_block_isreserved` 由
@@ -1468,7 +1520,7 @@ CI 至少检查：
 - normal read 返回纠正后的数据；
 - raw read 不更新 ECC 统计；
 - OOB byte 0 坏块标记可持久化；
-- OOB 1..127 可正常读写；
+- OOB 1..1023 可正常读写；
 - hidden LDPC 不占用逻辑 OOB。
 
 ### 13.7 Read Retry
