@@ -219,6 +219,8 @@ int q3n_hw_read_status(struct q3n *q3n, u8 *status)
 		return -EINVAL;
 
 	value = q3n_reg_read(q3n, Q3N_REG_STATUS);
-	*status = value & Q3N_STATUS_ERROR ? 0x01 : 0x40;
+	*status = Q3N_NAND_STATUS_READY | Q3N_NAND_STATUS_WP;
+	if (value & Q3N_STATUS_ERROR)
+		*status |= Q3N_NAND_STATUS_FAIL;
 	return 0;
 }

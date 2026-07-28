@@ -79,6 +79,7 @@ int main(void)
 	};
 	uint8_t id[8] = { 0 };
 	uint8_t short_id[2] = { 0 };
+	uint8_t nand_status = 0;
 	int ret;
 
 	ret = q3n_hw_read_id(&q3n, id, sizeof(id));
@@ -106,6 +107,16 @@ int main(void)
 	ret = q3n_hw_set_retry_mode(&q3n, 4);
 	if (ret >= 0 || fake.nwrites != 5) {
 		fprintf(stderr, "FAIL: invalid retry mode reached MMIO\n");
+		return 1;
+	}
+
+	ret = q3n_hw_read_status(&q3n, &nand_status);
+	if (ret || nand_status != (Q3N_NAND_STATUS_READY |
+				   Q3N_NAND_STATUS_WP)) {
+		fprintf(stderr,
+			"FAIL: writable NAND status is %#x, expected %#x\n",
+			nand_status,
+			Q3N_NAND_STATUS_READY | Q3N_NAND_STATUS_WP);
 		return 1;
 	}
 

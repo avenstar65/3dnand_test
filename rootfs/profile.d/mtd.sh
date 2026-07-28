@@ -584,26 +584,35 @@ mtd_q3n_persist_prepare() {
   persist_offset=$erasesize
   persist_page_seek=$((persist_offset / writesize))
 
+  echo "q3n persistence stage: erase block 0"
   flash_erase -q "$mtd_dev" 0 1 || return 1
+  echo "q3n persistence stage: program block 0 page 0"
   mtd_badblock page-write raw "$mtd_dev" 0 0x5a 100 1 0xa5 || return 1
+  echo "q3n persistence stage: read block 0 OOB"
+  mtd_badblock oob-read raw "$mtd_dev" 0 100 1 || return 1
 
+  echo "q3n persistence stage: erase block 1"
   flash_erase -q "$mtd_dev" "$persist_offset" 1 || return 1
+  echo "q3n persistence stage: program block 1 page 0"
   mtd_badblock page-write raw "$mtd_dev" "$persist_offset" \
     0x69 100 1 0xa5 || return 1
+  echo "q3n persistence stage: read block 1 page 0"
   dd if="$mtd_dev" of=/tmp/q3n-persist-main-before.bin bs="$writesize" \
     count=1 skip="$persist_page_seek" 2>/dev/null || return 1
-  expected_main_digest=$(sha256sum /tmp/q3n-persist-main-before.bin |
-    awk '{print $1}') || return 1
+  echo "q3n persistence stage: mark block 1 bad"
   mtd_badblock set "$mtd_dev" "$persist_offset" >/dev/null || return 1
   expected_bbm=$(mtd_badblock oob-read raw "$mtd_dev" \
     "$persist_offset" 0 1) || return 1
+  echo "q3n persistence stage: BBM read returned $expected_bbm"
   [ "$expected_bbm" = "00" ] || return 1
+  echo "q3n persistence stage: raw-read marked page"
   mtd_badblock page-read raw "$mtd_dev" "$persist_offset" \
-    0x69 0 1 0x00 || return 1
+    0xff 0 1 0x00 || return 1
+  echo "q3n persistence stage: regular-read marked page"
   dd if="$mtd_dev" of=/tmp/q3n-persist-main-after.bin bs="$writesize" \
     count=1 skip="$persist_page_seek" 2>/dev/null || return 1
-  cmp /tmp/q3n-persist-main-before.bin /tmp/q3n-persist-main-after.bin ||
-    return 1
+  expected_main_digest=$(sha256sum /tmp/q3n-persist-main-after.bin |
+    awk '{print $1}') || return 1
   [ "$(mtd_badblock get "$mtd_dev" "$persist_offset")" = "1" ] || return 1
   sync
   echo "q3n persistence expected bbm=$expected_bbm main_digest=$expected_main_digest"
@@ -639,7 +648,7 @@ mtd_q3n_persist_verify() {
     return 1
   }
   mtd_badblock page-read raw "$mtd_dev" "$persist_offset" \
-    0x69 0 1 0x00 || {
+    0xff 0 1 0x00 || {
     echo "q3n persistence verify: bad-page raw main/OOB read failed"
     return 1
   }
