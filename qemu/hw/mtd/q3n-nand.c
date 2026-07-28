@@ -32,6 +32,25 @@ typedef struct Q3NEccResult {
     uint32_t failed_steps;
 } Q3NEccResult;
 
+static bool q3n_retry_mode_valid(uint32_t mode)
+{
+    return mode < Q3N_READ_RETRY_MODES;
+}
+
+static uint32_t q3n_retry_gain(uint32_t mode)
+{
+    static const uint8_t gains[Q3N_READ_RETRY_MODES] = { 0, 8, 16, 24 };
+
+    return q3n_retry_mode_valid(mode) ? gains[mode] : 0;
+}
+
+static uint32_t q3n_effective_bitflips(uint32_t raw_bitflips, uint32_t mode)
+{
+    uint32_t gain = q3n_retry_gain(mode);
+
+    return raw_bitflips > gain ? raw_bitflips - gain : 0;
+}
+
 static void q3n_generate_ldpc_step(uint64_t page_key, uint32_t step,
                                    const uint8_t *data, uint8_t *ldpc)
 {
@@ -74,7 +93,8 @@ static uint32_t q3n_overlay_popcount(const uint8_t *overlay, uint32_t size)
 static Q3NEccResult q3n_decode_ldpc(uint64_t page_key, const uint8_t *data,
                                     const uint8_t *ldpc,
                                     const uint8_t *main_overlay,
-                                    const uint8_t *ldpc_overlay, bool erased)
+                                    const uint8_t *ldpc_overlay, bool erased,
+                                    uint32_t retry_mode)
 {
     Q3NEccResult result = {
         .status = Q3N_ECC_STATUS_CLEAN,
@@ -95,6 +115,7 @@ static Q3NEccResult q3n_decode_ldpc(uint64_t page_key, const uint8_t *data,
         bitflips = q3n_overlay_popcount(main_errors, Q3N_ECC_STEP_SIZE) +
                    q3n_overlay_popcount(ldpc_errors,
                                         Q3N_LDPC_BYTES_PER_STEP);
+        bitflips = q3n_effective_bitflips(bitflips, retry_mode);
         if (!erased) {
             q3n_generate_ldpc_step(page_key, step,
                                    data + step * Q3N_ECC_STEP_SIZE,
@@ -177,6 +198,8 @@ struct Q3NNandState {
     uint32_t fault_count;
     uint32_t fault_region;
     uint32_t op_class;
+    uint32_t read_flags;
+    uint32_t retry_mode;
     uint64_t fail_program_addr;
     bool fail_next_program;
     uint32_t block_status;
@@ -216,7 +239,7 @@ static bool q3n_decode_addr(Q3NNandState *s, uint64_t byte_addr,
 }
 
 static int q3n_read_page(Q3NNandState *s, uint32_t block, uint32_t page,
-                         uint8_t *buf)
+                         uint8_t *buf, bool raw)
 {
     uint64_t page_key = (uint64_t)block * Q3N_PAGES_PER_BLOCK + page;
     bool erased;
@@ -231,11 +254,19 @@ static int q3n_read_page(Q3NNandState *s, uint32_t block, uint32_t page,
         return ret;
     }
 
+    if (raw) {
+        for (uint32_t i = 0; i < Q3N_PAGE_SIZE; i++) {
+            buf[i] ^= s->main_overlay[i];
+        }
+        return 0;
+    }
+
     erased = q3n_media_is_erased(buf, Q3N_PAGE_SIZE) &&
              q3n_media_is_erased(s->ldpc, Q3N_PHYSICAL_LDPC_SIZE);
 
     result = q3n_decode_ldpc(page_key, buf, s->ldpc,
-                             s->main_overlay, s->ldpc_overlay, erased);
+                             s->main_overlay, s->ldpc_overlay, erased,
+                             s->retry_mode);
     s->ecc_status = result.status;
     s->ecc_max_bitflips = result.ecc_max_bitflips;
     s->ecc_corrected_bits = result.ecc_corrected_bits;
@@ -368,7 +399,9 @@ static void q3n_finish_error(Q3NNandState *s)
 
 static void q3n_cmd_read_id(Q3NNandState *s)
 {
-    static const uint8_t id[] = { 0x2c, 0xd7, 0x90, 0xa6, 'Q', '3', 'N', 'D' };
+    static const uint8_t id[] = {
+        0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44
+    };
 
     memset(s->data_buf, 0xff, sizeof(s->data_buf));
     memcpy(s->data_buf, id, sizeof(id));
@@ -382,8 +415,11 @@ static void q3n_cmd_read_page(Q3NNandState *s)
     uint32_t block;
     uint32_t page;
     uint32_t column;
+    bool raw = s->read_flags & Q3N_READ_F_RAW;
 
-    q3n_clear_ecc_result(s);
+    if (!raw) {
+        q3n_clear_ecc_result(s);
+    }
     if (!q3n_decode_addr(s, s->addr, &block, &page, &column) || column != 0) {
         q3n_finish_error(s);
         return;
@@ -395,7 +431,7 @@ static void q3n_cmd_read_page(Q3NNandState *s)
         s->stats.fg_ops++;
     }
 
-    if (q3n_read_page(s, block, page, s->data_buf)) {
+    if (q3n_read_page(s, block, page, s->data_buf, raw)) {
         q3n_finish_error(s);
         return;
     }
@@ -526,6 +562,8 @@ static void q3n_cmd_reset(Q3NNandState *s)
     s->cmd = Q3N_CMD_NOP;
     s->data_pos = 0;
     s->data_count = 0;
+    s->read_flags = 0;
+    s->retry_mode = 0;
     s->irq_status = 0;
     qemu_irq_lower(s->irq);
     q3n_clear_ecc_result(s);
@@ -626,7 +664,7 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
         return Q3N_ID_VALUE;
     case Q3N_REG_CAP:
         return Q3N_CAP_BASIC_FLASH | Q3N_CAP_PERSISTENT_MEDIA |
-               Q3N_CAP_BAD_BLOCK_MARKER;
+               Q3N_CAP_BAD_BLOCK_MARKER | Q3N_CAP_READ_RETRY;
     case Q3N_REG_STATUS:
         return s->status;
     case Q3N_REG_CMD:
@@ -707,6 +745,10 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
         return (uint32_t)s->stats.ldpc_uncorrectable_pages;
     case Q3N_REG_STAT_LDPC_FAILED_STEPS:
         return (uint32_t)s->stats.ldpc_failed_steps;
+    case Q3N_REG_READ_FLAGS:
+        return s->read_flags;
+    case Q3N_REG_RETRY_MODE:
+        return s->retry_mode;
     default:
         return 0;
     }
@@ -750,6 +792,18 @@ static void q3n_mmio_write(void *opaque, hwaddr offset, uint64_t value,
     case Q3N_REG_OP_CLASS:
         if (value <= Q3N_OP_PARITY_WRITE) {
             s->op_class = value;
+        }
+        break;
+    case Q3N_REG_READ_FLAGS:
+        if (!(value & ~Q3N_READ_F_RAW)) {
+            s->read_flags = value;
+        }
+        break;
+    case Q3N_REG_RETRY_MODE:
+        if (q3n_retry_mode_valid(value)) {
+            s->retry_mode = value;
+        } else {
+            s->status |= Q3N_STATUS_ERROR;
         }
         break;
     case Q3N_REG_FAULT_ADDR_LO:

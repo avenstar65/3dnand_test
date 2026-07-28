@@ -22,6 +22,7 @@
 #define Q3N_ECC_STEP_SIZE          1024U
 #define Q3N_ECC_STRENGTH           40U
 #define Q3N_ECC_NO_FAILED_STEP     UINT32_MAX
+#define Q3N_READ_RETRY_MODES       4U
 
 #define cpu_to_le32(value) (value)
 #define cpu_to_le64(value) (value)
@@ -83,7 +84,44 @@ static Q3NEccResult decode_erased(const uint8_t *main_overlay,
     memset(data, 0xff, sizeof(data));
     memset(ldpc, 0xff, sizeof(ldpc));
     return q3n_decode_ldpc(0, data, ldpc, main_overlay,
-                           ldpc_overlay, true);
+                           ldpc_overlay, true, 0);
+}
+
+static void test_read_retry_boundaries(void)
+{
+    static const struct {
+        uint32_t raw;
+        uint32_t first_success_mode;
+    } cases[] = {
+        { 0, 0 },
+        { 40, 0 },
+        { 41, 1 },
+        { 48, 1 },
+        { 49, 2 },
+        { 56, 2 },
+        { 57, 3 },
+        { 64, 3 },
+        { 65, UINT32_MAX },
+    };
+
+    assert(q3n_retry_gain(0) == 0);
+    assert(q3n_retry_gain(1) == 8);
+    assert(q3n_retry_gain(2) == 16);
+    assert(q3n_retry_gain(3) == 24);
+    assert(!q3n_retry_mode_valid(4));
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        uint32_t first_success = UINT32_MAX;
+
+        for (uint32_t mode = 0; mode < 4; mode++) {
+            if (q3n_effective_bitflips(cases[i].raw, mode) <=
+                Q3N_ECC_STRENGTH) {
+                first_success = mode;
+                break;
+            }
+        }
+        assert(first_success == cases[i].first_success_mode);
+    }
 }
 
 static void test_decode_thresholds(void)
@@ -160,7 +198,7 @@ static void test_ldpc_mismatch_is_uncorrectable(void)
     ldpc[Q3N_LDPC_BYTES_PER_STEP] ^= 1;
 
     result = q3n_decode_ldpc(7, data, ldpc, main_overlay,
-                             ldpc_overlay, false);
+                             ldpc_overlay, false, 0);
     assert(result.status == Q3N_ECC_STATUS_UNCORRECTABLE);
     assert(result.failed_step == 1);
     assert(result.failed_steps == 1);
@@ -241,6 +279,7 @@ static void test_physical_page_oob_mapping_preserves_main_and_ldpc(void)
 
 int main(void)
 {
+    test_read_retry_boundaries();
     test_decode_thresholds();
     test_decode_aggregates_steps();
     test_ldpc_mismatch_is_uncorrectable();

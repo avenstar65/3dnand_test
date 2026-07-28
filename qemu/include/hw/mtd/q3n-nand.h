@@ -83,6 +83,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(Q3NNandState, Q3N_NAND)
 #define Q3N_CAP_BASIC_FLASH             (1U << 0)
 #define Q3N_CAP_PERSISTENT_MEDIA        (1U << 1)
 #define Q3N_CAP_BAD_BLOCK_MARKER        (1U << 2)
+#define Q3N_CAP_READ_RETRY              (1U << 3)
 
 #define Q3N_BLOCK_STATUS_BAD            (1U << 0)
 #define Q3N_BLOCK_STATUS_ERASED         (1U << 1)
@@ -128,8 +129,13 @@ enum q3n_reg {
     Q3N_REG_STAT_LDPC_CORRECTED = 0x00b0,
     Q3N_REG_STAT_LDPC_UNCORRECTABLE = 0x00b4,
     Q3N_REG_STAT_LDPC_FAILED_STEPS = 0x00b8,
+    Q3N_REG_READ_FLAGS         = 0x00bc,
+    Q3N_REG_RETRY_MODE         = 0x00c0,
     Q3N_REG_DATA               = 0x1000,
 };
+
+#define Q3N_READ_F_RAW                  (1U << 0)
+#define Q3N_READ_RETRY_MODES            4U
 
 enum q3n_cmd {
     Q3N_CMD_NOP        = 0,
