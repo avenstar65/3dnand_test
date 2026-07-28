@@ -43,6 +43,10 @@ Linux `nand_base` 相关代码，但修改必须以版本化 patch 交付，不�
 ### 2.1 本期目标
 
 - 使用 `nand_scan_with_ids()` 初始化 `nand_chip` 和 MTD；
+- 把厂商 NAND ID、几何和 ECC requirement 独立保存在
+  `ytmc_nand.c`；
+- 先按完整 NAND ID 白名单选择厂商 `ids` 表，再把该表传给
+  `nand_scan_with_ids()`；
 - 不在 Q3N 驱动中直接实现 MTD `_read`、`_write`、`_erase` 等入口；
 - 实现 `ecc->read_page`、`ecc->write_page`、raw 页读写和 OOB 回调；
 - 使用 controller `exec_op` 实现 NAND reset、read ID、status 和 erase；
@@ -73,6 +77,8 @@ flowchart TD
     B --> C["Raw NAND Core<br/>nand_base.c / nand_bbt.c"]
     C --> D["Q3N nand_chip<br/>ECC page/OOB callbacks"]
     C --> E["Q3N nand_controller<br/>exec_op / attach_chip"]
+    H["ytmc_nand.c<br/>完整 ID + 几何白名单"] --> E
+    E -->|"nand_scan_with_ids(ids)"| C
     D --> F["Q3N MMIO 控制器"]
     E --> F
     F --> G["QEMU Q3N NAND 模型"]
@@ -116,8 +122,10 @@ Linux 改动采用显式 opt-in。只有设置 Q3N 非二次幂选项的 NAND �
 - logical block 0..1663 直接映射到 data pool 的 physical block 0..1663；
 - 不访问 parity、metadata 和 reserve pool。
 
-自定义 ID 表项必须返回上述精确容量和几何。`chipsize` 使用 MiB 表示时为
-41600，能够精确表示本期可见容量。
+`ytmc_nand.c` 中的 ID 表项必须描述上述精确容量和几何。`chipsize` 使用
+MiB 表示时为 41600，能够精确表示本期可见容量。probe 不直接把这些值写入
+MTD，而是把匹配到的 `ids` 表传给 `nand_scan_with_ids()`，由 NAND core
+完成初始化。
 
 ## 5. 驱动对象模型
 
@@ -136,23 +144,147 @@ struct qemu_3dnand {
 不再嵌入独立的 `struct mtd_info`。需要 MTD 时通过
 `nand_to_mtd(&q3n->chip)` 取得。
 
-### 5.1 Probe 流程
+### 5.1 Controller ID 与 NAND Flash ID
+
+Q3N 有两个不同的 ID，不能混用：
+
+- `Q3N_REG_ID` 返回 `Q3N_ID_VALUE`，用于确认 PCI/MMIO 控制器是 Q3N；
+- NAND READ ID 命令返回 NAND flash 的字节序列，用于选择
+  `struct nand_flash_dev` 白名单和初始化 MTD。
+
+通过 `Q3N_REG_ID` 只能证明控制器类型正确，不能据此选择 flash 几何。
+`nand_scan_with_ids()` 的第三个参数必须来自 NAND READ ID 白名单匹配结果。
+
+### 5.2 `ytmc_nand.c` 器件描述
+
+首个厂商器件表放在独立文件：
+
+```text
+linux/drivers/mtd/nand/raw/
+├── qemu_3dnand_main.c
+├── qemu_3dnand_priv.h
+├── ytmc_nand.c
+└── ytmc_nand.h
+```
+
+职责划分：
+
+- `ytmc_nand.c`：保存 YTMC 完整 ID 白名单、几何、option 和 ECC
+  requirement，并实现白名单匹配；
+- `ytmc_nand.h`：只声明匹配接口，不保存几何常量；
+- `qemu_3dnand_main.c`：读取 NAND ID、选择 `ids` 表并调用
+  `nand_scan_with_ids()`；
+- `nand_base.c`：再次读取 ID、在传入表中匹配并初始化
+  `nand_chip`/`mtd_info`。
+
+`ytmc_nand.c` 首期表项采用项目内假设 ID，不代表真实 JEDEC 厂商编号：
+
+```c
+static struct nand_flash_dev ytmc_nand_ids[] = {
+	{
+		.name = "YTMC Q3N 41600MiB",
+		.id = { 0x9c, 0xd7, 0x98, 0xa6,
+			0x51, 0x33, 0x4e, 0x44 },
+		.pagesize = SZ_16K,
+		.chipsize = 41600,
+		.erasesize = 25 * SZ_1M,
+		.options = NAND_NO_SUBPAGE_WRITE |
+			   NAND_NON_POWER_OF_2_GEOMETRY,
+		.id_len = 8,
+		.oobsize = 128,
+		.ecc = NAND_ECC_INFO(40, SZ_1K),
+	},
+	{ .name = NULL },
+};
+```
+
+其中 `0x51 0x33 0x4e 0x44` 对应项目标识 `Q3ND`。第三个字节 `0x98`
+使 Linux full-ID 解析得到 3 bit/cell。QEMU READ ID 必须返回完全相同的
+8 字节。
+
+表必须以 `{ .name = NULL }` 结束，因为 `nand_scan_with_ids()` 会从传入
+指针开始遍历到该终止项。Linux 驱动中用于 MTD 初始化的器件描述只在
+`ytmc_nand.c` 保留一份，main 不得再复制一份。QEMU 仍保存硬件模型自身
+的几何并通过 capability 寄存器上报，`attach_chip` 负责验证两者一致。
+
+首期匹配接口为：
+
+```c
+struct nand_flash_dev *
+ytmc_nand_match_ids(const u8 *id, size_t len);
+```
+
+匹配规则：
+
+- 必须至少取得 8 字节 ID；
+- 必须按 `id_len` 完整比较，不能只比较 manufacturer ID 或 device ID；
+- 任一字节不匹配返回 `NULL`；
+- 匹配成功返回包含该器件且以空项结尾的 `ytmc_nand_ids` 表首地址；
+- 接口返回可写类型是因为 Linux 7.0.12
+  `nand_scan_with_ids()` 参数不是 `const`，调用方不得修改表内容。
+
+同一厂商增加器件时，在 `ytmc_nand.c` 表中增加 full-ID 项即可。以后支持
+其他厂商时，为每个厂商建立独立 `<vendor>_nand.c`，probe 的白名单选择器
+按厂商 matcher 顺序查询；不把私有器件追加到 Linux 全局
+`nand_flash_ids[]`。
+
+由于 `0x9c` 是项目内假设值，首期不向 Linux 全局 manufacturer 表注册
+YTMC manufacturer ID。NAND core 的 manufacturer 字段可显示为 Unknown，
+器件 model 仍使用 `ytmc_nand.c` 中的 `"YTMC Q3N 41600MiB"`。替换为真实
+器件 ID 时，需要同时更新 QEMU READ ID 和该 full-ID 表项。
+
+### 5.3 ID 白名单探测与 Probe 流程
 
 1. 分配并初始化 `struct qemu_3dnand`；
 2. 映射 MMIO、取得中断和其他平台资源；
-3. `nand_controller_init(&q3n->controller)`；
-4. 设置 `controller.ops = &q3n_controller_ops`；
-5. 设置 `chip.controller`、`chip.options` 和 `chip.ops.setup_read_retry`；
-6. 设置 Q3N 非二次幂 opt-in 标志；
-7. 调用 `nand_scan_with_ids(&q3n->chip, 1, q3n_ids)`；
-8. 从 `nand_to_mtd()` 取得 MTD，设置名称和 owner；
-9. 调用 `mtd_device_register()`。
+3. 读取 `Q3N_REG_ID`，验证 Q3N controller ID；
+4. `nand_controller_init(&q3n->controller)`；
+5. 设置 `controller.ops = &q3n_controller_ops`；
+6. 设置 `chip.controller` 和 `chip.ops.setup_read_retry`；
+7. 使用 scan 前可用的底层 Q3N READ ID helper 读取 8 字节 NAND ID；
+8. 调用 `ytmc_nand_match_ids()` 选择白名单 `ids`；
+9. 未匹配则返回 `-ENODEV`，不回退到 Linux 全局 ID 表或 ONFI/JEDEC
+   自动探测；
+10. 调用 `nand_scan_with_ids(&q3n->chip, 1, ids)`；
+11. 从 `nand_to_mtd()` 取得 MTD，设置名称和 owner；
+12. 调用 `mtd_device_register()`。
 
-`nand_scan_with_ids()` 的 ID 识别依赖 QEMU 已有的 READ ID 行为。自定义
-`nand_flash_dev` 表只描述设备 ID 和真实几何，不在 probe 中手工覆写扫描
-结果。
+伪代码：
 
-### 5.2 Remove 和失败回退
+```c
+ret = q3n_hw_read_flash_id(q3n, id, sizeof(id));
+if (ret)
+	return ret;
+
+ids = ytmc_nand_match_ids(id, sizeof(id));
+if (!ids)
+	return dev_err_probe(dev, -ENODEV,
+			     "unsupported NAND flash ID\n");
+
+ret = nand_scan_with_ids(&q3n->chip, 1, ids);
+if (ret)
+	return ret;
+```
+
+scan 前的 READ ID 只用于选择厂商白名单，不能初始化或覆写 MTD。进入
+`nand_scan_with_ids()` 后，`nand_base.c` 会执行 reset、读取前两个 ID
+字节、再次读取完整 ID，并在传入的 `ids` 表中进行 full-ID 匹配。匹配后
+由 core 填充：
+
+- `mtd->writesize = 16 KiB`；
+- `mtd->erasesize = 25 MiB`；
+- `mtd->oobsize = 128 B`；
+- target size = 41,600 MiB；
+- pages per eraseblock = 1600；
+- ECC requirement = 40 bit/1024 B；
+- `NAND_NON_POWER_OF_2_GEOMETRY` 等器件 options。
+
+预探测和 NAND core 的再次读取构成双重校验。如果预探测匹配，但 scan
+读取到不同 ID，scan 必须失败且不得注册 MTD。驱动只能在 `attach_chip`
+中验证 scan 结果与 Q3N capability 寄存器一致，不能用 capability
+寄存器覆盖 ID 表给出的几何。
+
+### 5.4 Remove 和失败回退
 
 注册成功后，remove 顺序必须为：
 
@@ -337,15 +469,17 @@ Linux 7.0.12 的 `BIT(15)` 未被现有 NAND option 使用。在
 #define NAND_NON_POWER_OF_2_GEOMETRY BIT(15)
 ```
 
-Q3N 在 scan 前设置该标志。patch 应包含编译期或静态检查，防止后续基线
-移植时与新 option bit 冲突。
+`ytmc_nand.c` 的匹配表项设置该标志；`nand_base.c` 完成 full-ID 匹配时，
+通过 `chip->options |= type->options` 把它并入 chip。probe 不再单独写入同一
+标志。patch 应包含编译期或静态检查，防止后续基线移植时与新 option bit
+冲突。
 
 该标志的首期契约：
 
 - page size 仍必须是二次幂；
 - pages per eraseblock、eraseblock size 和 target size 可以不是二次幂；
 - 只支持 1 target、每 target 1 LUN；
-- 其他芯片不设置该标志，继续走原有逻辑。
+- 其他器件的 ID 表项不设置该标志，继续走原有逻辑。
 
 如果设置标志但 target/LUN 数量超出本期范围，scan 必须失败并打印清晰错误。
 
@@ -477,6 +611,10 @@ patch 文件是 Linux 改动的唯一 source of truth。实施时可以在临时
 导出到 `patches/linux/`。不能把临时 Linux worktree 中的已应用状态当作
 交付物。
 
+`qemu_3dnand_main.c`、`ytmc_nand.c` 和 `ytmc_nand.h` 属于 Q3N 项目驱动
+overlay，直接在本仓库跟踪；`nand_base.c`、raw NAND `nand_bbt.c` 和
+`rawnand.h` 等原生 Linux 文件仍只能通过 `patches/linux/` 修改。
+
 仓库中的 `work/linux/linux-7.0.12` 仅是构建产物或外部源码副本：
 
 - 不直接手工修改；
@@ -572,8 +710,19 @@ CI 至少检查：
 
 ### 13.2 扫描与基本 MTD
 
+- `Q3N_REG_ID` 只验证 controller，不参与 flash table 选择；
+- QEMU READ ID 返回
+  `9c d7 98 a6 51 33 4e 44`；
+- `ytmc_nand_match_ids()` 对完整 8 字节匹配成功并返回终止完整的 ids 表；
+- ID 任一字节不同、ID 长度不足或未知厂商均返回 `NULL`；
+- 白名单未命中时 probe 返回 `-ENODEV`，不调用
+  `nand_scan_with_ids()`；
+- 白名单未命中时不回退到全局 ID、ONFI 或 JEDEC 探测；
+- 预探测 ID 与 NAND core 再读 ID 不一致时 scan 失败；
 - READ ID 返回期望 ID；
-- `nand_scan_with_ids()` 成功；
+- 确认传给 `nand_scan_with_ids()` 的第三个参数是
+  `ytmc_nand_ids`，并成功完成 scan；
+- MTD 几何来自 `ytmc_nand.c` 表和 NAND core 初始化，不是 probe 手工赋值；
 - MTD 报告 16 KiB writesize、128 B oobsize、25 MiB erasesize；
 - MTD 报告 41,600 MiB 容量；
 - MTD `_read`、`_write`、`_erase` 指向 NAND core，而不是 Q3N 自定义入口；
@@ -633,11 +782,15 @@ CI 至少检查：
 3. patch 2：`nand_base.c` I/O、erase、坏块和 scan 路径；
 4. patch 3：`nand_bbt.c` 精确 block/BBT 计算；
 5. 为非二次幂边界增加内核测试；
-6. 重构 Q3N 驱动为 `nand_chip`/`nand_controller`；
-7. 实现 ECC page/OOB/raw callbacks；
-8. 增加 QEMU raw-read 和 read-retry mode；
-9. 接入 NAND core read retry；
-10. 完成 MTD、BBT、UBI 和回归验证。
+6. 新增 `ytmc_nand.c`/`.h`、full-ID 白名单测试并接入 Makefile；
+7. 调整 QEMU READ ID 为假设的 YTMC full ID；
+8. 重构 Q3N 驱动为 `nand_chip`/`nand_controller`；
+9. 实现预探测、`ytmc_nand_match_ids()` 和
+   `nand_scan_with_ids(ids)` 数据流；
+10. 实现 ECC page/OOB/raw callbacks；
+11. 增加 QEMU raw-read 和 read-retry mode；
+12. 接入 NAND core read retry；
+13. 完成 MTD、BBT、UBI 和回归验证。
 
 驱动重构依赖 Linux patch 已可稳定应用；read retry 依赖标准 page read
 返回契约完成；任何 page RAID 工作不进入本期实施计划。
@@ -648,6 +801,9 @@ CI 至少检查：
 
 - 接受只暴露 1664 个 data-pool blocks、40.625 GiB MTD；
 - 接受本期非二次幂支持限定为 1 target、1 LUN；
+- 接受首期假设 full ID 为 `9c d7 98 a6 51 33 4e 44`；
+- 接受通过 `ytmc_nand.c` 白名单预探测选择传给
+  `nand_scan_with_ids()` 的 ids 表；
 - 接受 Linux 修改以三段 patch series 交付；
 - 接受旧 page RAID image 不做兼容承诺；
 - 接受 retry 成功向上层报告 scrub 提示；
