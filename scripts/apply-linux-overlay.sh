@@ -9,6 +9,8 @@ raw_dir="$linux_dir/drivers/mtd/nand/raw"
 
 [ -d "$raw_dir" ] || die "Linux 源码缺少 raw NAND 目录: $raw_dir"
 
+sh "$repo_root/scripts/apply-linux-patches.sh" "$linux_dir"
+
 info "应用 qemu_3dnand Linux overlay 到: $linux_dir"
 
 rm -f "$raw_dir/qemu_3dnand.c"
