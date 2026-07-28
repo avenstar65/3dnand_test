@@ -78,6 +78,7 @@ int main(void)
 		},
 	};
 	uint8_t id[8] = { 0 };
+	uint8_t short_id[2] = { 0 };
 	int ret;
 
 	ret = q3n_hw_read_id(&q3n, id, sizeof(id));
@@ -88,13 +89,22 @@ int main(void)
 	expect_write(&fake, 0, Q3N_REG_LEN, 8);
 	expect_write(&fake, 1, Q3N_REG_CMD, Q3N_CMD_READ_ID);
 
+	fake.id_pos = 0;
+	ret = q3n_hw_read_id(&q3n, short_id, sizeof(short_id));
+	if (ret || memcmp(short_id, fake.id, sizeof(short_id))) {
+		fprintf(stderr, "FAIL: NAND Core two-byte ID read failed\n");
+		return 1;
+	}
+	expect_write(&fake, 2, Q3N_REG_LEN, 2);
+	expect_write(&fake, 3, Q3N_REG_CMD, Q3N_CMD_READ_ID);
+
 	ret = q3n_hw_set_retry_mode(&q3n, 3);
 	if (ret)
 		return 1;
-	expect_write(&fake, 2, Q3N_REG_RETRY_MODE, 3);
+	expect_write(&fake, 4, Q3N_REG_RETRY_MODE, 3);
 
 	ret = q3n_hw_set_retry_mode(&q3n, 4);
-	if (ret >= 0 || fake.nwrites != 3) {
+	if (ret >= 0 || fake.nwrites != 5) {
 		fprintf(stderr, "FAIL: invalid retry mode reached MMIO\n");
 		return 1;
 	}

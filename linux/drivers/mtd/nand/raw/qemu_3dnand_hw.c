@@ -62,8 +62,11 @@ static void q3n_hw_read_window(struct q3n *q3n, u8 *buffer, size_t length)
 
 	for (offset = 0; offset < length; offset += sizeof(u32)) {
 		u32 value = q3n_reg_read(q3n, Q3N_REG_DATA);
+		size_t remaining = length - offset;
+		size_t chunk = remaining < sizeof(value) ?
+			       remaining : sizeof(value);
 
-		memcpy(buffer + offset, &value, sizeof(value));
+		memcpy(buffer + offset, &value, chunk);
 	}
 }
 
@@ -93,7 +96,7 @@ int q3n_hw_read_id(struct q3n *q3n, u8 *id, size_t len)
 {
 	int ret;
 
-	if (!q3n || !id || len != sizeof(q3n->id))
+	if (!q3n || !id || !len || len > sizeof(q3n->id))
 		return -EINVAL;
 
 	q3n_reg_write(q3n, Q3N_REG_LEN, len);

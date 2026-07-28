@@ -31,7 +31,8 @@ static int q3n_exec_read_id(struct q3n *q3n,
 	const struct nand_op_instr *data;
 
 	data = q3n_find_instr(op, NAND_OP_DATA_IN_INSTR, 0);
-	if (!data || data->ctx.data.len != sizeof(q3n->id))
+	if (!data || !data->ctx.data.len ||
+	    data->ctx.data.len > sizeof(q3n->id))
 		return -ENOTSUPP;
 	if (check_only)
 		return 0;
