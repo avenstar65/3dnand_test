@@ -8,6 +8,7 @@ sh "$repo_root/tests/test_q3n_overlay.sh"
 sh "$repo_root/tests/test_linux_patches.sh"
 sh "$repo_root/tests/test_q3n_addr.sh"
 sh "$repo_root/tests/test_q3n_flash.sh"
+sh "$repo_root/tests/test_q3n_hw.sh"
 
 for script in "$repo_root"/scripts/*.sh; do
   sh -n "$script"
