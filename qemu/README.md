@@ -84,7 +84,7 @@ the default sparse raw image as `q3n-nand-pci,drive=q3n-media`; `--fresh-nand`
 removes that image before QEMU starts and `--nand-image` selects another path.
 
 Image v2 begins with a 4 KiB `Q3NMEDIA` header followed by fixed physical-page
-slots. Each physical page is exactly `0x4680` bytes:
+slots. Each physical page is exactly `0x4a00` bytes:
 
 ```text
 0x0000..0x3fff main

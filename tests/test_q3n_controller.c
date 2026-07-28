@@ -5,7 +5,7 @@
 #include <string.h>
 
 #define Q3N_PAGE_SIZE              16384U
-#define Q3N_LOGICAL_OOB_SIZE       128U
+#define Q3N_LOGICAL_OOB_SIZE       1024U
 #define Q3N_LDPC_BYTES_PER_STEP    96U
 #define Q3N_LDPC_STEPS             16U
 #define Q3N_LDPC_TOTAL_BYTES       1536U
@@ -261,7 +261,7 @@ static void test_physical_page_oob_mapping_preserves_main_and_ldpc(void)
 
     q3n_media_extract_logical_oob(physical_page, logical);
     assert(logical[0] == physical_page[0x4000]);
-    assert(!memcmp(logical + 1, physical_page + 0x4601, 127));
+    assert(!memcmp(logical + 1, physical_page + 0x4601, 1023));
     assert_all_equal(physical_page, 0, 0x4000, main_sentinel);
     assert_all_equal(physical_page, 0x4001, 0x4601, ldpc_sentinel);
 
@@ -271,7 +271,7 @@ static void test_physical_page_oob_mapping_preserves_main_and_ldpc(void)
            Q3N_PHYSICAL_LDPC_SIZE);
     q3n_media_merge_logical_oob(programmed_page, logical);
     assert(programmed_page[0x4000] == logical[0]);
-    assert(!memcmp(programmed_page + 0x4601, logical + 1, 127));
+    assert(!memcmp(programmed_page + 0x4601, logical + 1, 1023));
     assert(q3n_media_logical_oob_matches(programmed_page, logical));
     assert_all_equal(programmed_page, 0, 0x4000, main_sentinel);
     assert_all_equal(programmed_page, 0x4001, 0x4601, ldpc_sentinel);

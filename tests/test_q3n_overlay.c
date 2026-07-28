@@ -9,14 +9,14 @@
 #define Q3N_LDPC_BYTES_PER_STEP    96U
 #define Q3N_LDPC_STEPS             16U
 #define Q3N_LDPC_TOTAL_BYTES       1536U
-#define Q3N_LOGICAL_OOB_SIZE        128U
+#define Q3N_LOGICAL_OOB_SIZE        1024U
 #define Q3N_PHYSICAL_OOB_HEAD_OFFSET  Q3N_PAGE_SIZE
 #define Q3N_PHYSICAL_OOB_HEAD_SIZE    1U
 #define Q3N_PHYSICAL_LDPC_OFFSET      (Q3N_PHYSICAL_OOB_HEAD_OFFSET + 1U)
 #define Q3N_PHYSICAL_LDPC_SIZE        Q3N_LDPC_TOTAL_BYTES
 #define Q3N_PHYSICAL_OOB_TAIL_OFFSET  \
         (Q3N_PHYSICAL_LDPC_OFFSET + Q3N_PHYSICAL_LDPC_SIZE)
-#define Q3N_PHYSICAL_OOB_TAIL_SIZE    127U
+#define Q3N_PHYSICAL_OOB_TAIL_SIZE    (Q3N_LOGICAL_OOB_SIZE - 1U)
 #define Q3N_PHYSICAL_PAGE_SIZE        \
         (Q3N_PHYSICAL_OOB_TAIL_OFFSET + Q3N_PHYSICAL_OOB_TAIL_SIZE)
 
@@ -117,9 +117,9 @@ static void test_logical_oob_merge_preserves_main_and_ldpc(void)
     assert(Q3N_PHYSICAL_OOB_HEAD_OFFSET == 0x4000U);
     assert(Q3N_PHYSICAL_LDPC_OFFSET == 0x4001U);
     assert(Q3N_PHYSICAL_OOB_TAIL_OFFSET == 0x4601U);
-    assert(Q3N_PHYSICAL_PAGE_SIZE == 0x4680U);
+    assert(Q3N_PHYSICAL_PAGE_SIZE == 0x4a00U);
     assert(page[0x4000] == logical_oob[0]);
-    assert(!memcmp(page + 0x4601, logical_oob + 1, 127));
+    assert(!memcmp(page + 0x4601, logical_oob + 1, 1023));
     assert_all_equal(page, 0, 0x4000, main_sentinel);
     assert_all_equal(page, 0x4001, 0x4601, ldpc_sentinel);
     q3n_media_extract_logical_oob(page, roundtrip);

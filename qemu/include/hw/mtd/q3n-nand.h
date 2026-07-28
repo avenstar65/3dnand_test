@@ -29,8 +29,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(Q3NNandState, Q3N_NAND)
 #define Q3N_BLOCKS_PER_PLANE          247
 #define Q3N_PAGES_PER_BLOCK           1600
 #define Q3N_PAGE_SIZE                 (16 * 1024)
-#define Q3N_PHYSICAL_OOB_SIZE         1664U
-#define Q3N_LOGICAL_OOB_SIZE          128U
+#define Q3N_PHYSICAL_OOB_SIZE         2560U
+#define Q3N_LOGICAL_OOB_SIZE          1024U
 #define Q3N_BBM_OOB_OFFSET            0U
 #define Q3N_LDPC_OOB_OFFSET           1U
 #define Q3N_LDPC_BYTES_PER_STEP       96U
@@ -67,11 +67,11 @@ OBJECT_DECLARE_SIMPLE_TYPE(Q3NNandState, Q3N_NAND)
 #error "Q3N physical OOB tail must follow LDPC"
 #endif
 
-#if Q3N_PHYSICAL_PAGE_SIZE != 0x4680U
+#if Q3N_PHYSICAL_PAGE_SIZE != 0x4a00U
 #error "Q3N physical page size must include main, OOB, and LDPC"
 #endif
 
-#if Q3N_LOGICAL_OOB_SIZE != 1U + 127U
+#if Q3N_LOGICAL_OOB_SIZE != 1U + 1023U
 #error "Q3N logical OOB layout must be BBM + metadata"
 #endif
 
