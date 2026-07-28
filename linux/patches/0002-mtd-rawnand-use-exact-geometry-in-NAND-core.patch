@@ -1,0 +1,285 @@
+From fa1b8d94faf66c5fad31e099dffbd7de29261de9 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Tue, 28 Jul 2026 23:14:54 +0800
+Subject: [PATCH 2/3] mtd: rawnand: use exact geometry in NAND core
+
+---
+ drivers/mtd/nand/raw/nand_base.c | 85 +++++++++++++++++---------------
+ 1 file changed, 45 insertions(+), 40 deletions(-)
+
+diff --git a/drivers/mtd/nand/raw/nand_base.c b/drivers/mtd/nand/raw/nand_base.c
+index dfd8361..c64ea27 100644
+--- a/drivers/mtd/nand/raw/nand_base.c
++++ b/drivers/mtd/nand/raw/nand_base.c
+@@ -98,16 +98,21 @@ const struct mtd_pairing_scheme dist3_pairing_scheme = {
+ 
+ static int check_offs_len(struct nand_chip *chip, loff_t ofs, uint64_t len)
+ {
++	struct mtd_info *mtd = nand_to_mtd(chip);
+ 	int ret = 0;
+ 
+ 	/* Start address must align on block boundary */
+-	if (ofs & ((1ULL << chip->phys_erase_shift) - 1)) {
++	if (nand_has_non_power_of_2_geometry(chip) ?
++	    ofs % mtd->erasesize :
++	    ofs & ((1ULL << chip->phys_erase_shift) - 1)) {
+ 		pr_debug("%s: unaligned address\n", __func__);
+ 		ret = -EINVAL;
+ 	}
+ 
+ 	/* Length must align on block boundary */
+-	if (len & ((1ULL << chip->phys_erase_shift) - 1)) {
++	if (nand_has_non_power_of_2_geometry(chip) ?
++	    len % mtd->erasesize :
++	    len & ((1ULL << chip->phys_erase_shift) - 1)) {
+ 		pr_debug("%s: length not block aligned\n", __func__);
+ 		ret = -EINVAL;
+ 	}
+@@ -225,8 +230,7 @@ static void nand_release_device(struct nand_chip *chip)
+ int nand_bbm_get_next_page(struct nand_chip *chip, int page)
+ {
+ 	struct mtd_info *mtd = nand_to_mtd(chip);
+-	int last_page = ((mtd->erasesize - mtd->writesize) >>
+-			 chip->page_shift) & chip->pagemask;
++	int last_page = nand_pages_per_eraseblock(chip) - 1;
+ 	unsigned int bbm_flags = NAND_BBM_FIRSTPAGE | NAND_BBM_SECONDPAGE
+ 		| NAND_BBM_LASTPAGE;
+ 
+@@ -255,7 +259,7 @@ static int nand_block_bad(struct nand_chip *chip, loff_t ofs)
+ 	int res;
+ 	u8 bad;
+ 
+-	first_page = (int)(ofs >> chip->page_shift) & chip->pagemask;
++	first_page = nand_page_in_target(chip, nand_offs_to_page(chip, ofs));
+ 	page_offset = nand_bbm_get_next_page(chip, 0);
+ 
+ 	while (page_offset >= 0) {
+@@ -446,7 +450,7 @@ static int nand_do_write_oob(struct nand_chip *chip, loff_t to,
+ 	if (nand_region_is_secured(chip, to, ops->ooblen))
+ 		return -EIO;
+ 
+-	chipnr = (int)(to >> chip->chip_shift);
++	chipnr = nand_offs_to_target(chip, to);
+ 
+ 	/*
+ 	 * Reset the chip. Some chips (like the Toshiba TC5832DC found in one
+@@ -461,7 +465,7 @@ static int nand_do_write_oob(struct nand_chip *chip, loff_t to,
+ 	nand_select_target(chip, chipnr);
+ 
+ 	/* Shift to get page */
+-	page = (int)(to >> chip->page_shift);
++	page = nand_offs_to_page(chip, to);
+ 
+ 	/* Check, if it is write protected */
+ 	if (nand_check_wp(chip)) {
+@@ -476,9 +480,11 @@ static int nand_do_write_oob(struct nand_chip *chip, loff_t to,
+ 	nand_fill_oob(chip, ops->oobbuf, ops->ooblen, ops);
+ 
+ 	if (ops->mode == MTD_OPS_RAW)
+-		status = chip->ecc.write_oob_raw(chip, page & chip->pagemask);
++		status = chip->ecc.write_oob_raw(chip,
++						nand_page_in_target(chip, page));
+ 	else
+-		status = chip->ecc.write_oob(chip, page & chip->pagemask);
++		status = chip->ecc.write_oob(chip,
++					    nand_page_in_target(chip, page));
+ 
+ 	nand_deselect_target(chip);
+ 
+@@ -576,7 +582,7 @@ static int nand_block_markbad_lowlevel(struct nand_chip *chip, loff_t ofs)
+ 		/* Attempt erase before marking OOB */
+ 		memset(&einfo, 0, sizeof(einfo));
+ 		einfo.addr = ofs;
+-		einfo.len = 1ULL << chip->phys_erase_shift;
++		einfo.len = mtd->erasesize;
+ 		nand_erase_nand(chip, &einfo, 0);
+ 
+ 		/* Write bad block marker to OOB */
+@@ -1955,8 +1961,7 @@ EXPORT_SYMBOL_GPL(nand_exit_status_op);
+  */
+ int nand_erase_op(struct nand_chip *chip, unsigned int eraseblock)
+ {
+-	unsigned int page = eraseblock <<
+-			    (chip->phys_erase_shift - chip->page_shift);
++	unsigned int page = nand_eraseblock_to_page(chip, eraseblock);
+ 	int ret;
+ 	u8 status;
+ 
+@@ -3458,11 +3463,11 @@ static int nand_do_read_ops(struct nand_chip *chip, loff_t from,
+ 	if (nand_region_is_secured(chip, from, readlen))
+ 		return -EIO;
+ 
+-	chipnr = (int)(from >> chip->chip_shift);
++	chipnr = nand_offs_to_target(chip, from);
+ 	nand_select_target(chip, chipnr);
+ 
+-	realpage = (int)(from >> chip->page_shift);
+-	page = realpage & chip->pagemask;
++	realpage = nand_offs_to_page(chip, from);
++	page = nand_page_in_target(chip, realpage);
+ 
+ 	col = (int)(from & (mtd->writesize - 1));
+ 
+@@ -3594,7 +3599,7 @@ read_retry:
+ 		/* Increment page address */
+ 		realpage++;
+ 
+-		page = realpage & chip->pagemask;
++		page = nand_page_in_target(chip, realpage);
+ 		/* Check, if we cross a chip boundary */
+ 		if (!page) {
+ 			chipnr++;
+@@ -3805,12 +3810,12 @@ static int nand_do_read_oob(struct nand_chip *chip, loff_t from,
+ 
+ 	len = mtd_oobavail(mtd, ops);
+ 
+-	chipnr = (int)(from >> chip->chip_shift);
++	chipnr = nand_offs_to_target(chip, from);
+ 	nand_select_target(chip, chipnr);
+ 
+ 	/* Shift to get page */
+-	realpage = (int)(from >> chip->page_shift);
+-	page = realpage & chip->pagemask;
++	realpage = nand_offs_to_page(chip, from);
++	page = nand_page_in_target(chip, realpage);
+ 
+ 	while (1) {
+ 		if (ops->mode == MTD_OPS_RAW)
+@@ -3835,7 +3840,7 @@ static int nand_do_read_oob(struct nand_chip *chip, loff_t from,
+ 		/* Increment page address */
+ 		realpage++;
+ 
+-		page = realpage & chip->pagemask;
++		page = nand_page_in_target(chip, realpage);
+ 		/* Check, if we cross a chip boundary */
+ 		if (!page) {
+ 			chipnr++;
+@@ -4336,7 +4341,7 @@ static int nand_do_write_ops(struct nand_chip *chip, loff_t to,
+ 
+ 	column = to & (mtd->writesize - 1);
+ 
+-	chipnr = (int)(to >> chip->chip_shift);
++	chipnr = nand_offs_to_target(chip, to);
+ 	nand_select_target(chip, chipnr);
+ 
+ 	/* Check, if it is write protected */
+@@ -4345,12 +4350,12 @@ static int nand_do_write_ops(struct nand_chip *chip, loff_t to,
+ 		goto err_out;
+ 	}
+ 
+-	realpage = (int)(to >> chip->page_shift);
+-	page = realpage & chip->pagemask;
++	realpage = nand_offs_to_page(chip, to);
++	page = nand_page_in_target(chip, realpage);
+ 
+ 	/* Invalidate the page cache, when we write to the cached page */
+-	if (to <= ((loff_t)chip->pagecache.page << chip->page_shift) &&
+-	    ((loff_t)chip->pagecache.page << chip->page_shift) < (to + ops->len))
++	if (to <= nand_page_to_offs(chip, chip->pagecache.page) &&
++	    nand_page_to_offs(chip, chip->pagecache.page) < (to + ops->len))
+ 		chip->pagecache.page = -1;
+ 
+ 	/* Don't allow multipage oob writes with offset */
+@@ -4411,7 +4416,7 @@ static int nand_do_write_ops(struct nand_chip *chip, loff_t to,
+ 		buf += bytes;
+ 		realpage++;
+ 
+-		page = realpage & chip->pagemask;
++		page = nand_page_in_target(chip, realpage);
+ 		/* Check, if we cross a chip boundary */
+ 		if (!page) {
+ 			chipnr++;
+@@ -4444,7 +4449,7 @@ static int panic_nand_write(struct mtd_info *mtd, loff_t to, size_t len,
+ 			    size_t *retlen, const uint8_t *buf)
+ {
+ 	struct nand_chip *chip = mtd_to_nand(mtd);
+-	int chipnr = (int)(to >> chip->chip_shift);
++	int chipnr = nand_offs_to_target(chip, to);
+ 	struct mtd_oob_ops ops;
+ 	int ret;
+ 
+@@ -4541,11 +4546,11 @@ int nand_erase_nand(struct nand_chip *chip, struct erase_info *instr,
+ 	nand_get_device(chip);
+ 
+ 	/* Shift to get first page */
+-	page = (int)(instr->addr >> chip->page_shift);
+-	chipnr = (int)(instr->addr >> chip->chip_shift);
++	page = nand_offs_to_page(chip, instr->addr);
++	chipnr = nand_offs_to_target(chip, instr->addr);
+ 
+ 	/* Calculate pages in each block */
+-	pages_per_block = 1 << (chip->phys_erase_shift - chip->page_shift);
++	pages_per_block = nand_pages_per_eraseblock(chip);
+ 
+ 	/* Select the NAND device */
+ 	nand_select_target(chip, chipnr);
+@@ -4562,11 +4567,11 @@ int nand_erase_nand(struct nand_chip *chip, struct erase_info *instr,
+ 	len = instr->len;
+ 
+ 	while (len) {
+-		loff_t ofs = (loff_t)page << chip->page_shift;
++		loff_t ofs = nand_page_to_offs(chip, page);
+ 
+ 		/* Check if we have a bad block, we do not erase bad blocks! */
+-		if (nand_block_checkbad(chip, ((loff_t) page) <<
+-					chip->page_shift, allowbbt)) {
++		if (nand_block_checkbad(chip, nand_page_to_offs(chip, page),
++					allowbbt)) {
+ 			pr_warn("%s: attempt to erase a bad block at 0x%08llx\n",
+ 				    __func__, (unsigned long long)ofs);
+ 			ret = -EIO;
+@@ -4581,8 +4586,8 @@ int nand_erase_nand(struct nand_chip *chip, struct erase_info *instr,
+ 		    (page + pages_per_block))
+ 			chip->pagecache.page = -1;
+ 
+-		ret = nand_erase_op(chip, (page & chip->pagemask) >>
+-				    (chip->phys_erase_shift - chip->page_shift));
++		ret = nand_erase_op(chip, nand_page_to_eraseblock(chip,
++					nand_page_in_target(chip, page)));
+ 		if (ret) {
+ 			pr_debug("%s: failed erase, page 0x%08x\n",
+ 					__func__, page);
+@@ -4591,11 +4596,11 @@ int nand_erase_nand(struct nand_chip *chip, struct erase_info *instr,
+ 		}
+ 
+ 		/* Increment page address and decrement length */
+-		len -= (1ULL << chip->phys_erase_shift);
++		len -= nand_to_mtd(chip)->erasesize;
+ 		page += pages_per_block;
+ 
+ 		/* Check, if we cross a chip boundary */
+-		if (len && !(page & chip->pagemask)) {
++		if (len && !nand_page_in_target(chip, page)) {
+ 			chipnr++;
+ 			nand_deselect_target(chip);
+ 			nand_select_target(chip, chipnr);
+@@ -4639,7 +4644,7 @@ static void nand_sync(struct mtd_info *mtd)
+ static int nand_block_isbad(struct mtd_info *mtd, loff_t offs)
+ {
+ 	struct nand_chip *chip = mtd_to_nand(mtd);
+-	int chipnr = (int)(offs >> chip->chip_shift);
++	int chipnr = nand_offs_to_target(chip, offs);
+ 	int ret;
+ 
+ 	/* Select the NAND device */
+@@ -5273,7 +5278,7 @@ ident_done:
+ 	chip->page_shift = ffs(mtd->writesize) - 1;
+ 	/* Convert chipsize to number of pages per chip -1 */
+ 	targetsize = nanddev_target_size(&chip->base);
+-	chip->pagemask = (targetsize >> chip->page_shift) - 1;
++	chip->pagemask = (targetsize / mtd->writesize) - 1;
+ 
+ 	chip->bbt_erase_shift = chip->phys_erase_shift =
+ 		ffs(mtd->erasesize) - 1;
+@@ -5284,7 +5289,7 @@ ident_done:
+ 		chip->chip_shift += 32 - 1;
+ 	}
+ 
+-	if (chip->chip_shift - chip->page_shift > 16)
++	if (targetsize / mtd->writesize > U16_MAX)
+ 		chip->options |= NAND_ROW_ADDR_3;
+ 
+ 	chip->badblockbits = 8;
+-- 
+2.50.1 (Apple Git-155)
+
