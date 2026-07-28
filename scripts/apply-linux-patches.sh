@@ -35,6 +35,14 @@ fi
 
 state_dir=$(mktemp -d "${TMPDIR:-/tmp}/q3n-linux-patch-state.XXXXXX")
 trap 'rm -rf "$state_dir"' EXIT HUP INT TERM
+git init --bare -q "$state_dir/git"
+
+apply_to_tree()
+{
+	target=$1
+	shift
+	git -C "$target" --git-dir="$state_dir/git" apply "$@"
+}
 
 prepare_state_tree()
 {
@@ -60,9 +68,11 @@ try_forward_series()
 
 	for series_patch in "$patch_dir"/*.patch; do
 		[ -f "$series_patch" ] || continue
-		git -C "$target" apply --check --whitespace=error "$series_patch" ||
+		apply_to_tree "$target" --check --whitespace=error \
+			"$series_patch" ||
 			return 1
-		git -C "$target" apply --whitespace=error "$series_patch" ||
+		apply_to_tree "$target" --whitespace=error \
+			"$series_patch" ||
 			return 1
 	done
 }
@@ -75,9 +85,10 @@ try_reverse_series()
 	find "$patch_dir" -maxdepth 1 -type f -name '*.patch' -print |
 		LC_ALL=C sort -r >"$reverse_list"
 	while IFS= read -r series_patch; do
-		git -C "$target" apply --reverse --check "$series_patch" ||
+		apply_to_tree "$target" --reverse --check \
+			"$series_patch" ||
 			return 1
-		git -C "$target" apply --reverse "$series_patch" ||
+		apply_to_tree "$target" --reverse "$series_patch" ||
 			return 1
 	done <"$reverse_list"
 }
@@ -88,8 +99,8 @@ if try_forward_series "$forward_tree" >/dev/null 2>&1; then
 	for patch in "$patch_dir"/*.patch; do
 		[ -f "$patch" ] || continue
 		printf '==> 应用 Linux 补丁: %s\n' "$(basename "$patch")"
-		git -C "$linux_dir" apply --check --whitespace=error "$patch"
-		git -C "$linux_dir" apply --whitespace=error "$patch"
+		apply_to_tree "$linux_dir" --check --whitespace=error "$patch"
+		apply_to_tree "$linux_dir" --whitespace=error "$patch"
 	done
 	exit 0
 fi

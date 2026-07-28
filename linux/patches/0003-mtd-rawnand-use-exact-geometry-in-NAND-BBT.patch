@@ -1,6 +1,6 @@
-From 5f83874eb97fd8275bf0428c4ca7247215100756 Mon Sep 17 00:00:00 2001
+From b9570d52d54aafb4d9de4541d43db5b5d2b6d979 Mon Sep 17 00:00:00 2001
 From: Codex <codex@openai.com>
-Date: Tue, 28 Jul 2026 23:17:05 +0800
+Date: Tue, 28 Jul 2026 23:42:08 +0800
 Subject: [PATCH 3/3] mtd: rawnand: use exact geometry in NAND BBT
 
 ---
