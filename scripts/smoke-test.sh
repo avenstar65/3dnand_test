@@ -6,6 +6,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 sh "$repo_root/tests/test_scripts.sh"
 sh "$repo_root/tests/test_q3n_overlay.sh"
 sh "$repo_root/tests/test_linux_patches.sh"
+sh "$repo_root/tests/test_q3n_addr.sh"
 
 for script in "$repo_root"/scripts/*.sh; do
   sh -n "$script"
