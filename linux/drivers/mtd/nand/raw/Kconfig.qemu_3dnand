@@ -3,14 +3,7 @@ config MTD_NAND_QEMU_3DNAND
 	depends on PCI
 	depends on MTD_RAW_NAND
 	help
-	  Enables the first-stage PCI probe driver for the QEMU 3D NAND
-	  controller model. The initial driver reads controller geometry and
-	  RAID profile registers; full MTD/raw NAND registration is added in
-	  the next phase.
-
-config MTD_NAND_QEMU_3DNAND_KUNIT_TEST
-	tristate "KUnit tests for QEMU 3D NAND mapping" if !KUNIT_ALL_TESTS
-	depends on KUNIT
-	default KUNIT_ALL_TESTS
-	help
-	  Tests the pure address mapper and strict program-order predicate.
+	  Enables the PCI raw-NAND controller for the QEMU Q3N device.
+	  NAND Core owns MTD operations, bad-block handling and the RAM BBT.
+	  The controller supplies page ECC, raw/OOB access and four read-retry
+	  modes for the whitelisted YTMC geometry.
