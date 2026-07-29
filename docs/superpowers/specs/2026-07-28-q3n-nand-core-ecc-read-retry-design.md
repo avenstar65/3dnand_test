@@ -6,7 +6,8 @@
 
 适用内核基线：Linux 7.0.12
 
-状态：已实现并通过 Linux 7.0.12 + QEMU 11.0.2 验证
+状态：NAND Core/ECC/read-retry/legacy callback 基础已实现并验证；可配置
+Page RAID 扩展已确认，待实现
 
 ## 0. 实现记录
 
@@ -38,7 +39,13 @@ qemu_3dnand_hw.o
 - QEMU read retry 增益为 0/8/16/24 bit，raw read 不更新 ECC result；
 - NAND Core 标坏会先擦除目标块，再通过 OOB byte 0 写入 BBM；重启后
   由标准 416-byte RAM BBT 重新扫描得到坏块状态；
-- Page RAID、parity、调度器和相关 debugfs 均未进入生产对象。
+- 当前生产对象尚未包含 Page RAID；已批准的后续扩展使用新的同步逻辑页层，
+  不恢复旧 raid/scheduler/debugfs 实现。
+
+可配置 Page RAID 的详细规范记录在
+`2026-07-29-q3n-configurable-page-raid-logical-page-design.md`。本文后续章节
+已合并其总体架构、几何、接口、流程和验证要求。当前实现记录描述无 RAID
+基线；Page RAID 相关内容描述下一阶段目标，不能误读为已经交付。
 
 Linux patch 必须按文件名顺序应用：
 
@@ -112,12 +119,26 @@ Linux `nand_base` 相关代码，但修改必须以版本化 patch 交付，不�
   非二次幂假设；
 - 保持现有二次幂 NAND 设备的快速路径和行为不变；
 - 建立 patch 的生成、应用、重复检测、验证和回退流程。
+- 增加独立的 Page RAID 功能开关和独立的 data page 数配置；
+- RAID 开启时，把 `N` 个 16 KiB 物理 data page 聚合为一个逻辑页，由
+  Linux 驱动计算一个 16 KiB XOR parity 并写入第 `N+1` 个物理页；
+- 首期支持 2:1、4:1、8:1，`N` 必须是二次幂；
+- 新增逻辑页层屏蔽 page size、OOB size 和逻辑到物理 stripe 映射；
+- RAID 关闭时完整保留一个逻辑页对应一个物理页的现有路径；
+- stripe 不跨物理 block，初始化必须明确输出完整 stripe 数和尾部废弃页；
+- read retry 耗尽后，使用 parity 恢复恰好一个不可纠 data page。
 
 ### 2.2 本期不实现
 
-- 不实现 page RAID；
-- 不实现 parity block 分配、校验、恢复或 RAID 调度；
-- 不实现后台 workqueue、异步优先级或并行 page RAID；
+- 不恢复旧 parity block pool、parity log、RAID scheduler 或后台
+  workqueue；
+- 不实现 parity metadata、commit marker、generation 或 parity CRC；
+- 不保证掉电后的 `N+1` 页全有或全无；
+- 不实现 QEMU batch transaction、journal 或 rollback；
+- 不跨物理 block 放置 RAID stripe；
+- 不保护 OOB，Page RAID 只保护 main data；
+- 不在恢复后自动回写损坏的 data page；
+- 不支持运行时切换 RAID 开关或比例；
 - 不实现 Q3N 私有 `_block_isbad`、`_block_markbad` 或坏块索引；
 - 不使用 `Q3N_CMD_GET_BLOCK_STATUS` 代替 NAND core 的 OOB/BBT
   坏块判断；
@@ -136,15 +157,18 @@ flowchart TD
     B --> C["Raw NAND Core<br/>nand_base.c / nand_bbt.c"]
     C --> D["Q3N nand_chip<br/>ECC page/OOB callbacks"]
     C --> E["Q3N nand_controller<br/>legacy callbacks / attach_chip"]
+    D --> P["Q3N logical-page layer<br/>physical or N:1 RAID ops"]
     H["ytmc_nand.c<br/>完整 ID + 几何白名单"] --> E
     E -->|"nand_scan_with_ids(ids)"| C
-    D --> F["Q3N MMIO 控制器"]
+    P --> F["Q3N physical-page HW API"]
     E --> F
     F --> G["QEMU Q3N NAND 模型"]
 ```
 
-MTD core 负责 MTD 公共语义，raw NAND core 负责跨页循环、ECC 统计、坏块
-处理和 read retry；Q3N 驱动只负责把一次 NAND 操作翻译为控制器命令。
+MTD core 负责 MTD 公共语义，raw NAND core 负责跨逻辑页循环、ECC 统计、
+坏块处理和 read retry。逻辑页层在 RAID 关闭时直接复用单物理页接口；RAID
+开启时负责逻辑页拆分、XOR parity、地址映射和结果汇总。硬件层与 QEMU
+始终只处理单个物理页。
 
 ### 3.2 Linux 修改原则
 
@@ -158,8 +182,11 @@ Linux 改动采用显式 opt-in。只有设置 Q3N 非二次幂选项的 NAND �
 
 ### 3.3 介质几何原则
 
-不通过裁剪为 1024 页/块或 2048 页/块来规避问题。Linux 和驱动均使用
-真实的 1600 页/块、25 MiB 擦除块几何。
+物理器件始终使用真实的 1600 页/块和 25 MiB 擦除块，不通过裁剪为 1024
+页/块或 2048 页/块规避问题。RAID 开启后，一个逻辑 eraseblock 仍一一
+对应一个完整物理 block，但 MTD 可见 writesize、oobsize、pages/block、
+erasesize 和 size 由选定 profile 计算。尾部不足一个完整 stripe 的物理页
+保留为不可映射页。
 
 ## 4. 目标容量与地址空间
 
@@ -172,7 +199,7 @@ Linux 改动采用显式 opt-in。只有设置 Q3N 非二次幂选项的 NAND �
 - 可见页数：1664 × 1600 = 2,662,400；
 - MTD 容量：1664 × 25 MiB = 41,600 MiB，即 40.625 GiB。
 
-首期 NAND 表现为：
+RAID 关闭时 NAND 表现为：
 
 - `max_chips = 1`；
 - 1 target；
@@ -181,10 +208,30 @@ Linux 改动采用显式 opt-in。只有设置 Q3N 非二次幂选项的 NAND �
 - logical block 0..1663 直接映射到 data pool 的 physical block 0..1663；
 - 不访问 parity、metadata 和 reserve pool。
 
-`ytmc_nand.c` 中的 ID 表项必须描述上述精确容量和几何。`chipsize` 使用
-MiB 表示时为 41600，能够精确表示本期可见容量。probe 不直接把这些值写入
-MTD，而是把匹配到的 `ids` 表传给 `nand_scan_with_ids()`，由 NAND core
-完成初始化。
+Page RAID 逻辑几何：
+
+```text
+stripe_pages        = data_pages + 1
+stripes_per_block   = floor(1600 / stripe_pages)
+tail_pages          = 1600 - stripes_per_block * stripe_pages
+logical_writesize   = data_pages * 16384
+logical_oobsize     = data_pages * 1024
+logical_erasesize   = logical_writesize * stripes_per_block
+logical_size        = logical_erasesize * 1664
+```
+
+| Profile | 逻辑页 | 逻辑 OOB | Stripe/块 | 尾部页 | 逻辑擦除块 | 可见容量 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| RAID 关闭 | 16 KiB | 1 KiB | 1600 | 0 | 25 MiB | 40.625 GiB |
+| 2:1 | 32 KiB | 2 KiB | 533 | 1 | 17,465,344 B | 27.06640625 GiB |
+| 4:1 | 64 KiB | 4 KiB | 320 | 0 | 20 MiB | 32.5 GiB |
+| 8:1 | 128 KiB | 8 KiB | 177 | 7 | 23,199,744 B | 35.953125 GiB |
+
+`ytmc_nand.c` 只描述完整 ID、ECC requirement 和真实物理几何。probe 匹配
+物理 profile 后，由逻辑页层生成设备私有、带 sentinel 的逻辑
+`nand_flash_dev` scan 表，再把它传给 `nand_scan_with_ids()`。RAID 关闭时
+该表保持 pagesize 16384、oobsize 1024、erasesize 26214400 和 chipsize
+41600 MiB。
 
 ## 5. 驱动对象模型
 
@@ -197,7 +244,11 @@ struct qemu_3dnand {
 	struct pci_dev *pdev;
 	struct nand_chip chip;
 	struct q3n_controller ctrl;
-	struct nand_flash_dev *matched_ids;
+	const struct nand_flash_dev *physical_ids;
+	struct nand_flash_dev scan_ids[2];
+	struct q3n_page_profile page_profile;
+	const struct q3n_page_ops *page_ops;
+	u8 *parity_scratch;
 	struct q3n_stats stats;
 };
 ```
@@ -214,7 +265,8 @@ Q3N 有两个不同的 ID，不能混用：
   `struct nand_flash_dev` 白名单和初始化 MTD。
 
 通过 `Q3N_REG_ID` 只能证明控制器类型正确，不能据此选择 flash 几何。
-`nand_scan_with_ids()` 的第三个参数必须来自 NAND READ ID 白名单匹配结果。
+`nand_scan_with_ids()` 的第三个参数必须由 NAND READ ID 白名单匹配结果
+派生，不能来自 controller capability 或全局 fallback 表。
 
 ### 5.2 `ytmc_nand.c` 器件描述
 
@@ -243,7 +295,8 @@ linux/drivers/mtd/nand/raw/
 - `nand_base.c`：再次读取 ID、在传入表中匹配并初始化
   `nand_chip`/`mtd_info`。
 
-`ytmc_nand.c` 首期表项采用项目内假设 ID，不代表真实 JEDEC 厂商编号：
+`ytmc_nand.c` 首期表项是只读的物理器件模板，采用项目内假设 ID，不代表
+真实 JEDEC 厂商编号：
 
 ```c
 static struct nand_flash_dev ytmc_nand_ids[] = {
@@ -269,9 +322,10 @@ static struct nand_flash_dev ytmc_nand_ids[] = {
 8 字节。
 
 表必须以 `{ .name = NULL }` 结束，因为 `nand_scan_with_ids()` 会从传入
-指针开始遍历到该终止项。Linux 驱动中用于 MTD 初始化的器件描述只在
-`ytmc_nand.c` 保留一份，main 不得再复制一份。QEMU 仍保存硬件模型自身
-的几何并通过 capability 寄存器上报，`attach_chip` 负责验证两者一致。
+指针开始遍历到该终止项。Linux 驱动中的权威物理 ID、几何、ECC
+requirement 和 options 只在 `ytmc_nand.c` 保留一份，main/controller
+不得再硬编码一份。QEMU 仍保存硬件模型自身的物理几何并通过 capability
+寄存器上报，`attach_chip` 负责验证两者一致。
 
 首期匹配接口为：
 
@@ -285,9 +339,26 @@ ytmc_nand_match_ids(const u8 *id, size_t len);
 - 必须至少取得 8 字节 ID；
 - 必须按 `id_len` 完整比较，不能只比较 manufacturer ID 或 device ID；
 - 任一字节不匹配返回 `NULL`；
-- 匹配成功返回包含该器件且以空项结尾的 `ytmc_nand_ids` 表首地址；
+- 匹配成功返回包含该器件且以空项结尾的物理 `ytmc_nand_ids` 模板表首
+  地址；
 - 接口返回可写类型是因为 Linux 7.0.12
-  `nand_scan_with_ids()` 参数不是 `const`，调用方不得修改表内容。
+  `nand_scan_with_ids()` 参数不是 `const`；调用方仍不得修改 YTMC 模板
+  本身。
+
+probe 匹配成功后，`q3n_build_scan_ids()` 在设备根对象中生成两项
+device-local 表：
+
+```text
+scan_ids[0] = matched YTMC physical template
+scan_ids[0].pagesize/erasesize/oobsize/chipsize = selected logical profile
+scan_ids[1].name = NULL
+```
+
+ID、`id_len`、ECC requirement 和 `NAND_NON_POWER_OF_2_GEOMETRY` option
+从物理模板原样复制；只有 NAND Core 应看到的逻辑几何字段按 profile
+改写。RAID 关闭时逻辑几何等于物理几何，仍统一走同一构建路径。
+`nand_scan_with_ids()` 接收的是 `q3n->scan_ids`，不是可被共享修改的
+`ytmc_nand_ids`。这份运行时派生表不构成第二份器件 source of truth。
 
 同一厂商增加器件时，在 `ytmc_nand.c` 表中增加 full-ID 项即可。以后支持
 其他厂商时，为每个厂商建立独立 `<vendor>_nand.c`，probe 的白名单选择器
@@ -311,12 +382,14 @@ YTMC manufacturer ID。NAND core 的 manufacturer 字段可显示为 Unknown，
    `q3n->chip.ops.setup_read_retry`；
 7. 使用 scan 前可用的底层 Q3N READ ID helper 读取 8 字节 NAND ID；
 8. 调用 `q3n_match_flash_ids()`；通用选择器再调用
-   `ytmc_nand_match_ids()` 选择白名单 `ids`；
+   `ytmc_nand_match_ids()` 选择白名单物理模板；
 9. 未匹配则返回 `-ENODEV`，不回退到 Linux 全局 ID 表或 ONFI/JEDEC
    自动探测；
-10. 调用 `nand_scan_with_ids(&q3n->chip, 1, ids)`；
-11. 从 `nand_to_mtd()` 取得 MTD，设置名称和 owner；
-12. 调用 `mtd_device_register()`。
+10. 读取 RAID 开关和独立比例配置，计算并验证 logical page profile；
+11. 由物理模板和逻辑 profile 构造设备私有 `scan_ids[2]`；
+12. 调用 `nand_scan_with_ids(&q3n->chip, 1, q3n->scan_ids)`；
+13. 从 `nand_to_mtd()` 取得 MTD，验证最终几何并设置名称和 owner；
+14. 打印完整 profile 后调用 `mtd_device_register()`。
 
 伪代码：
 
@@ -325,33 +398,42 @@ ret = q3n_ctrl_read_id(q3n, id, sizeof(id));
 if (ret)
 	return ret;
 
-ids = q3n_match_flash_ids(id, sizeof(id));
-if (!ids)
+physical_ids = q3n_match_flash_ids(id, sizeof(id));
+if (!physical_ids)
 	return dev_err_probe(dev, -ENODEV,
 			     "unsupported NAND flash ID\n");
 
-ret = nand_scan_with_ids(&q3n->chip, 1, ids);
+ret = q3n_page_layer_init(q3n, physical_ids);
+if (ret)
+	return ret;
+
+ret = q3n_build_scan_ids(q3n, physical_ids, &q3n->page_profile);
+if (ret)
+	return ret;
+
+ret = nand_scan_with_ids(&q3n->chip, 1, q3n->scan_ids);
 if (ret)
 	return ret;
 ```
 
-scan 前的 READ ID 只用于选择厂商白名单，不能初始化或覆写 MTD。进入
+scan 前的 READ ID 只用于选择厂商白名单和派生逻辑 scan 表，不能直接填写
+或覆写 MTD。进入
 `nand_scan_with_ids()` 后，`nand_base.c` 会执行 reset、读取前两个 ID
 字节、再次读取完整 ID，并在传入的 `ids` 表中进行 full-ID 匹配。匹配后
-由 core 填充：
+由 core 按当前 profile 填充：
 
-- `mtd->writesize = 16 KiB`；
-- `mtd->erasesize = 25 MiB`；
-- `mtd->oobsize = 1024 B`；
-- target size = 41,600 MiB；
-- pages per eraseblock = 1600；
+- `mtd->writesize = logical_writesize`；
+- `mtd->erasesize = logical_erasesize`；
+- `mtd->oobsize = logical_oobsize`；
+- target size = `logical_size`；
+- pages per eraseblock = `stripes_per_block`，RAID 关闭时为 1600；
 - ECC requirement = 40 bit/1024 B；
 - `NAND_NON_POWER_OF_2_GEOMETRY` 等器件 options。
 
 预探测和 NAND core 的再次读取构成双重校验。如果预探测匹配，但 scan
 读取到不同 ID，scan 必须失败且不得注册 MTD。驱动只能在 `attach_chip`
-中验证 scan 结果与 Q3N capability 寄存器一致，不能用 capability
-寄存器覆盖 ID 表给出的几何。
+中分别验证物理模板与 Q3N capability、逻辑 scan 结果与 page profile，
+不能用 capability 寄存器直接覆盖 ID 表给出的逻辑几何。
 
 ### 5.4 Remove 和失败回退
 
@@ -378,7 +460,9 @@ scan 前的 READ ID 只用于选择厂商白名单，不能初始化或覆写 MT
 
 新 KO 不再编译旧的 `qemu_3dnand_main.o`、
 `qemu_3dnand_raid.o`、`qemu_3dnand_sched.o`。page RAID 旧代码仍保留在原
-分支历史中，不复制进新模块。
+分支历史中，不复制进新模块。可配置 Page RAID 使用新的
+`qemu_3dnand_page.o`、`qemu_3dnand_layout.o` 和条件编译的
+`qemu_3dnand_page_raid.o`，不复用旧异步实现。
 
 ### 5.6 目标源文件和职责
 
@@ -392,15 +476,18 @@ scan 前的 READ ID 只用于选择厂商白名单，不能初始化或覆写 MT
 | `ytmc_nand.c` | 厂商器件表 | YTMC full-ID、几何、options、ECC requirement、厂商内匹配 | MMIO、probe、MTD 回调 |
 | `qemu_3dnand_controller.c` | 控制器功能层 | `nand_controller_ops.attach_chip`、legacy 命令状态机、`cmdfunc/waitfunc/read_byte/read_buf/write_buf/select_chip`、controller 串行化 | 直接 `readl()`/`writel()` |
 | `qemu_3dnand_ecc.c` | NAND ECC/OOB 适配层 | `ecc->read_page` 等 callbacks、OOB layout、ECC 统计契约、`setup_read_retry` | MTD `_read`、BBT、直接寄存器 |
-| `qemu_3dnand_addr.c` | 地址与逻辑视图 | 线性 page/block/column 到 Q3N byte address 的精确换算、边界检查 | RAID 映射、MMIO |
+| `qemu_3dnand_page.c` | 逻辑页入口 | 对 ECC/controller 提供稳定 page/OOB/erase 接口，选择 physical 或 RAID ops | 直接寄存器、私有 BBT |
+| `qemu_3dnand_layout.c` | RAID 几何与映射 | profile 计算、logical page 到连续 `N+1` 物理页的纯映射、尾部页校验 | XOR、MMIO |
+| `qemu_3dnand_page_raid.c` | 同步 Page RAID | XOR parity、`D0..DN-1,P` 同步读写、单页恢复和结果汇总 | QEMU parity、异步队列、掉电事务 |
+| `qemu_3dnand_addr.c` | 物理地址层 | 物理 page/block/column 到 Q3N byte address 的精确换算、边界检查 | 逻辑 RAID 映射、MMIO |
 | `qemu_3dnand_hw.c` | 控制器实现层 | 操作具体寄存器、提交命令、数据窗口传输、等待完成、读取状态/ECC 结果 | NAND core 和 MTD 语义 |
 
 #### 5.6.2 可选但建议的 `.c` 文件
 
 | 文件 | 职责 |
 |---|---|
-| `qemu_3dnand_debugfs.c` | 只暴露 controller、ECC、retry 和错误统计；不得恢复 RAID 调试项 |
-| `qemu_3dnand_kunit.c` | 测试 ID matcher、地址换算、legacy 命令状态机、ECC 返回契约和调用层边界 |
+| `qemu_3dnand_debugfs.c` | 只读暴露 controller、ECC、retry 和 `raid_recovered_pages` 统计；不得触发异步 RAID |
+| `qemu_3dnand_kunit.c` | 测试 ID matcher、物理地址、RAID layout、legacy 命令状态机、ECC 返回契约和调用层边界 |
 
 不创建 `qemu_3dnand_bbt.c`。坏块接口和 BBT 已由
 `nand_base.c`/raw NAND `nand_bbt.c` 提供，新增同名功能会产生第二套真值。
@@ -414,6 +501,9 @@ scan 前的 READ ID 只用于选择厂商白名单，不能初始化或覆写 MT
 | `qemu_3dnand_hw.h` | `struct q3n_hw`、`q3n_hw_ops`、request/result 接口 |
 | `qemu_3dnand_flash.h` | `q3n_flash_provider` 和通用 ID 白名单 matcher |
 | `ytmc_nand.h` | YTMC matcher 声明；不暴露具体几何数组 |
+| `qemu_3dnand_page.h` | ECC/controller 使用的稳定逻辑 page/OOB/erase 接口 |
+| `qemu_3dnand_layout.h` | physical/logical profile、stripe map 和纯映射接口 |
+| `qemu_3dnand_page_raid.h` | 条件编译的同步 RAID ops 初始化接口 |
 
 原 `qemu_3dnand.h` 中的寄存器定义迁移到
 `qemu_3dnand_regs.h`。所有几何、ECC 和 pool capability 仍由硬件寄存器
@@ -431,21 +521,29 @@ qemu_3dnand-y := \
 	ytmc_nand.o \
 	qemu_3dnand_controller.o \
 	qemu_3dnand_ecc.o \
+	qemu_3dnand_page.o \
+	qemu_3dnand_layout.o \
 	qemu_3dnand_addr.o \
 	qemu_3dnand_hw.o
 
+qemu_3dnand-$(CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID) += \
+	qemu_3dnand_page_raid.o
 qemu_3dnand-$(CONFIG_DEBUG_FS) += qemu_3dnand_debugfs.o
 ```
 
-KUnit target 单独链接可纯测试的 flash、address 和 parser 对象，不链接旧
-RAID/scheduler 对象。
+`qemu_3dnand_page.c` 必须通过 `IS_ENABLED()` 或头文件 inline stub 隔离
+RAID ops 选择，保证 `PAGE_RAID=n` 的链接产物不引用
+`qemu_3dnand_page_raid.o` 中的符号。比例配置只在 RAID enabled 分支读取。
+
+KUnit/host target 单独链接可纯测试的 flash、layout、address 和状态机
+对象，不链接旧 RAID/scheduler 对象。
 
 #### 5.6.5 KO 之外需要涉及的 `.c` 文件
 
 | 文件 | 计划 |
 |---|---|
-| `qemu/hw/mtd/q3n-nand.c` | 修改 READ ID、增加 raw-read 语义、retry mode 寄存器和 ECC 收益模型 |
-| `qemu/hw/mtd/q3n-media.c` | 保持物理 page/OOB/bitflip overlay 存储职责；除非接口不足，不加入 retry 策略 |
+| `qemu/hw/mtd/q3n-nand.c` | 保持 READ ID、raw-read、retry mode 和物理单页命令；不计算 parity |
+| `qemu/hw/mtd/q3n-media.c` | 保持物理 page/OOB/bitflip overlay 存储职责；不加入 RAID profile 或 stripe 状态 |
 | `qemu/hw/mtd/q3n-pci.c` | PCI wrapper 原则上不改；仅在 BAR/IRQ contract 改变时调整 |
 | Linux `nand_base.c` | 由 patch 修改精确非二次幂 I/O、erase、坏块和 retry 相关路径 |
 | Linux raw NAND `nand_bbt.c` | 由 patch 修改精确 BBT block/offset/page 计算 |
@@ -467,8 +565,11 @@ flowchart TD
         FLASH["flash.c<br/>厂商白名单选择"]
         YTMC["ytmc_nand.c<br/>ID + 几何"]
         ECC["ecc.c<br/>page/OOB/read_retry callbacks"]
+        PAGE["page.c<br/>稳定逻辑页接口"]
+        LAYOUT["layout.c<br/>逻辑几何与stripe映射"]
+        RAID["page_raid.c<br/>可选同步XOR/恢复"]
         CTRL["controller.c<br/>NAND controller 功能层"]
-        ADDR["addr.c<br/>线性地址与边界"]
+        ADDR["addr.c<br/>物理地址与边界"]
         HW["hw.c<br/>具体寄存器实现"]
         DBG["debugfs.c<br/>可选诊断"]
 
@@ -477,7 +578,12 @@ flowchart TD
         FLASH --> YTMC
         INIT --> CTRL
         INIT --> ECC
-        ECC --> CTRL
+        INIT --> PAGE
+        PAGE --> LAYOUT
+        PAGE --> RAID
+        ECC --> PAGE
+        CTRL --> PAGE
+        PAGE --> HW
         CTRL --> ADDR
         CTRL --> HW
         DBG --> CTRL
@@ -494,35 +600,42 @@ flowchart TD
 - `module.c` 只依赖 `init.c` 暴露的 probe/remove；
 - `init.c` 是 composition root，负责把其他层连接起来；
 - `nand_base.c` 只能看到标准 `nand_chip`/`nand_controller` 接口；
-- `ecc.c` 只能调用 controller 功能接口，不能直接读写寄存器；
+- `ecc.c` 只调用逻辑页接口，不能直接决定物理 stripe 或读写寄存器；
+- `page.c` 屏蔽 physical-page 和 Page RAID 两种实现；
+- `layout.c` 是无 MMIO、无全局状态的纯几何与 stripe 映射层；
+- `page_raid.c` 只通过现有 `q3n_hw_*` 单物理页接口访问介质；
 - `controller.c` 只能通过 `q3n_hw_ops` 调用硬件实现；
 - `hw.c` 不包含 `mtd_info`、`nand_chip` 或 BBT 逻辑；
-- `addr.c` 是无 MMIO、无全局状态的纯换算层；
+- `addr.c` 是无 MMIO、无全局状态的物理地址换算层；
 - `ytmc_nand.c` 不依赖 controller 和硬件；
 - 下层错误可以向上传递，下层不得直接修改 MTD ECC/BBT 统计。
 
 新增厂商时只增加 `<vendor>_nand.c` 并在 `qemu_3dnand_flash.c` 注册 provider；
 新增 MMIO controller revision 时优先新增或替换 `q3n_hw_ops` 实现；调整
-NAND core 接口时集中修改 `controller.c`/`ecc.c`。
+NAND core 接口时集中修改 `controller.c`/`ecc.c`；调整 RAID 比例或映射时
+集中修改 `layout.c`/`page_raid.c`。
 
 #### 5.7.1 I/O 逻辑地址视图
 
 ```mermaid
 flowchart LR
-    A["MTD byte offset<br/>0 .. 40.625 GiB-1"] --> B["eraseblock = offset / 25 MiB<br/>0 .. 1663"]
-    B --> C["block offset = offset % 25 MiB"]
-    C --> D["page = block offset / 16 KiB<br/>0 .. 1599"]
-    D --> E["column = block offset % 16 KiB"]
-    B --> F["linear page = eraseblock * 1600 + page"]
-    D --> F
-    F --> G["Q3N byte_addr = linear page * 16 KiB + column"]
-    E --> G
-    G --> H["QEMU data-pool page"]
+    A["MTD logical page L"] --> B{"RAID enabled?"}
+    B -- "No" --> C["physical page = L"]
+    B -- "Yes" --> D["logical block = L / stripes_per_block"]
+    D --> E["stripe = L % stripes_per_block"]
+    E --> F["base = block*1600 + stripe*(N+1)"]
+    F --> G["data pages = base..base+N-1"]
+    F --> H["parity page = base+N"]
+    C --> I["q3n_hw_* physical page"]
+    G --> I
+    H --> I
 ```
 
-Linux driver 的逻辑视图只有连续的 1664 个 data-pool blocks。die、plane 和
-lane 的最终介质定位属于 QEMU 模型内部实现；driver 不把这些维度重新编码
-成 RAID 或隐藏页。parity、metadata 和 reserve pool 不出现在 MTD 地址空间。
+Linux 始终看到连续的 1664 个逻辑 eraseblocks。RAID 关闭时逻辑页直接等于
+物理页。RAID 开启时，一个逻辑页映射为 `N` 个连续 data pages 和一个隐藏
+parity page；尾部不足完整 stripe 的物理页不可映射。die、plane 和 lane
+定位仍属于 QEMU 介质模型。parity、尾部页、metadata pool 和 reserve pool
+均不出现在 MTD 地址空间。
 
 ### 5.8 关键数据结构
 
@@ -535,14 +648,21 @@ struct qemu_3dnand {
 	struct pci_dev *pdev;
 	struct nand_chip chip;
 	struct q3n_controller ctrl;
-	struct nand_flash_dev *matched_ids;
+	const struct nand_flash_dev *physical_ids;
+	struct nand_flash_dev scan_ids[2];
+	struct q3n_page_profile page_profile;
+	const struct q3n_page_ops *page_ops;
+	u8 *parity_scratch;
 	struct q3n_stats stats;
 };
 ```
 
 - 生命周期由 `qemu_3dnand_init.c` 管理；
 - `nand_to_mtd(&q3n->chip)` 是唯一 MTD 对象；
-- 不保存私有 BBT、RAID metadata、parity workqueue。
+- `physical_ids` 指向 `ytmc_nand.c` 中只读物理模板，`scan_ids` 是当前设备
+  传给 NAND Core 的逻辑几何派生表；
+- 不保存私有 BBT、RAID metadata、data page 副本或 parity workqueue；
+- `parity_scratch` 仅在 RAID 同步调用内保存一个 16 KiB XOR 结果。
 
 #### 5.8.2 控制器功能对象
 
@@ -551,7 +671,8 @@ struct q3n_controller {
 	struct nand_controller base;
 	struct mutex io_lock;
 	struct q3n_hw hw;
-	struct q3n_geometry geometry;
+	struct q3n_geometry physical_geometry;
+	struct q3n_geometry logical_geometry;
 	u8 selected_target;
 	u8 retry_mode;
 	bool scanned;
@@ -560,7 +681,8 @@ struct q3n_controller {
 ```
 
 - `base` 对接 NAND core；
-- `io_lock` 覆盖地址设置、命令提交、数据传输和结果读取的完整事务；
+- `io_lock` 在 RAID 关闭时覆盖一个完整物理事务，在 RAID 开启时可由逻辑
+  页层一次持有并覆盖完整多页同步序列；
 - 首期只允许 `selected_target = 0`；
 - `retry_mode` 在每页结束和 reset 后必须为 0；
 - 生命周期布尔值只用于严格错误回退，不替代 devres 状态。
@@ -608,10 +730,59 @@ struct q3n_address {
 };
 ```
 
-`q3n_geometry` 是 capability 快照，用于验证 scan 结果，不用于手工填 MTD。
-`q3n_address` 由 `addr.c` 通过精确乘除计算；禁止存储 shift/mask 近似值。
+物理 `q3n_geometry` 是 capability 快照；逻辑几何由 page profile 计算并
+生成设备私有 scan ID 表，不由 probe 直接填写 MTD。`q3n_address` 由
+`addr.c` 对物理页做精确乘除；禁止存储 shift/mask 近似值。
 
-#### 5.8.5 硬件请求和结果
+#### 5.8.5 逻辑页 Profile、映射和操作表
+
+```c
+struct q3n_page_profile {
+	bool raid_enabled;
+	u32 data_pages;
+	u32 parity_pages;
+	u32 stripe_pages;
+	u32 stripes_per_block;
+	u32 tail_pages;
+	struct q3n_geometry physical;
+	struct q3n_geometry logical;
+	u64 logical_size;
+};
+
+struct q3n_page_map {
+	u32 logical_block;
+	u32 stripe_in_block;
+	u32 first_data_page;
+	u32 parity_page;
+};
+
+struct q3n_page_result {
+	u32 max_bitflips;
+	u32 corrected_bits;
+	u32 failed_data_pages;
+	bool parity_failed;
+	bool recovered;
+};
+
+struct q3n_page_ops {
+	int (*read_page)(struct q3n *q3n, u32 logical_page,
+			 void *data, void *oob, bool raw,
+			 struct q3n_page_result *result);
+	int (*write_page)(struct q3n *q3n, u32 logical_page,
+			  const void *data, const void *oob);
+	int (*read_oob)(struct q3n *q3n, u32 logical_page, void *oob);
+	int (*write_oob)(struct q3n *q3n, u32 logical_page,
+			 const void *oob);
+	int (*erase_block)(struct q3n *q3n, u32 logical_block);
+};
+```
+
+RAID 关闭时 ops 直接调用原 `q3n_hw_*`。RAID 开启时 ops 把一个逻辑页拆为
+`N` 个 data pages 和一个 parity page。`q3n_page_result` 汇总当前 retry
+mode 的物理 ECC 结果，供 `ecc.c` 决定 NAND Core 统计和最终恢复语义。
+`q3n_hw_*` 的单物理页语义不改变。
+
+#### 5.8.6 硬件请求和结果
 
 ```c
 enum q3n_hw_opcode {
@@ -648,7 +819,7 @@ struct q3n_hw_result {
 request/result 只表达一次同步硬件事务。不得在 `hw.c` 中实现 read retry
 循环、跨页循环或 BBT 更新。
 
-#### 5.8.6 ECC 与统计
+#### 5.8.7 ECC 与统计
 
 ```c
 struct q3n_ecc_result {
@@ -665,6 +836,7 @@ struct q3n_stats {
 	atomic64_t retry_attempts;
 	atomic64_t retry_recovered;
 	atomic64_t retry_exhausted;
+	atomic64_t raid_recovered_pages;
 	atomic64_t controller_errors;
 };
 ```
@@ -673,7 +845,7 @@ struct q3n_stats {
 NAND core 契约更新 `mtd->ecc_stats`。`q3n_stats` 仅用于诊断，不能影响
 MTD 返回语义。
 
-#### 5.8.7 Flash provider
+#### 5.8.8 Flash provider
 
 ```c
 struct q3n_flash_provider {
@@ -702,20 +874,23 @@ flowchart TD
     H --> I["q3n_match_flash_ids"]
     I --> J{"唯一白名单匹配?"}
     J -- "否" --> X
-    J -- "是" --> K["保存 matched_ids"]
-    K --> L["nand_scan_with_ids(chip, 1, matched_ids)"]
+    J -- "是" --> K["保存 physical profile"]
+    K --> KA["读取独立 RAID 开关和 data_pages 配置"]
+    KA --> KB["q3n_page_layer_init<br/>计算 logical geometry/tail"]
+    KB --> KC["生成 device-local logical scan IDs"]
+    KC --> L["nand_scan_with_ids(chip, 1, scan_ids)"]
     L --> M["nand_scan_ident<br/>reset + 再读 ID + 初始化几何"]
-    M --> N["attach_chip<br/>验证 capability + 配置 ECC/OOB"]
+    M --> N["attach_chip<br/>验证 logical/physical geometry + 配置 ECC/OOB"]
     N --> O["nand_scan_tail<br/>安装 MTD/坏块接口"]
     O --> P["nand_create_bbt<br/>扫描 OOB 构建 RAM BBT"]
     P --> Q{"nand_scan_with_ids 返回成功?"}
     Q -- "否" --> X
     Q -- "是" --> Y["设置 ctrl.scanned = true"]
-    Y --> S["mtd_device_register"]
+    Y --> V["校验并打印 RAID profile/尾部页"]
+    V --> S["mtd_device_register"]
     S --> T{"注册成功?"}
     T -- "否" --> R["nand_cleanup<br/>ctrl.scanned = false"]
-    T -- "是" --> V["debugfs init 可选"]
-    V --> W["probe 返回 0"]
+    T -- "是" --> W["debugfs init 可选<br/>probe 返回 0"]
     R --> X
 ```
 
@@ -734,11 +909,12 @@ q3n_pci_remove()
 
 ### 6.1 `attach_chip`
 
-`attach_chip` 在 scan 获得几何后完成以下工作：
+`attach_chip` 在 scan 获得逻辑几何后完成以下工作：
 
-- 验证 page size 为 16 KiB；
-- 验证 pages per eraseblock 为 1600；
-- 验证 OOB size 为 1024 字节；
+- 验证 logical page/OOB/erase size 与当前 profile 一致；
+- 交叉验证物理 page 为 16 KiB、物理 OOB 为 1024 B、物理 block 为
+  1600 pages；
+- RAID 开启时验证 stripe、尾部页和逻辑容量；
 - 验证只有 1 target 和每 target 1 LUN；
 - 配置 ECC engine type 和全部 ECC 回调；
 - 配置 OOB layout；
@@ -759,41 +935,38 @@ legacy callbacks 提供：
   `-EOPNOTSUPP`；
 - `select_chip`：只接受 target 0 和 deselect -1。
 
-页读写和 OOB 操作仍由 ECC callbacks 直接调用 Q3N 页级命令，不通过
-`read_buf/write_buf` 搬运 16 KiB page。
+页读写和 OOB 操作仍由 ECC callbacks 调用逻辑页层，不通过 legacy
+`read_buf/write_buf` 搬运逻辑页。
 
 ### 6.3 Controller 功能层接口
 
-`qemu_3dnand_controller.c` 对上提供功能级接口：
+`qemu_3dnand_controller.c` 负责 legacy 命令和 controller attach。page、
+OOB、raw 和 erase 数据路径通过逻辑页层提供稳定接口：
 
 ```c
-int q3n_ctrl_reset(struct qemu_3dnand *q3n);
-int q3n_ctrl_read_id(struct qemu_3dnand *q3n, u8 *id, size_t len);
-int q3n_ctrl_read_status(struct qemu_3dnand *q3n, u8 *status);
-int q3n_ctrl_read_page(struct qemu_3dnand *q3n, u32 page,
-		       bool raw, u8 *data, struct q3n_ecc_result *ecc);
-int q3n_ctrl_program_page(struct qemu_3dnand *q3n, u32 page,
-			  bool raw, const u8 *data);
-int q3n_ctrl_read_oob(struct qemu_3dnand *q3n, u32 page,
-		      bool raw, u8 *oob);
-int q3n_ctrl_program_oob(struct qemu_3dnand *q3n, u32 page,
-			 bool raw, const u8 *oob);
-int q3n_ctrl_erase_block(struct qemu_3dnand *q3n, u32 block);
-int q3n_ctrl_set_read_retry(struct qemu_3dnand *q3n, u8 mode);
+int q3n_page_read(struct q3n *q3n, u32 logical_page,
+		  void *data, void *oob, bool raw,
+		  struct q3n_page_result *result);
+int q3n_page_write(struct q3n *q3n, u32 logical_page,
+		   const void *data, const void *oob);
+int q3n_page_read_oob(struct q3n *q3n, u32 logical_page, void *oob);
+int q3n_page_write_oob(struct q3n *q3n, u32 logical_page,
+		       const void *oob);
+int q3n_page_erase_block(struct q3n *q3n, u32 logical_block);
 ```
 
 这些接口负责：
 
-- 参数和 capability 验证；
-- 调用 `addr.c` 生成精确地址；
-- 使用 `io_lock` 保护一次寄存器事务；
-- 构造 `q3n_hw_request`；
-- 调用 `q3n->ctrl.hw.ops->exec()`；
-- 把 controller status 转成 `-EIO`、`-ETIMEDOUT` 等硬件错误；
-- 保证错误路径的 retry mode 和 controller 状态可恢复。
+- 参数、profile 和逻辑范围验证；
+- 选择 physical-page 或 Page RAID ops；
+- 把逻辑页拆分为物理页并调用原 `q3n_hw_*`；
+- RAID 写入期间计算 XOR 并保护完整同步 stripe；
+- 汇总多个物理页的 ECC 结果；
+- 把 transport/controller status 保留为负 errno。
 
-`controller.c` 不更新 `mtd->ecc_stats`，不执行跨页循环，不决定最终
-`-EUCLEAN`/`-EBADMSG`。这些属于 `ecc.c` 和 `nand_base.c`。
+`qemu_3dnand_hw.c` 的 `q3n_hw_read_page/program_page/read_oob/program_oob/
+erase_block` 接口保持单物理页语义。最终 `mtd->ecc_stats`、
+`-EUCLEAN/-EBADMSG` 和 retry iteration 仍由 `ecc.c` 与 NAND Core 负责。
 
 ### 6.4 读接口调用流程
 
@@ -802,11 +975,12 @@ flowchart TD
     A["mtd_read()"] --> B["Raw NAND Core<br/>nand_read / nand_do_read_ops"]
     B --> C["chip->ecc.read_page"]
     C --> D["q3n_ecc_read_page<br/>ecc.c"]
-    D --> E["q3n_ctrl_read_page<br/>controller.c"]
-    E --> F["q3n_addr_from_page<br/>addr.c"]
-    F --> G["q3n_hw_ops.exec READ_PAGE<br/>hw.c"]
-    G --> H["写 ADDR/LEN/CMD<br/>从 DATA 窗口读取"]
-    H --> I["读取 STATUS + ECC_RESULT"]
+    D --> E["q3n_page_read<br/>page.c"]
+    E --> F{"RAID enabled?"}
+    F -- "No" --> G["q3n_hw_read_page(L)"]
+    F -- "Yes" --> H["layout map<br/>读取 N 个 data pages"]
+    G --> I["读取 STATUS + ECC_RESULT"]
+    H --> I
     I --> J{"硬件传输错误?"}
     J -- "是" --> K["返回 -EIO/-ETIMEDOUT<br/>停止，不做 retry"]
     J -- "否" --> L{"ECC 不可纠正?"}
@@ -818,7 +992,10 @@ flowchart TD
     Q --> QA{"模式切换成功?"}
     QA -- "是" --> C
     QA -- "否" --> K
-    O -- "否" --> R["nand_base 返回 -EBADMSG"]
+    O -- "否" --> RA{"RAID 且恰好一个 data 失败?"}
+    RA -- "是" --> RB["读取 parity 并 XOR 恢复"]
+    RB --> M
+    RA -- "否" --> R["nand_base 返回 -EBADMSG"]
     M --> S{"是否使用过 retry?"}
     S -- "是" --> T["返回值至少达到 bitflip_threshold<br/>上层得到 -EUCLEAN"]
     S -- "否" --> U["返回实际 max_bitflips"]
@@ -828,8 +1005,9 @@ flowchart TD
     K --> V
 ```
 
-跨页循环只存在于 `nand_do_read_ops()`。每次 `q3n_ctrl_read_page()` 只处理
-一个 page，禁止在 controller/hardware 层递增 page 并继续读取。
+跨逻辑页循环只存在于 `nand_do_read_ops()`。`q3n_page_read()` 只处理一个
+逻辑页；RAID ops 可以在该调用内读取同 stripe 的 `N` 个 data pages 和按需
+读取 parity，但 hardware 层仍一次只处理一个物理页。
 
 ### 6.5 写接口调用流程
 
@@ -839,33 +1017,39 @@ flowchart TD
     B --> C["检查范围、subpage 约束和写保护"]
     C --> D["chip->ecc.write_page"]
     D --> E["q3n_ecc_write_page<br/>ecc.c"]
-    E --> F["q3n_ctrl_program_page<br/>controller.c"]
-    F --> G["q3n_addr_from_page<br/>addr.c"]
-    G --> H["构造 PROGRAM_PAGE request"]
-    H --> I["q3n_hw_ops.exec<br/>hw.c"]
-    I --> J["写 ADDR/LEN/DATA/CMD"]
-    J --> K["等待 READY，读取 STATUS"]
-    K --> L{"controller error?"}
-    L -- "是" --> M["返回 -EIO/-ETIMEDOUT"]
-    L -- "否" --> N["返回 0"]
+    E --> F["q3n_page_write<br/>page.c"]
+    F --> G{"RAID enabled?"}
+    G -- "No" --> H["复用 q3n_hw_program_page"]
+    G -- "Yes" --> I["拆分 N 个 data slice<br/>计算 16 KiB XOR parity"]
+    I --> J["锁住完整同步 stripe"]
+    J --> K["program D0..DN-1"]
+    K --> L{"data 全部成功?"}
+    L -- "否" --> M["停止且不写 parity<br/>返回原始错误"]
+    L -- "是" --> P["program parity page"]
+    P --> Q{"parity 成功?"}
+    Q -- "否" --> M
+    Q -- "是" --> N["返回 0"]
+    H --> N
     N --> O["nand_base 更新 retlen/继续下一页"]
 ```
 
 normal 和 raw write 都由 QEMU controller 生成隐藏 LDPC。`write_page_raw`
 的 raw 只影响 Linux 可见数据/OOB 处理方式，不允许 guest 提交隐藏 LDPC。
+RAID raw write 仍计算 parity 以保持 stripe 布局完整。parity 由 Linux
+驱动计算，QEMU 不计算。
 
 ### 6.6 擦除接口调用流程
 
 ```mermaid
 flowchart TD
     A["mtd_erase()"] --> B["nand_erase / nand_erase_nand"]
-    B --> C["精确检查 25 MiB 对齐和范围"]
+    B --> C["按当前 logical erasesize<br/>精确检查对齐和范围"]
     C --> D["通过 NAND core BBT 检查 block"]
     D --> E{"block bad?"}
     E -- "是且不允许访问" --> F["返回 -EIO"]
     E -- "否" --> G["nand_erase_op"]
     G --> H["cmdfunc(ERASE1)<br/>保存 row page"]
-    H --> I["cmdfunc(ERASE2)<br/>q3n_hw_erase_block"]
+    H --> I["cmdfunc(ERASE2)<br/>q3n_page_erase_block"]
     I --> J["q3n_addr_from_block<br/>addr.c"]
     J --> K["q3n_hw_ops.exec ERASE_BLOCK<br/>hw.c"]
     K --> L["写 ADDR/CMD，等待 READY"]
@@ -875,22 +1059,25 @@ flowchart TD
     O --> P["全部完成后调用 erase callback"]
 ```
 
-每次 hardware request 只擦除一个真实 25 MiB block。block 到 first-page
-换算必须是 `block * 1600`，不能使用 shift。
+一个逻辑 eraseblock 始终对应同编号的真实 25 MiB physical block。
+`q3n_page_erase_block()` 复用 `q3n_hw_erase_block()`；逻辑 erasesize 只
+描述 MTD 可见 data 容量，一次物理擦除同时清除 data、parity 和尾部页。
 
 ### 6.7 OOB、Read ID、Status 和 Reset
 
 | NAND core 入口 | Controller 功能接口 | Hardware opcode |
 |---|---|---|
-| `ecc.read_oob[_raw]` | `q3n_ctrl_read_oob()` | `Q3N_HW_READ_OOB` |
-| `ecc.write_oob[_raw]` | `q3n_ctrl_program_oob()` | `Q3N_HW_PROGRAM_OOB` |
+| `ecc.read_oob[_raw]` | `q3n_page_read_oob()` | `Q3N_HW_READ_OOB` |
+| `ecc.write_oob[_raw]` | `q3n_page_write_oob()` | `Q3N_HW_PROGRAM_OOB` |
 | READ ID `cmdfunc` + `read_byte` | `q3n_hw_read_id()` | `Q3N_HW_READ_ID` |
 | STATUS `cmdfunc` + `read_byte/waitfunc` | `q3n_hw_read_status()` | `Q3N_HW_STATUS` |
 | RESET `cmdfunc` | `q3n_hw_reset()` | `Q3N_HW_RESET` |
 | `setup_read_retry` | `q3n_ctrl_set_read_retry()` | `Q3N_HW_SET_READ_RETRY` |
 
 OOB-only 读写和正常页读写共享 controller 串行化，但使用不同 hardware
-opcode，避免为了写 BBM 而读改写整页。RESET 成功后，hardware 和
+opcode，避免为了写 BBM 而读改写整页。RAID 关闭时逻辑 OOB 对应一个物理
+OOB；RAID 开启时逻辑 OOB 顺序映射到 `N` 个 data page OOB，parity OOB
+不暴露且保持 `0xff`。RESET 成功后，hardware 和
 `q3n_controller.retry_mode` 必须同时归零。
 
 ### 6.8 `hw.c` 寄存器实现流程
@@ -947,13 +1134,25 @@ DATA window 使用显式 little-endian 和 unaligned helper，不能把任意 `u
 
 ### 7.1 ECC 参数
 
-Q3N LDPC 参数：
+Q3N 单个物理页的 LDPC 参数：
 
 - ECC step：1024 字节；
 - strength：40 bit/step；
-- 每页 step 数：16；
-- 控制器内部 LDPC 数据：96 字节/step，共 1536 字节/页；
-- Linux 可见 OOB：1024 字节/页。
+- 每个物理页 step 数：16；
+- 控制器内部 LDPC 数据：96 字节/step，共 1536 字节/物理页；
+- 物理 OOB：1024 字节/页。
+
+RAID 关闭时，Linux 逻辑页与上述物理页相同。RAID 开启时，一个逻辑页由
+`N` 个物理 data page 拼接，因此：
+
+```text
+logical writesize = N * 16384
+logical oobsize   = N * 1024
+logical ECC steps = N * 16
+```
+
+每个物理 data page 仍独立执行 LDPC，逻辑页层只汇总结果；parity page
+也使用相同物理 ECC 能力，但不增加 Linux 可见 OOB 或 ECC step。
 
 LDPC 数据由控制器内部维护，不占 Linux 可见 OOB，因此配置为：
 
@@ -962,17 +1161,25 @@ LDPC 数据由控制器内部维护，不占 Linux 可见 OOB，因此配置为�
 - `ecc.strength = 40`；
 - `ecc.bytes = 0`。
 
-`ecc.bytes` 不能填写 96，否则 NAND core 会将 1536 字节 ECC 数据与 1024
-字节逻辑 OOB 比较并拒绝设备。
+`ecc.bytes` 不能填写 96，否则 NAND core 会把隐藏 LDPC 数据与逻辑 OOB
+比较并拒绝设备。该约束对 RAID 关闭及 2:1、4:1、8:1 profile 均成立。
 
 ### 7.2 OOB layout
 
-- OOB byte 0：坏块标记，保留；
-- OOB byte 1..1023：free region；
+- logical OOB byte 0：坏块标记，保留；
+- logical OOB byte 1..`logical_oobsize - 1`：free region；
 - 不暴露 ECC region。
 
-BBT 和 `block_markbad` 仍由 NAND core 通过 OOB byte 0 实现。Q3N 驱动必须
-保证 raw OOB 访问可以可靠读写该字节。
+RAID 开启时，逻辑 OOB 是 `N` 个 data page OOB 的顺序拼接：
+
+```text
+logical_oob[i * 1024 .. (i + 1) * 1024 - 1]
+    <-> data_page[i].physical_oob[0 .. 1023]
+```
+
+只有整个 logical OOB 的 byte 0 是 BBM，即第一个 data page 的物理 OOB
+byte 0。parity OOB 不暴露、不参与 OOB layout，也不被 Page RAID 保护。
+BBT 和 `block_markbad` 仍由 NAND core 通过 logical OOB byte 0 实现。
 
 ### 7.3 ECC callbacks
 
@@ -992,6 +1199,11 @@ BBT 和 `block_markbad` 仍由 NAND core 通过 OOB byte 0 实现。Q3N 驱动�
 结果寄存器。raw 页写仍由 QEMU 生成隐藏 LDPC，因为 guest 不具备提供
 1536 字节内部校验数据的接口。
 
+所有 callback 只调用 `q3n_page_*` 稳定接口。RAID 关闭时该接口直接复用
+单物理页 hardware API；RAID 开启时 normal/raw page callback 分别拼接
+`N` 个物理 data page。raw read 不读取 parity、不执行 read retry 或 RAID
+恢复；raw write 仍由驱动计算并写入 parity，避免制造已知不一致的 stripe。
+
 ### 7.4 坏块接口与坏块表
 
 Q3N 驱动不设置任何 MTD 坏块函数指针。`nand_scan_with_ids()` 进入
@@ -1006,7 +1218,8 @@ mtd->_block_markbad = nand_block_markbad;
 Q3N 也不覆盖 `chip->legacy.block_bad` 或
 `chip->legacy.block_markbad`。驱动只提供标准 `read_oob`、
 `read_oob_raw`、`write_oob` 和 `write_oob_raw`，供 NAND core 读取和写入
-OOB byte 0 的坏块标记。
+logical OOB byte 0 的坏块标记。RAID 开启时该字节映射到 stripe 中第一个
+data page 的物理 OOB byte 0；parity page 和 block 尾部页不参与 BBM。
 
 #### 7.4.1 BBT 初始化
 
@@ -1023,7 +1236,9 @@ OOB byte 0 的坏块标记。
 `nand_create_bbt(chip)`。该函数位于
 `drivers/mtd/nand/raw/nand_bbt.c`，属于 `nand_base` 所使用的 raw NAND
 core BBT 实现。它遍历全部 1664 个可见擦除块，通过标准
-`mtd_read_oob()` 路径检查 OOB byte 0，并建立 2 bit/block 的 RAM BBT。
+`mtd_read_oob()` 路径检查 logical OOB byte 0，并建立 2 bit/block 的 RAM
+BBT。Page RAID 只改变每块的逻辑页数和逻辑 OOB 大小，不改变可见 block
+数量及 RAM BBT 长度。
 
 本期 BBT 的精确长度为：
 
@@ -1088,11 +1303,15 @@ BBM 前会尝试擦除整个 block。重复 markbad 由 core 识别为已坏并�
 
 Q3N 只需保证：
 
-- `read_oob[_raw]` 能读取 page 的完整 1024-byte 逻辑 OOB；
+- `read_oob[_raw]` 能读取当前 profile 的完整逻辑 OOB；
 - `write_oob[_raw]` 能进行 OOB-only program；
 - OOB-only program 不意外改写同一页主数据；
-- OOB byte 0 从 `0xff` 编程为 `0x00` 后可持久化；
-- erase 将该 block 的主数据、OOB 和隐藏 LDPC 恢复到 erased state；
+- logical OOB byte 0 从 `0xff` 编程为 `0x00` 后可持久化；
+- RAID 开启时 logical OOB byte 0 只映射到第一个 data page 的物理 OOB
+  byte 0；
+- parity OOB 不暴露并保持 `0xff`；
+- erase 将该 block 的 data、parity、尾部页、OOB 和隐藏 LDPC 恢复到
+  erased state；
 - 非二次幂地址换算把 BBM 定位到正确的 25 MiB block；
 - controller reset 和 read retry 不改变坏块状态。
 
@@ -1105,6 +1324,8 @@ raw NAND core 负责。
 
 read retry 循环由 `nand_base.c` 负责。Q3N 驱动不在 `read_page()` 内部
 自行循环，否则会绕开 NAND core 的统计保存、模式复位和最终错误语义。
+RAID 开启时，每次 `read_page()` 按当前 retry mode 读取该逻辑页的全部
+`N` 个 data page；整个逻辑页是否进入下一 mode 仍由 NAND core 决定。
 
 驱动设置：
 
@@ -1140,6 +1361,23 @@ NAND core 在 retry 前保存并恢复 ECC 统计。最终所有模式失败后�
 retry 后成功的页必须让最终返回值至少达到 `mtd->bitflip_threshold`，使上层
 得到 `-EUCLEAN`/scrub 提示，而不是把依赖 retry 的读取当成健康页。
 
+RAID 开启时增加以下最终模式契约：
+
+1. 非最终 retry mode 只汇总 data page 的 ECC 结果；存在不可纠 data page
+   时增加一次逻辑页 `failed`，触发 NAND core 进入下一 mode；
+2. 最终 retry mode 中全部 data page 可纠时按普通 retry 成功处理；
+3. 最终 mode 恰好一个 data page 不可纠时读取 parity page，并使用 parity
+   与其他 data page XOR 重建缺失 slice；
+4. parity 可纠且重建成功时不保留本次 `failed` 增量，返回值至少为
+   `mtd->bitflip_threshold`，并增加 `raid_recovered_pages`；
+5. 两个及以上 data page 不可纠、parity 不可纠或 parity 读取出现负
+   transport errno 时不恢复，最终由 NAND core 返回 `-EBADMSG` 或原始
+   transport errno；
+6. raw read 不执行 retry，也不进行 RAID 恢复。
+
+RAID 恢复只发生在所有标准 read retry mode 耗尽之后，不能代替或内嵌一套
+私有 retry 循环。恢复出的数据本期只返回给上层，不自动写回介质。
+
 ### 8.3 模式复位
 
 - 每页读取结束后恢复 mode 0；
@@ -1154,10 +1392,13 @@ retry 后成功的页必须让最终返回值至少达到 `mtd->bitflip_threshol
 - retry attempts；
 - retry recovered pages；
 - retry exhausted pages；
+- RAID recovered logical pages；
 - setup retry failures；
 - retry mode reset failures。
 
 标准 MTD ECC 统计只反映最终读取结果，不能累计被后续 retry 恢复的中间失败。
+RAID 恢复成功同样不保留最终 `failed`，但必须返回 scrub 提示并更新私有
+`raid_recovered_pages`。
 
 ## 9. 非二次幂几何的 Linux Patch 设计
 
@@ -1183,6 +1424,20 @@ retry 后成功的页必须让最终返回值至少达到 `mtd->bitflip_threshol
 - `page & pagemask` 得到 target 内页号。
 
 1600 页/块和 25 MiB 擦除块不能由这些移位精确表示，必须增加精确乘除路径。
+Page RAID 开启后，NAND core 看到的是当前 profile 的逻辑几何，这些几何
+同样需要精确路径：
+
+| Profile | 逻辑页/块 | 逻辑擦除块 |
+|---|---:|---:|
+| RAID 关闭 | 1600 | 26,214,400 B |
+| 2:1 | 533 | 17,465,344 B |
+| 4:1 | 320 | 20,971,520 B |
+| 8:1 | 177 | 23,199,744 B |
+
+因此 Linux patch 不能只对固定 25 MiB 做特判；helper 必须以
+`mtd->writesize`、`mtd->erasesize`、精确 pages-per-eraseblock 和
+chipsize 工作。RAID profile 的物理 stripe 映射留在 Q3N driver，不进入
+`nand_base.c`。
 
 ### 9.2 Opt-in 标志
 
@@ -1193,10 +1448,12 @@ Linux 7.0.12 的 `BIT(15)` 未被现有 NAND option 使用。在
 #define NAND_NON_POWER_OF_2_GEOMETRY BIT(15)
 ```
 
-`ytmc_nand.c` 的匹配表项设置该标志；`nand_base.c` 完成 full-ID 匹配时，
-通过 `chip->options |= type->options` 把它并入 chip。probe 不再单独写入同一
-标志。patch 应包含编译期或静态检查，防止后续基线移植时与新 option bit
-冲突。
+`ytmc_nand.c` 的物理 profile 设置该标志；初始化根据当前 Page RAID profile
+生成 device-local `nand_flash_dev` scan ID 表时复制该 option，并写入当前
+逻辑 pagesize、oobsize、erasesize 和 chipsize。`nand_base.c` 完成 full-ID
+匹配时，通过 `chip->options |= type->options` 把它并入 chip。probe 不再
+单独写入同一标志。patch 应包含编译期或静态检查，防止后续基线移植时与新
+option bit 冲突。
 
 该标志的首期契约：
 
@@ -1254,7 +1511,8 @@ helper，避免 NAND I/O 和 BBT 对同一地址产生不同解释。
 `fls64(pages_per_target - 1)` 计算，而不是通过
 `chip_shift - page_shift` 推导。
 
-`page_shift` 可以继续使用，因为 Q3N page size 16 KiB 是二次幂。
+`page_shift` 可以继续使用，因为 RAID 关闭时的 16 KiB 以及 RAID 开启时的
+32/64/128 KiB 逻辑 page size 均是二次幂。
 `phys_erase_shift`、`chip_shift`、`pagemask` 在 opt-in 路径中不得再作为
 真实几何来源；如果为 ABI 或旧代码兼容保留字段，只能用于未进入精确路径的
 调用。
@@ -1337,10 +1595,12 @@ patch 文件是 Linux 改动的唯一 source of truth。实施时可以在临时
 
 `qemu_3dnand_module.c`、`qemu_3dnand_init.c`、
 `qemu_3dnand_flash.c`、`qemu_3dnand_controller.c`、
-`qemu_3dnand_ecc.c`、`qemu_3dnand_addr.c`、`qemu_3dnand_hw.c`、
-`ytmc_nand.c` 及其内部头文件属于 Q3N 项目 driver overlay，直接在本仓库
-跟踪；`nand_base.c`、raw NAND `nand_bbt.c` 和 `rawnand.h` 等原生 Linux
-文件仍只能通过 `patches/linux/` 修改。
+`qemu_3dnand_ecc.c`、`qemu_3dnand_page.c`、
+`qemu_3dnand_layout.c`、条件编译的 `qemu_3dnand_page_raid.c`、
+`qemu_3dnand_addr.c`、`qemu_3dnand_hw.c`、`ytmc_nand.c` 及其内部头文件
+属于 Q3N 项目 driver overlay，直接在本仓库跟踪；`nand_base.c`、raw
+NAND `nand_bbt.c` 和 `rawnand.h` 等原生 Linux 文件仍只能通过
+`patches/linux/` 修改。
 
 仓库中的 `work/linux/linux-7.0.12` 仅是构建产物或外部源码副本：
 
@@ -1398,25 +1658,135 @@ CI 至少检查：
 - Linux raw NAND/MTD 相关构建通过；
 - 二次幂参考 NAND 的行为没有变化。
 
-## 11. Page RAID 边界
+## 11. 可配置 Page RAID
 
-本期不创建任何 page RAID 数据结构或命令：
+Page RAID 是构建期可选的逻辑页 profile，不改变 `q3n_hw_*` 单物理页接口，
+也不改变 QEMU MMIO ABI。详细设计另见
+`2026-07-29-q3n-configurable-page-raid-logical-page-design.md`；本节给出整体
+架构必须遵守的接口和介质契约。
 
-- 每个 MTD 页直接对应一个 data-pool NAND 页；
-- 不计算 parity；
-- 不读取 parity block；
-- 不进行降级恢复；
-- 不注册 page RAID debugfs；
-- 不保留“空实现”调度线程。
+### 11.1 独立配置
 
-为避免旧布局被误识别，新驱动测试应使用全新的 NAND image。物理 page/OOB
-格式虽然没有因本设计改变，但旧分支写入的数据可能包含 page RAID 的地址
-裁剪、parity 和 metadata 语义，不能承诺直接迁移。
+```text
+CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID
+CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES
+```
+
+- `PAGE_RAID=n`：不链接 `qemu_3dnand_page_raid.o`，选择现有
+  physical-page ops，比例配置不参与任何计算；
+- `PAGE_RAID=y`：链接 RAID 实现，初始化时读取 data page 数 `N`；
+- `N` 首期只允许 2、4、8，必须由 `is_power_of_2()` 再次校验；
+- parity page 数固定为 1；
+- 配置在编译期确定，MTD 注册后不可运行时切换。
+
+初始化必须明确打印 RAID enabled/disabled、data:parity 比例、物理页与逻辑
+页/OOB 大小、每块 stripe 数、每块已用物理页、尾部页、逻辑擦除块和可见
+容量。配置非法、计算溢出、RAID 对象未编译、scratch 分配失败或 scan 后
+几何不一致时拒绝注册 MTD。
+
+### 11.2 逻辑几何和地址映射
+
+设物理 `P=16 KiB`、`O=1024 B`、`B=1600 pages/block`，
+`N=data_pages`：
+
+```text
+stripe_pages        = N + 1
+stripes_per_block   = floor(B / stripe_pages)
+tail_pages          = B - stripes_per_block * stripe_pages
+logical_writesize   = N * P
+logical_oobsize     = N * O
+logical_erasesize   = logical_writesize * stripes_per_block
+logical_size        = logical_erasesize * 1664
+```
+
+逻辑页 `L` 的映射：
+
+```text
+logical_block = L / stripes_per_block
+stripe        = L % stripes_per_block
+physical_base = logical_block * 1600 + stripe * (N + 1)
+data_page[i]  = physical_base + i
+parity_page   = physical_base + N
+```
+
+一个 stripe 永不跨物理 block。2:1 的最后 1 页和 8:1 的最后 7 页是不可
+映射尾部页；4:1 无尾部页。一个 logical eraseblock 始终对应同编号的一个
+physical block，物理擦除仍覆盖完整 25 MiB。
+
+RAID 关闭时不套用上述 stripe 映射：
+
+```text
+logical page L = physical page L
+logical eraseblock = physical block
+```
+
+### 11.3 写入和 parity
+
+上层只提供一个逻辑页 data。驱动把它拆成 `N` 个 16 KiB slice，并计算：
+
+```text
+parity = data[0] XOR data[1] XOR ... XOR data[N-1]
+```
+
+一次写调用的固定顺序为 `D0..DN-1,P`：
+
+1. 清零 16 KiB `parity_scratch` 并 XOR 全部 data slice；
+2. 在同一同步锁区间内依次 program data pages；
+3. 任一 data page program 失败立即停止，不写 parity；
+4. data pages 全部成功后 program parity page；
+5. parity 成功后才向上返回成功。
+
+normal 和 raw write 都计算 parity。parity OOB 保持 `0xff`，本期不写
+parity metadata。已成功写入的物理页不回滚；任一中途失败后，该逻辑页所在
+物理 block 必须 erase 后才能重新使用。
+
+### 11.4 读取、read retry 和恢复
+
+normal read 在每个 NAND core retry mode 中读取全部 `N` 个 data page 并
+汇总 ECC 结果。标准 read retry 全部耗尽后：
+
+- 恰好一个 data page 不可纠且 parity 可纠：使用 parity 和其他 data page
+  XOR 恢复缺失 slice；
+- 两个及以上 data page 不可纠：不恢复；
+- parity 不可纠：不恢复；
+- transport/MMIO 负错误：保留原错误，不转成 RAID 恢复；
+- 恢复成功返回至少 `mtd->bitflip_threshold` 并增加
+  `raid_recovered_pages`，不自动回写介质。
+
+raw read 只拼接 `N` 个 data page，不读取 parity、不执行 ECC retry 或 RAID
+恢复。
+
+### 11.5 OOB、BBM 和 BBT
+
+- logical OOB 是 `N` 个 data page OOB 的顺序拼接；
+- logical OOB byte 0 映射到第一个 data page 的物理 OOB byte 0；
+- parity OOB 不暴露且保持 `0xff`；
+- Page RAID 不保护 OOB，OOB-only program 不重新计算 main-data parity；
+- `_block_isbad`、`_block_markbad`、`_block_isreserved` 和 RAM BBT 继续
+  完全由 raw NAND core 提供；
+- parity page 和尾部页不参与 BBM，不新增私有 BBT。
+
+### 11.6 明确不保证的能力
+
+- 不实现 parity metadata、commit marker、generation 或 parity CRC；
+- 不保证掉电后的 `N+1` 个物理页全有或全无；
+- 不实现 QEMU transaction、journal、copy-on-write 或 rollback；
+- 不跨物理 block 放置 stripe；
+- 不保护逻辑 OOB；
+- 不自动写回恢复数据；
+- 不支持运行时切换 profile；
+- 不保证不同 profile 或旧 page RAID image 的介质兼容。
+
+RAID 开关或比例变化后必须使用全新或完整擦除的 NAND image。
 
 ## 12. 错误处理与并发
 
 - NAND 操作序列由 `nand_controller.lock` 串行化；
-- 单次 MMIO 事务由 `q3n_controller.io_lock` 保护；
+- RAID 逻辑页调用进入 `q3n_controller.io_lock` 后，锁覆盖完整
+  `D0..DN-1,P` 写序列或同一 mode 的整组 data read；
+- hardware 层提供仅供已持锁调用的内部 helper，并用 lockdep 断言
+  `io_lock` 已持有，不能在每个物理页上重复获取同一 mutex；
+- RAID 关闭时同一锁仍只覆盖一次单物理页 MMIO 事务；
 - 固定加锁顺序为 `nand_controller.lock` 后 `io_lock`，不得反向获取；
 - debugfs 若触发硬件动作，必须经过 controller 功能接口和 `io_lock`；
 - `read_page()` 只完成一次指定 mode 的读取；
@@ -1425,6 +1795,9 @@ CI 至少检查：
 - ECC 不可纠正只通过 `ecc_stats.failed` 报告给 NAND core；
 - raw read 不改变 ECC 统计；
 - OOB-only 操作不得意外改写主数据；
+- RAID 写入固定 data 在前、parity 在后，返回成功前不允许其他 Q3N 请求
+  插入该 stripe；
+- 同步命令原子性不等于掉电原子性；中途失败不回滚已 program 的物理页；
 - 任一失败路径不得把 retry mode 留在非 0 状态；
 - scan 和 remove 期间不允许并发 MTD I/O。
 
@@ -1440,20 +1813,26 @@ CI 至少检查：
 
 ### 13.2 源文件和层间边界
 
-- Makefile 只链接 module、init、flash、YTMC、controller、ECC、address 和
-  hardware 对象；
-- 不链接旧 `qemu_3dnand_main.o`、RAID 或 scheduler 对象；
+- Makefile 固定链接 module、init、flash、YTMC、controller、ECC、page、
+  layout、address 和 hardware 对象；
+- `PAGE_RAID=n` 时不链接 `qemu_3dnand_page_raid.o`；
+- `PAGE_RAID=y` 时链接 `qemu_3dnand_page_raid.o`；
+- 两种配置均不链接旧 `qemu_3dnand_main.o` 或旧 RAID scheduler 对象；
 - `module.c` 只有 PCI/KO 注册和模块元信息；
 - `init.c` 覆盖 probe 每个失败点的逆序回退测试；
 - 只有 `hw.c` 出现 `readl`、`writel`、`readl_poll_timeout` 和
   `Q3N_REG_*`；
 - `hw.c` 不引用 `mtd_info`、`nand_chip`、`ecc_stats` 或 BBT API；
 - `ecc.c` 不直接访问 MMIO；
+- `ecc.c` 只调用 `q3n_page_*`，不计算 stripe 地址；
+- `layout.c` 不访问 MMIO，2:1、4:1、8:1 可用 host/KUnit 直接测试；
+- `page_raid.c` 只复用单物理页 `q3n_hw_*`，QEMU 不计算 parity；
 - `addr.c` 的 KUnit 不需要 PCI device 或 MMIO；
 - 通过 fake `q3n_hw_ops` 验证 controller operation parser 和错误映射；
 - `q3n_match_flash_ids()` 正确转发到 YTMC provider；
 - 两个 provider 同时匹配时 probe 被拒绝；
-- `qemu_3dnand_bbt.c`、私有 BBT 结构和 RAID 数据结构均不存在；
+- `qemu_3dnand_bbt.c` 和私有 BBT 结构不存在；
+- 不存在 parity metadata、异步 stripe cache、RAID scheduler 或 workqueue；
 - 静态调用图与文档中的依赖方向一致。
 
 ### 13.3 扫描与基本 MTD
@@ -1470,26 +1849,35 @@ CI 至少检查：
 - 预探测 ID 与 NAND core 再读 ID 不一致时 scan 失败；
 - READ ID 返回期望 ID；
 - 确认传给 `nand_scan_with_ids()` 的第三个参数是
-  `ytmc_nand_ids`，并成功完成 scan；
-- MTD 几何来自 `ytmc_nand.c` 表和 NAND core 初始化，不是 probe 手工赋值；
-- MTD 报告 16 KiB writesize、1024 B oobsize、25 MiB erasesize；
-- MTD 报告 41,600 MiB 容量；
+  当前设备私有、以 `ytmc_nand` physical profile 为来源的 logical scan
+  ID 表，并成功完成 scan；
+- MTD 几何来自 YTMC physical profile、page profile 和 NAND core
+  初始化，不是 probe 直接填写 MTD；
+- RAID 关闭时 MTD 报告 16 KiB writesize、1024 B oobsize、25 MiB
+  erasesize 和 41,600 MiB 容量；
+- 2:1、4:1、8:1 时分别报告第 4 节表格中的逻辑 page/OOB/erase/capacity；
+- RAID enabled/disabled、比例、stripe、尾部页和可见容量初始化日志完整；
 - MTD `_read`、`_write`、`_erase` 指向 NAND core，而不是 Q3N 自定义入口；
 - MTD `_block_isbad`、`_block_markbad` 和 `_block_isreserved` 由
   `nand_scan_tail()` 安装，不指向 Q3N 私有实现；
 - program/read/erase/OOB 均通过。
 
-### 13.4 非二次幂边界
+### 13.4 非二次幂与映射边界
 
 - block 0 page 1599 与 block 1 page 0 不混淆；
-- page 1599 到 page 1600 的跨块连续读写正确；
+- RAID 关闭时 page 1599 到 page 1600 的跨块连续读写正确；
+- 2:1、4:1、8:1 的最后一个逻辑页与下一 block 第一个逻辑页映射正确；
+- 2:1 的 1 个尾部页和 8:1 的 7 个尾部页不可映射；
+- 4:1 的 1600 个物理页全部被 320 个 stripe 使用；
 - 完整擦除一个 25 MiB block；
-- 非 25 MiB 对齐的 erase 被拒绝；
+- MTD erase 按当前逻辑 erasesize 对齐，底层仍发出一个完整 25 MiB
+  physical block erase；
 - block 1663 的第一页和最后一页正确；
 - MTD 最后一个字节可读写，越界一字节被拒绝；
 - BBT 第一项和最后一项正确；
 - `block_markbad` 只改变目标 block；
-- BBT scan 步长恰好为 25 MiB；
+- BBT scan 步长恰好为当前 logical erasesize，block index 仍与 physical
+  block 一一对应；
 - pages-per-block、block count 和 BBT buffer 长度无截断；
 - 不访问 1600..2047 这类由二次幂 row 编码产生的空洞。
 
@@ -1501,6 +1889,8 @@ CI 至少检查：
 - 空白介质 scan 后建立 416-byte RAM BBT；
 - scan 前把某 block 的 OOB byte 0 写为 `0x00`，scan 后
   `mtd_block_isbad()` 返回 bad；
+- RAID 开启时 BBM 只位于该 block 第一个 logical page 的第一个 data page
+  OOB byte 0，parity 和尾部页不参与；
 - 首块、末块及跨 1600-page 边界的坏块索引正确；
 - `mtd_block_markbad()` 尝试擦除目标 block、写 OOB byte 0 并更新 RAM
   BBT；
@@ -1522,7 +1912,11 @@ CI 至少检查：
 - normal read 返回纠正后的数据；
 - raw read 不更新 ECC 统计；
 - OOB byte 0 坏块标记可持久化；
-- OOB 1..1023 可正常读写；
+- RAID 关闭时 OOB 1..1023 可正常读写；
+- RAID 开启时 logical OOB 顺序映射 `N` 个 data OOB，parity OOB 始终
+  隐藏并保持 `0xff`；
+- raw read 不读取 parity 或执行 RAID 恢复；
+- raw write 仍计算并写入 parity；
 - hidden LDPC 不占用逻辑 OOB。
 
 ### 13.7 Read Retry
@@ -1537,17 +1931,34 @@ CI 至少检查：
 - setup retry 失败和 mode reset 失败可观察；
 - retry 后紧接着读取健康页，结果不受前一页 mode 影响。
 
-### 13.8 上层验证
+### 13.8 Page RAID
 
-- `mtd_debug` 跨多个 25 MiB block 读写；
-- bad block 标记与重新扫描；
-- UBI attach、格式化、读写和 detach；
-- 重启 QEMU 后数据、OOB 和坏块状态一致；
-- page RAID 相关线程、统计和介质访问均不存在。
+- RAID 关闭是严格 identity mapping，介质行为与当前实现一致；
+- `N=2/4/8` 的逻辑几何、容量、首尾页、跨块页和尾部页 literal 全部匹配；
+- 非二次幂、0、1、3、越界比例和算术溢出在初始化时被拒绝；
+- 固定输入 XOR 得到预期 parity；
+- program 顺序严格为 `D0..DN-1,P`；
+- 任一 data program 失败后不写 parity，parity program 失败向上报错；
+- 一个完整逻辑页写期间没有其他 Q3N 请求插入；
+- 单 data page 在标准 retry 耗尽后由 parity 恢复并报告 scrub；
+- 双 data page failure、parity failure 均最终返回 `-EBADMSG`；
+- transport error 不进入 RAID 恢复；
+- 成功或失败后均不残留 data 副本、pending stripe 或 metadata；
+- QEMU 构建和现有物理 page/ECC/read-retry 测试无需修改即可通过。
+
+### 13.9 上层验证
+
+- RAID 关闭、4:1、8:1 分别执行 `mtd_debug` 跨多个逻辑 eraseblock 读写；
+- 各 profile 执行 bad block 标记与重新扫描；
+- 各 profile 执行 UBI attach、格式化、读写和 detach；
+- 同一 profile 重启 QEMU 后 data、OOB、parity 和坏块状态一致；
+- RAID profile 改变时只使用全新或完整擦除的 image；
+- 不出现 Page RAID 线程、异步任务或 parity metadata 介质访问。
 
 ## 14. 实施顺序
 
-设计批准后，实施计划按以下依赖顺序拆分：
+NAND Core、legacy callback、精确几何 patch、ECC/read retry 和 BBT 基础
+实现已经按以下顺序完成：
 
 1. 建立 Linux patch 制作、应用和回退框架；
 2. patch 1：opt-in flag 与精确几何 helpers；
@@ -1567,28 +1978,51 @@ CI 至少检查：
 16. 增加可选非 RAID debugfs 统计；
 17. 完成 MTD、BBT、UBI、层间边界和 power-of-two 回归验证。
 
-驱动重构依赖 Linux patch 已可稳定应用；read retry 依赖标准 page read
-返回契约完成；任何 page RAID 工作不进入本期实施计划。
+可配置 Page RAID 按以下新增依赖顺序实施：
+
+18. 增加两个独立 Kconfig 和两种 Makefile 对象组合的契约测试；
+19. 实现 `qemu_3dnand_layout.c/.h` 的 profile 计算、溢出校验和纯映射测试；
+20. 实现 `qemu_3dnand_page.c/.h` 稳定接口及 RAID 关闭 identity ops；
+21. 由 YTMC physical profile 生成 device-local logical scan ID 表，并校验
+    2:1、4:1、8:1 初始化几何和日志；
+22. 实现 `qemu_3dnand_page_raid.c/.h` 的 XOR、同步写序和失败语义；
+23. 把 ECC page/OOB/raw callbacks 和 erase 路径切换到 `q3n_page_*`；
+24. 接入最终 retry mode 的单 data page parity 恢复；
+25. 验证 logical OOB、BBM、RAM BBT、尾部页和完整物理块 erase；
+26. 完成 RAID 关闭、2:1、4:1、8:1 的 host、KO、guest、UBI 和持久化回归。
+
+步骤 18 至 26 必须以测试先行方式逐项落地。RAID 关闭回归是每一步的门禁；
+不允许通过改变 `q3n_hw_*` 为多页语义来缩短实施路径。
 
 ## 15. 评审结论项
 
 本设计提交评审时，需要明确确认：
 
-- 接受只暴露 1664 个 data-pool blocks、40.625 GiB MTD；
+- 接受始终暴露 1664 个 logical eraseblocks，RAID 关闭时容量为
+  40.625 GiB，RAID 开启时容量按 2:1、4:1、8:1 profile 计算；
 - 接受本期非二次幂支持限定为 1 target、1 LUN；
 - 接受首期假设 full ID 为 `9c d7 98 a6 51 33 4e 44`；
 - 接受通过 `ytmc_nand.c` 白名单预探测选择传给
-  `nand_scan_with_ids()` 的 ids 表；
-- 接受新 KO 按 module/init/flash/vendor/controller/ECC/address/hardware
-  分层，不再编译旧 `qemu_3dnand_main.o`；
+  `nand_scan_with_ids()` 的设备私有 logical scan ID 表；
+- 接受新 KO 按 module/init/flash/vendor/controller/ECC/page/layout/
+  address/hardware 分层，并按配置增加 page_raid，不再编译旧
+  `qemu_3dnand_main.o`；
 - 接受只有 `qemu_3dnand_hw.c` 操作具体 Q3N 寄存器，其他层只能调用
   `q3n_hw_ops` 或 controller 功能接口；
+- 接受 `q3n_hw_*` 保持单物理页接口，parity 由 Linux 驱动计算，QEMU 不
+  计算 parity；
 - 接受 `_block_isbad`、`_block_markbad`、`_block_isreserved` 和 BBT
   完全使用 raw NAND core，不保留 Q3N 私有坏块实现；
 - 接受首期使用 OOB BBM 重建的 RAM BBT，不启用 flash-based BBT；
 - 接受标准 `nand_block_markbad_lowlevel()` 会先尝试擦除目标 block，因此
   markbad 不承诺保留主数据；
 - 接受 Linux 修改以三段 patch series 交付；
-- 接受旧 page RAID image 不做兼容承诺；
 - 接受 retry 成功向上层报告 scrub 提示；
-- 接受本期不包含任何 page RAID 空实现。
+- 接受 Page RAID 开关和 data:parity 比例是两个独立配置，首期比例为
+  2:1、4:1、8:1；
+- 接受 stripe 不跨 block，尾部不足完整 stripe 的物理页不可见；
+- 接受 raw write 仍生成 parity，raw read 不执行 RAID 恢复；
+- 接受 parity metadata、掉电原子性、rollback、自动修复写回和运行时
+  profile 切换均不在本期范围；
+- 接受 RAID 开关或比例变化后使用全新或完整擦除的 image，不承诺旧
+  Page RAID image 或跨 profile 兼容。
