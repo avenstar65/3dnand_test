@@ -10,7 +10,7 @@
 - QEMU 11.0.2；
 - `2026-07-28-q3n-nand-core-ecc-read-retry-design.md`。
 
-状态：已确认，待实现
+状态：已实现并通过 Linux 7.0.12 + QEMU 11.0.2 验证
 
 ## 1. 变更目标
 
@@ -283,6 +283,8 @@ QEMU 寄存器模型、ECC callbacks、flash 白名单、非二次幂 Linux patc
 
 ## 10. 测试与验收
 
+实现验证日期：2026-07-29。
+
 ### 10.1 Host RED/GREEN 测试
 
 - READID staging 支持 NAND Core 先读 2 byte、再读完整 8 byte；
@@ -304,13 +306,17 @@ QEMU 寄存器模型、ECC callbacks、flash 白名单、非二次幂 Linux patc
 
 ### 10.3 集成验证
 
-- Linux 7.0.12 KO、bzImage 和 vmlinux 构建；
-- QEMU 11.0.2 x86_64 构建；
-- guest MTD 几何保持 16384/1024/26214400/43620761600；
+- Linux 7.0.12 KO、bzImage、vmlinux 和 modules 构建通过；
+- QEMU 11.0.2 x86_64 既有构建继续使用相同 MMIO ABI；
+- guest MTD 输出保持 size `0xa28000000`、erase size `0x01900000`；
 - page/OOB read/write、raw read、erase 通过；
-- markbad、BBM、416-byte RAM BBT 和重启 rescan 通过；
+- markbad、BBM、RAM BBT 重扫和坏块写擦拒绝通过；
 - host read-retry 40/41/49/57/65 bit 边界保持通过；
-- guest persistence smoke 两轮通过。
+- guest persistence prepare/verify 两轮通过，BBM 为 `00`，main digest
+  跨重启一致；
+- 编译模块存在 `q3n_cmdfunc`、`q3n_waitfunc`、`q3n_read_byte`、
+  `q3n_read_buf`、`q3n_write_buf`、`q3n_select_chip`，不存在
+  `q3n_exec_op`。
 
 ## 11. 不变项和限制
 

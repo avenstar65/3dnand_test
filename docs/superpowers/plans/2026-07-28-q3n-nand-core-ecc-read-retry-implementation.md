@@ -4,7 +4,12 @@
 
 **Goal:** Replace the direct-MTD/page-RAID Q3N driver with an extensible raw-NAND controller driver initialized by `nand_scan_with_ids()`, using NAND Core ECC, bad-block, BBT, and read-retry paths while preserving the device's 16 KiB page and 1600-page non-power-of-two eraseblock geometry through tracked Linux patches.
 
-**Architecture:** A PCI/module entry owns one controller and one NAND chip. Device detection reads the complete eight-byte ID, selects an independent flash profile from `ytmc_nand.c`, and passes that whitelist table to `nand_scan_with_ids()`. NAND Core owns MTD operations, bad-block callbacks, RAM BBT, and retry iteration; the driver owns `exec_op`, ECC page/OOB/raw callbacks, retry-mode programming, address conversion, and register access. The QEMU model exposes the matching ID, raw reads, retry mode, and deterministic bit-error behavior. Linux source compatibility changes remain versioned patch files and are never copied into this repository as modified upstream source.
+**Architecture:** A PCI/module entry owns one controller and one NAND chip. Device detection reads the complete eight-byte ID, selects an independent flash profile from `ytmc_nand.c`, and passes that whitelist table to `nand_scan_with_ids()`. NAND Core owns MTD operations, bad-block callbacks, RAM BBT, and retry iteration; the driver owns ECC page/OOB/raw callbacks, retry-mode programming, address conversion, register access, and—after the 2026-07-29 migration—traditional `cmdfunc`/`waitfunc` callbacks instead of `exec_op`. The QEMU model exposes the matching ID, raw reads, retry mode, and deterministic bit-error behavior. Linux source compatibility changes remain versioned patch files and are never copied into this repository as modified upstream source.
+
+> Controller Task 9 below records the original implementation path. Its
+> `exec_op` result was superseded by
+> `2026-07-29-q3n-legacy-cmdfunc-waitfunc-implementation.md`; it is not the
+> current controller contract.
 
 **Tech Stack:** Linux 7.0.12 raw NAND/MTD APIs, C11 host behavior tests, KUnit, QEMU 11.0.2 device model, POSIX shell overlay/build scripts, `git apply`.
 

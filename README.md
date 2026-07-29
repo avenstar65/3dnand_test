@@ -54,8 +54,10 @@ BASE_IMAGE=your-registry.example.com/library/ubuntu:24.04 ./scripts/build-image.
 Linux overlay 会注册 `qemu_3dnand` PCI 驱动：先读取完整 8-byte NAND ID，
 从 `ytmc_nand.c` 白名单取得 `nand_flash_dev` 表，再调用
 `nand_scan_with_ids()`。MTD 读写、擦除、坏块和 BBT 均由 Raw NAND Core
-提供，Q3N 驱动只实现 controller `exec_op()`、`chip->ecc.*` 与
-`setup_read_retry()`。
+提供。Q3N 驱动使用传统 `cmdfunc()`、`waitfunc()`、`read_byte()` 等
+legacy callbacks 处理 RESET、READID、STATUS 和 ERASE，使用
+`chip->ecc.*` 处理 page/OOB/raw 数据，并通过 `setup_read_retry()` 接入
+NAND Core 的 read retry；不注册 controller `exec_op()`。
 
 配置并编译内核：
 

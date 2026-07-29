@@ -42,7 +42,7 @@ Implemented base functions:
 | Linux PCI probe driver | Implemented |
 | Linux MTD registration | Implemented in the Linux overlay |
 | Linux driver-owned scheme D page-raid | Not implemented in this branch |
-| Linux raw NAND `exec_op()` integration | Implemented |
+| Linux raw NAND legacy `cmdfunc()`/`waitfunc()` integration | Implemented |
 | Machine/DT wiring | PCI path used first; DT path not implemented |
 
 The MMIO interface is intentionally simple for the first bring-up:
@@ -135,6 +135,7 @@ work/build/qemu-11.0.2/qemu-system-x86_64-unsigned -machine q35 -device q3n-nand
 
 The Linux overlay registers an MTD device named `qemu-3dnand` through
 `nand_scan_with_ids()`. Raw NAND Core owns MTD read/write/erase, bad-block and
-BBT behavior. The Linux driver implements controller `exec_op()`, page/OOB ECC
-callbacks and `setup_read_retry()`, translating each NAND transaction into the
-MMIO commands described above. No Page RAID object is linked.
+BBT behavior. The Linux driver uses legacy `cmdfunc()`/`waitfunc()` callbacks
+for RESET, READID, STATUS and ERASE, page/OOB ECC callbacks for data transfer,
+and `setup_read_retry()` for NAND Core retry iteration. It does not register
+controller `exec_op()`. No Page RAID object is linked.

@@ -71,8 +71,8 @@ core 的扫描、页读写、ECC 统计、坏块管理和 read retry 流程。
 
 1. 驱动注册 `struct nand_chip` 和 `struct nand_controller`；
 2. 通过 `nand_scan_with_ids()` 完成 NAND 识别并初始化 MTD；
-3. 驱动实现 `nand_ecc_ctrl` 的页、OOB 和 raw 回调，以及控制器
-   `exec_op`；
+3. 驱动实现 `nand_ecc_ctrl` 的页、OOB 和 raw 回调，并使用传统
+   `cmdfunc`、`waitfunc`、`read_byte` 等 legacy callbacks 处理命令；
 4. MTD 的读写、擦除和坏块入口由 `nand_base.c` 提供；
 5. read retry 由 NAND core 统一调度，驱动只负责切换 retry mode 和报告
    单次读取结果。
@@ -104,7 +104,8 @@ Linux `nand_base` 相关代码，但修改必须以版本化 patch 交付，不�
   `mtd->_block_isreserved` 使用 `nand_base.c` 安装的标准实现；
 - 坏块表由 raw NAND core 扫描、查询和更新，Q3N 驱动不维护私有 BBT；
 - 实现 `ecc->read_page`、`ecc->write_page`、raw 页读写和 OOB 回调；
-- 使用 controller `exec_op` 实现 NAND reset、read ID、status 和 erase；
+- 使用传统 `cmdfunc`、`waitfunc` 和 staging read callbacks 实现 NAND
+  reset、read ID、status 和 erase，不注册 `exec_op`；
 - 实现 NAND core 驱动的 read retry；
 - 保留 16 KiB × 1600 页/块的非二次幂擦除块几何；
 - 通过 Linux patch 修正 raw NAND core 和 legacy raw NAND BBT 中的
@@ -134,7 +135,7 @@ flowchart TD
     A["MTD 用户<br/>mtdchar / UBI / 文件系统"] --> B["Linux MTD Core"]
     B --> C["Raw NAND Core<br/>nand_base.c / nand_bbt.c"]
     C --> D["Q3N nand_chip<br/>ECC page/OOB callbacks"]
-    C --> E["Q3N nand_controller<br/>exec_op / attach_chip"]
+    C --> E["Q3N nand_controller<br/>legacy callbacks / attach_chip"]
     H["ytmc_nand.c<br/>完整 ID + 几何白名单"] --> E
     E -->|"nand_scan_with_ids(ids)"| C
     D --> F["Q3N MMIO 控制器"]
@@ -389,7 +390,7 @@ scan 前的 READ ID 只用于选择厂商白名单，不能初始化或覆写 MT
 | `qemu_3dnand_init.c` | KO/设备初始化 | `probe`/`remove`、资源申请、各层装配、ID 预探测、scan/register、错误回退 | 页读写算法、寄存器序列 |
 | `qemu_3dnand_flash.c` | Flash 白名单选择 | 维护 vendor provider 列表，统一调用各厂商 full-ID matcher | 保存具体厂商几何 |
 | `ytmc_nand.c` | 厂商器件表 | YTMC full-ID、几何、options、ECC requirement、厂商内匹配 | MMIO、probe、MTD 回调 |
-| `qemu_3dnand_controller.c` | 控制器功能层 | `nand_controller_ops`、`exec_op` 解析、controller 串行化、功能级 read/program/erase/reset/status | 直接 `readl()`/`writel()` |
+| `qemu_3dnand_controller.c` | 控制器功能层 | `nand_controller_ops.attach_chip`、legacy 命令状态机、`cmdfunc/waitfunc/read_byte/read_buf/write_buf/select_chip`、controller 串行化 | 直接 `readl()`/`writel()` |
 | `qemu_3dnand_ecc.c` | NAND ECC/OOB 适配层 | `ecc->read_page` 等 callbacks、OOB layout、ECC 统计契约、`setup_read_retry` | MTD `_read`、BBT、直接寄存器 |
 | `qemu_3dnand_addr.c` | 地址与逻辑视图 | 线性 page/block/column 到 Q3N byte address 的精确换算、边界检查 | RAID 映射、MMIO |
 | `qemu_3dnand_hw.c` | 控制器实现层 | 操作具体寄存器、提交命令、数据窗口传输、等待完成、读取状态/ECC 结果 | NAND core 和 MTD 语义 |
@@ -399,7 +400,7 @@ scan 前的 READ ID 只用于选择厂商白名单，不能初始化或覆写 MT
 | 文件 | 职责 |
 |---|---|
 | `qemu_3dnand_debugfs.c` | 只暴露 controller、ECC、retry 和错误统计；不得恢复 RAID 调试项 |
-| `qemu_3dnand_kunit.c` | 测试 ID matcher、地址换算、operation parser、ECC 返回契约和调用层边界 |
+| `qemu_3dnand_kunit.c` | 测试 ID matcher、地址换算、legacy 命令状态机、ECC 返回契约和调用层边界 |
 
 不创建 `qemu_3dnand_bbt.c`。坏块接口和 BBT 已由
 `nand_base.c`/raw NAND `nand_bbt.c` 提供，新增同名功能会产生第二套真值。
@@ -482,7 +483,7 @@ flowchart TD
         DBG --> CTRL
     end
 
-    N -->|"exec_op / attach_chip"| CTRL
+    N -->|"legacy callbacks / attach_chip"| CTRL
     N -->|"ecc callbacks"| ECC
     HW --> REG["Q3N MMIO 寄存器"]
     REG --> QEMU["QEMU Q3N NAND 模型"]
@@ -745,20 +746,21 @@ q3n_pci_remove()
 
 任一条件不满足时返回明确错误，不能静默改写几何。
 
-### 6.2 `exec_op`
+### 6.2 传统 `cmdfunc`/`waitfunc`
 
-`exec_op` 至少支持 NAND core 在 scan 和运行期使用的操作：
+controller 不注册 `exec_op`。NAND core 在 scan 和运行期使用的命令由下列
+legacy callbacks 提供：
 
-- RESET；
-- READ ID；
-- STATUS；
-- ERASE。
+- `cmdfunc`：RESET、READ ID、STATUS、ERASE1/ERASE2，以及 page/OOB
+  sequencing；
+- `waitfunc`：优先传播 `cmdfunc` 保存的负 errno，否则读取 NAND status；
+- `read_byte/read_buf`：读取 READ ID 和 STATUS staging；
+- `write_buf`：本数据路径不使用，意外调用返回 pending
+  `-EOPNOTSUPP`；
+- `select_chip`：只接受 target 0 和 deselect -1。
 
-每个 pattern 同时支持 `check_only = true`。检查模式只判断能否执行，不访问
-硬件、不改变控制器状态。
-
-页读写和 OOB 操作由 ECC callbacks 直接调用 Q3N 页级命令；本期不要求把
-所有数据流操作都重新编码成通用 NAND operation parser。
+页读写和 OOB 操作仍由 ECC callbacks 直接调用 Q3N 页级命令，不通过
+`read_buf/write_buf` 搬运 16 KiB page。
 
 ### 6.3 Controller 功能层接口
 
@@ -862,8 +864,8 @@ flowchart TD
     D --> E{"block bad?"}
     E -- "是且不允许访问" --> F["返回 -EIO"]
     E -- "否" --> G["nand_erase_op"]
-    G --> H["controller.exec_op<br/>解析 ERASE operation"]
-    H --> I["q3n_ctrl_erase_block<br/>controller.c"]
+    G --> H["cmdfunc(ERASE1)<br/>保存 row page"]
+    H --> I["cmdfunc(ERASE2)<br/>q3n_hw_erase_block"]
     I --> J["q3n_addr_from_block<br/>addr.c"]
     J --> K["q3n_hw_ops.exec ERASE_BLOCK<br/>hw.c"]
     K --> L["写 ADDR/CMD，等待 READY"]
@@ -882,9 +884,9 @@ flowchart TD
 |---|---|---|
 | `ecc.read_oob[_raw]` | `q3n_ctrl_read_oob()` | `Q3N_HW_READ_OOB` |
 | `ecc.write_oob[_raw]` | `q3n_ctrl_program_oob()` | `Q3N_HW_PROGRAM_OOB` |
-| READ ID `exec_op` | `q3n_ctrl_read_id()` | `Q3N_HW_READ_ID` |
-| STATUS `exec_op` | `q3n_ctrl_read_status()` | `Q3N_HW_STATUS` |
-| RESET `exec_op` | `q3n_ctrl_reset()` | `Q3N_HW_RESET` |
+| READ ID `cmdfunc` + `read_byte` | `q3n_hw_read_id()` | `Q3N_HW_READ_ID` |
+| STATUS `cmdfunc` + `read_byte/waitfunc` | `q3n_hw_read_status()` | `Q3N_HW_STATUS` |
+| RESET `cmdfunc` | `q3n_hw_reset()` | `Q3N_HW_RESET` |
 | `setup_read_retry` | `q3n_ctrl_set_read_retry()` | `Q3N_HW_SET_READ_RETRY` |
 
 OOB-only 读写和正常页读写共享 controller 串行化，但使用不同 hardware
@@ -1557,7 +1559,7 @@ CI 至少检查：
 8. 实现 `hw.c`/`q3n_hw_ops` 和 fake hardware 测试；
 9. 新增 `qemu_3dnand_flash.c`、`ytmc_nand.c` 及 full-ID 白名单测试；
 10. 调整 QEMU READ ID，并增加 raw-read 和 read-retry 寄存器语义；
-11. 实现 `controller.c` 的功能接口、`exec_op` parser 和 controller tests；
+11. 实现 `controller.c` 的 legacy 命令状态机、传统 callbacks 和 controller tests；
 12. 实现 `module.c`、`init.c`、probe/remove 和逐阶段错误回退；
 13. 接入 `nand_scan_with_ids(ids)` 并验证 capability 与 ID 几何；
 14. 实现 `ecc.c` 的 page/OOB/raw callbacks 和 read retry；
