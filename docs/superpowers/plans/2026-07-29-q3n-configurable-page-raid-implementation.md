@@ -17,22 +17,131 @@
 | 3: NAND Core consumers | Complete | `7c4e357`; default 4:1 full Linux build and compiled contract |
 | 4: profiles/guest/docs | Complete | exact-geometry helper harness; four `.ko` profiles; 4:1 persistence/BBT and 8:1 tail guest acceptance |
 
-Task 4 module outputs:
+### Task 4 profile command record
+
+The default 4:1 configuration and its `olddefconfig` were produced by:
+
+```sh
+LC_ALL=C ./scripts/shell.sh ./scripts/configure-kernel.sh
+LC_ALL=C ./scripts/shell.sh ./scripts/build-kernel.sh
+Q3N_REQUIRE_KERNEL_BUILD=1 \
+  Q3N_KERNEL_BUILD_DIR="$PWD/work/build/linux-7.0.12" \
+  ./tests/test_q3n_nand_core_contract.sh
+```
+
+Module:
 
 ```text
 work/build/linux-7.0.12/drivers/mtd/nand/raw/qemu_3dnand.ko
+```
+
+The disabled profile used these configuration, `olddefconfig`, and build
+commands inside the `/workspace` build container:
+
+```sh
+BUILD_DIR=/workspace/work/task4-build/disabled \
+  ./scripts/configure-kernel.sh
+/workspace/work/linux/linux-7.0.12/scripts/config \
+  --file /workspace/work/task4-build/disabled/linux-7.0.12/.config \
+  -d MTD_NAND_QEMU_3DNAND_PAGE_RAID
+make -C /workspace/work/linux/linux-7.0.12 \
+  O=/workspace/work/task4-build/disabled/linux-7.0.12 \
+  ARCH=x86_64 CROSS_COMPILE=x86_64-linux-gnu- olddefconfig
+make -C /workspace/work/linux/linux-7.0.12 \
+  O=/workspace/work/task4-build/disabled/linux-7.0.12 \
+  ARCH=x86_64 CROSS_COMPILE=x86_64-linux-gnu- -j4 \
+  drivers/mtd/nand/raw/
+BUILD_DIR=/workspace/work/task4-build/disabled JOBS=4 \
+  ./scripts/build-kernel.sh
+```
+
+The resulting contract was checked from the host repository:
+
+```sh
+Q3N_REQUIRE_KERNEL_BUILD=1 \
+  Q3N_KERNEL_BUILD_DIR="$PWD/work/task4-build/disabled/linux-7.0.12" \
+  ./tests/test_q3n_nand_core_contract.sh
+```
+
+Module:
+
+```text
 work/task4-build/disabled/linux-7.0.12/drivers/mtd/nand/raw/qemu_3dnand.ko
+```
+
+The 2:1 profile reused the validated default output and used:
+
+```sh
+mkdir -p /workspace/work/task4-build/2
+cp -a /workspace/work/build/linux-7.0.12 \
+  /workspace/work/task4-build/2/
+/workspace/work/linux/linux-7.0.12/scripts/config \
+  --file /workspace/work/task4-build/2/linux-7.0.12/.config \
+  -e MTD_NAND_QEMU_3DNAND_PAGE_RAID \
+  --set-val MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES 2
+make -C /workspace/work/linux/linux-7.0.12 \
+  O=/workspace/work/task4-build/2/linux-7.0.12 \
+  ARCH=x86_64 CROSS_COMPILE=x86_64-linux-gnu- olddefconfig
+make -C /workspace/work/linux/linux-7.0.12 \
+  O=/workspace/work/task4-build/2/linux-7.0.12 \
+  ARCH=x86_64 CROSS_COMPILE=x86_64-linux-gnu- -j4 \
+  drivers/mtd/nand/raw/
+BUILD_DIR=/workspace/work/task4-build/2 JOBS=4 ./scripts/build-kernel.sh
+```
+
+The resulting contract was checked from the host repository:
+
+```sh
+Q3N_REQUIRE_KERNEL_BUILD=1 \
+  Q3N_KERNEL_BUILD_DIR="$PWD/work/task4-build/2/linux-7.0.12" \
+  ./tests/test_q3n_nand_core_contract.sh
+```
+
+Module:
+
+```text
 work/task4-build/2/linux-7.0.12/drivers/mtd/nand/raw/qemu_3dnand.ko
+```
+
+The 8:1 profile used the same sequence with the ratio and output changed:
+
+```sh
+mkdir -p /workspace/work/task4-build/8
+cp -a /workspace/work/build/linux-7.0.12 \
+  /workspace/work/task4-build/8/
+/workspace/work/linux/linux-7.0.12/scripts/config \
+  --file /workspace/work/task4-build/8/linux-7.0.12/.config \
+  -e MTD_NAND_QEMU_3DNAND_PAGE_RAID \
+  --set-val MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES 8
+make -C /workspace/work/linux/linux-7.0.12 \
+  O=/workspace/work/task4-build/8/linux-7.0.12 \
+  ARCH=x86_64 CROSS_COMPILE=x86_64-linux-gnu- olddefconfig
+make -C /workspace/work/linux/linux-7.0.12 \
+  O=/workspace/work/task4-build/8/linux-7.0.12 \
+  ARCH=x86_64 CROSS_COMPILE=x86_64-linux-gnu- -j4 \
+  drivers/mtd/nand/raw/
+BUILD_DIR=/workspace/work/task4-build/8 JOBS=4 ./scripts/build-kernel.sh
+```
+
+The resulting contract was checked from the host repository:
+
+```sh
+Q3N_REQUIRE_KERNEL_BUILD=1 \
+  Q3N_KERNEL_BUILD_DIR="$PWD/work/task4-build/8/linux-7.0.12" \
+  ./tests/test_q3n_nand_core_contract.sh
+```
+
+Module:
+
+```text
 work/task4-build/8/linux-7.0.12/drivers/mtd/nand/raw/qemu_3dnand.ko
 ```
 
-The isolated profile builds used `scripts/config` plus `olddefconfig`, built
-`drivers/mtd/nand/raw/`, and then ran `scripts/build-kernel.sh` and the compiled
-contract with the profile output selected. The default 4:1 guest ran
-`scripts/q3n-persistence-smoke.sh` and a profile acceptance boot. The 8:1 guest
-ran the repository QEMU with `BUILD_DIR=/workspace/work/task4-build/8`, a fresh
-image, and the 8:1 initramfs. Guest fault injection is not claimed because no
-guest-facing injection interface exists.
+The default 4:1 guest ran `scripts/q3n-persistence-smoke.sh` and a profile
+acceptance boot. The 8:1 guest ran the repository QEMU with
+`BUILD_DIR=/workspace/work/task4-build/8`, a fresh image, and the 8:1
+initramfs. No disabled or 2:1 guest run, profile-wide UBI run, or guest fault
+injection is claimed.
 
 ## Global Constraints
 
@@ -116,7 +225,7 @@ int q3n_flash_build_scan_ids(struct nand_flash_dev scan_ids[2],
 | 4:1 | 65536 | 4096 | 320 | 0 | 20971520 | 33280 |
 | 8:1 | 131072 | 8192 | 177 | 7 | 23199744 | 36816 |
 
-- [ ] **Step 1: Write the failing layout behavior test.**
+- [x] **Step 1: Write the failing layout behavior test.**
 
   Add table-driven literals for all four profiles, plus `N=0,1,3,5,6,7,16`,
   zero geometry, multiplication overflow, first/last stripe, next-block
@@ -137,7 +246,7 @@ int q3n_flash_build_scan_ids(struct nand_flash_dev scan_ids[2],
   expect_map(533, 1600, 1602);
   ```
 
-- [ ] **Step 2: Run the new layout test and verify RED.**
+- [x] **Step 2: Run the new layout test and verify RED.**
 
   Run:
 
@@ -147,7 +256,7 @@ int q3n_flash_build_scan_ids(struct nand_flash_dev scan_ids[2],
 
   Expected: compilation fails because `qemu_3dnand_layout.h/.c` do not exist.
 
-- [ ] **Step 3: Implement the minimum pure layout layer.**
+- [x] **Step 3: Implement the minimum pure layout layer.**
 
   Use checked 64-bit multiplication and exact division:
 
@@ -165,13 +274,13 @@ int q3n_flash_build_scan_ids(struct nand_flash_dev scan_ids[2],
   `stripe_pages=1`, copy the physical geometry, and map logical page to the
   identical physical page.
 
-- [ ] **Step 4: Run the layout test and verify GREEN, then mutation-check.**
+- [x] **Step 4: Run the layout test and verify GREEN, then mutation-check.**
 
   Run `./tests/test_q3n_layout.sh`. Temporarily changing `(N + 1)` to `N`,
   accepting `N=3`, or allowing a tail-page map must make a focused case fail;
   restore the implementation and rerun GREEN.
 
-- [ ] **Step 5: Add the two Kconfig settings and failing scan-ID tests.**
+- [x] **Step 5: Add the two Kconfig settings and failing scan-ID tests.**
 
   Add:
 
@@ -192,18 +301,18 @@ int q3n_flash_build_scan_ids(struct nand_flash_dev scan_ids[2],
   from `ytmc_nand.c`, replace only logical geometry fields, and add an empty
   sentinel entry. Verify all four chipsize-MiB literals above.
 
-- [ ] **Step 6: Run the flash test and verify RED.**
+- [x] **Step 6: Run the flash test and verify RED.**
 
   Run `./tests/test_q3n_flash.sh`; expected failure is an undefined
   `q3n_flash_build_scan_ids`.
 
-- [ ] **Step 7: Implement device-local scan-ID derivation and verify GREEN.**
+- [x] **Step 7: Implement device-local scan-ID derivation and verify GREEN.**
 
   Reject null arguments, non-integral MiB logical capacity, and values that
   do not fit the `nand_flash_dev` fields. Do not modify the static
   `ytmc_nand.c` table.
 
-- [ ] **Step 8: Add the layout test to smoke and run focused regression.**
+- [x] **Step 8: Add the layout test to smoke and run focused regression.**
 
   Run:
 
@@ -215,7 +324,7 @@ int q3n_flash_build_scan_ids(struct nand_flash_dev scan_ids[2],
 
   Expected: all pass.
 
-- [ ] **Step 9: Commit Task 1.**
+- [x] **Step 9: Commit Task 1.**
 
   ```sh
   git add linux/drivers/mtd/nand/raw/qemu_3dnand_layout.* \
@@ -268,14 +377,14 @@ int q3n_page_erase_block(struct q3n *q3n, u32 logical_block);
 `q3n_page_*` functions require the caller to hold `q3n->lock`; they must not
 lock recursively. `q3n_hw_*` remains the only physical-I/O dependency.
 
-- [ ] **Step 1: Write the failing identity-path tests.**
+- [x] **Step 1: Write the failing identity-path tests.**
 
   Compile the real page layer against fake `q3n_hw_*` functions. With RAID
   disabled, assert that logical page/block values and buffers are forwarded
   exactly once, page/OOB results are preserved, and no parity scratch or
   RAID symbol is required.
 
-- [ ] **Step 2: Write the failing RAID write/OOB/erase tests.**
+- [x] **Step 2: Write the failing RAID write/OOB/erase tests.**
 
   Use four 16 KiB slices with hand-derived byte patterns. Assert:
 
@@ -291,7 +400,7 @@ lock recursively. `q3n_hw_*` remains the only physical-I/O dependency.
   log must stop at the first failure, and no failed write may be reported as
   success.
 
-- [ ] **Step 2a: Add erased-physical-page skip tests.**
+- [x] **Step 2a: Add erased-physical-page skip tests.**
 
   Prove the optimization through the real page layer:
 
@@ -308,7 +417,7 @@ lock recursively. `q3n_hw_*` remains the only physical-I/O dependency.
   buffer that is all `0xff` except one middle byte and assert it is
   programmed.
 
-- [ ] **Step 3: Write the failing RAID read/recovery tests.**
+- [x] **Step 3: Write the failing RAID read/recovery tests.**
 
   Cover:
 
@@ -323,12 +432,12 @@ lock recursively. `q3n_hw_*` remains the only physical-I/O dependency.
   - raw read concatenates data pages and never reads parity;
   - raw write still emits parity.
 
-- [ ] **Step 4: Run the page test and verify RED.**
+- [x] **Step 4: Run the page test and verify RED.**
 
   Run `./tests/test_q3n_page.sh`; expected failure is missing page-layer
   sources and symbols.
 
-- [ ] **Step 5: Implement the identity ops and minimal page dispatcher.**
+- [x] **Step 5: Implement the identity ops and minimal page dispatcher.**
 
   Store in `struct q3n`:
 
@@ -345,7 +454,7 @@ lock recursively. `q3n_hw_*` remains the only physical-I/O dependency.
   In disabled builds, use an inline/conditional stub so the module has no
   undefined reference to `qemu_3dnand_page_raid.o`.
 
-- [ ] **Step 6: Implement synchronous RAID write, OOB, erase, and read.**
+- [x] **Step 6: Implement synchronous RAID write, OOB, erase, and read.**
 
   XOR exactly `Q3N_PAGE_SIZE` bytes into the 16 KiB scratch buffer. Program
   data pages first and parity last. Before each physical main-data program,
@@ -367,13 +476,13 @@ lock recursively. `q3n_hw_*` remains the only physical-I/O dependency.
   `max_bitflips >= Q3N_ECC_STRENGTH`, and increment
   `raid_recovered_pages`. Do not write recovered data back.
 
-- [ ] **Step 7: Run the page test and verify GREEN, then mutation-check.**
+- [x] **Step 7: Run the page test and verify GREEN, then mutation-check.**
 
   Run `./tests/test_q3n_page.sh`. Wrong parity order, skipped slice, recovery
   with two failures, parity exposure in raw read, and a remapped erase block
   must each be caught by a focused assertion.
 
-- [ ] **Step 8: Wire object composition and overlay copying.**
+- [x] **Step 8: Wire object composition and overlay copying.**
 
   Always link `qemu_3dnand_page.o` and `qemu_3dnand_layout.o`. Link:
 
@@ -385,7 +494,7 @@ lock recursively. `q3n_hw_*` remains the only physical-I/O dependency.
   Copy all six new page/layout headers and sources in
   `scripts/apply-linux-overlay.sh`.
 
-- [ ] **Step 9: Run focused and smoke regression.**
+- [x] **Step 9: Run focused and smoke regression.**
 
   ```sh
   ./tests/test_q3n_page.sh
@@ -393,7 +502,7 @@ lock recursively. `q3n_hw_*` remains the only physical-I/O dependency.
   ./scripts/smoke-test.sh
   ```
 
-- [ ] **Step 10: Commit Task 2.**
+- [x] **Step 10: Commit Task 2.**
 
   ```sh
   git add linux/drivers/mtd/nand/raw/qemu_3dnand_page* \
@@ -440,7 +549,7 @@ reset -> full-ID physical whitelist match
 -> mtd_device_register()
 ```
 
-- [ ] **Step 1: Extend ECC accounting tests and verify RED.**
+- [x] **Step 1: Extend ECC accounting tests and verify RED.**
 
   Add literal `q3n_page_result` cases:
 
@@ -453,14 +562,14 @@ reset -> full-ID physical whitelist match
 
   Run `./tests/test_q3n_ecc.sh`; expected undefined page-result accounting.
 
-- [ ] **Step 2: Extend legacy erase tests and verify RED.**
+- [x] **Step 2: Extend legacy erase tests and verify RED.**
 
   Use a 4:1 logical geometry (`320 pages/block`) and assert ERASE1 row 320
   maps through `q3n_page_erase_block()` to physical block 1. Row 319 must be
   rejected. The test must fail while controller code calls hardware erase
   directly.
 
-- [ ] **Step 3: Extend the compiled NAND-Core contract before integration.**
+- [x] **Step 3: Extend the compiled NAND-Core contract before integration.**
 
   Require `q3n_page_read`, `q3n_page_write`, `q3n_page_read_oob`,
   `q3n_page_write_oob`, and `q3n_page_erase_block` in the built module.
@@ -468,7 +577,7 @@ reset -> full-ID physical whitelist match
   When RAID is disabled, require absence of `q3n_page_raid_ops`; when enabled,
   require its presence.
 
-- [ ] **Step 4: Implement page-result ECC accounting and route callbacks.**
+- [x] **Step 4: Implement page-result ECC accounting and route callbacks.**
 
   Replace direct `q3n_hw_read/program/read_oob/program_oob` calls in
   `qemu_3dnand_ecc.c` with `q3n_page_*` calls while keeping one outer
@@ -480,13 +589,13 @@ reset -> full-ID physical whitelist match
 
   Do not use the fixed physical page size for logical ECC steps.
 
-- [ ] **Step 5: Route legacy erase through the page layer and verify GREEN.**
+- [x] **Step 5: Route legacy erase through the page layer and verify GREEN.**
 
   `ERASE1` validates logical rows using `q3n->geometry.pages_per_block`;
   `ERASE2` computes logical block and calls `q3n_page_erase_block()`.
   Run `./tests/test_q3n_legacy.sh`.
 
-- [ ] **Step 6: Integrate profile selection and device-local scan IDs.**
+- [x] **Step 6: Integrate profile selection and device-local scan IDs.**
 
   In kernel builds, call:
 
@@ -501,7 +610,7 @@ reset -> full-ID physical whitelist match
   scratch through the page-layer lifecycle and print enabled/disabled,
   ratio, logical page/OOB/erase/capacity, stripes, used pages, and tail.
 
-- [ ] **Step 7: Set the default build profile and run focused tests.**
+- [x] **Step 7: Set the default build profile and run focused tests.**
 
   Add to `configs/linux/mtd.fragment`:
 
@@ -520,7 +629,7 @@ reset -> full-ID physical whitelist match
   ./scripts/smoke-test.sh
   ```
 
-- [ ] **Step 8: Commit Task 3.**
+- [x] **Step 8: Commit Task 3.**
 
   ```sh
   git add linux/drivers/mtd/nand/raw/qemu_3dnand_ecc.* \
@@ -539,6 +648,7 @@ reset -> full-ID physical whitelist match
 
 - Modify: `tests/test_linux_patches.sh`
 - Create: `tests/test_q3n_page_raid_config.sh`
+- Modify: `tests/test_q3n_ecc.c`
 - Modify: `scripts/smoke-test.sh`
 - Modify: `docs/superpowers/specs/2026-07-28-q3n-nand-core-ecc-read-retry-design.md`
 - Modify: `docs/superpowers/specs/2026-07-29-q3n-configurable-page-raid-logical-page-design.md`
@@ -648,7 +758,7 @@ reset -> full-ID physical whitelist match
 
   ```sh
   git add tests/test_linux_patches.sh tests/test_q3n_page_raid_config.sh \
-    scripts/smoke-test.sh docs/superpowers/specs \
+    tests/test_q3n_ecc.c scripts/smoke-test.sh docs/superpowers/specs \
     docs/superpowers/plans/2026-07-29-q3n-configurable-page-raid-implementation.md
   git commit -m "test: verify configurable Q3N page RAID profiles"
   ```

@@ -1971,14 +1971,19 @@ RAID 开关或比例变化后必须使用全新或完整擦除的 NAND image。
 - 成功或失败后均不残留 data 副本、pending stripe 或 metadata；
 - QEMU 构建和现有物理 page/ECC/read-retry 测试无需修改即可通过。
 
-### 13.9 上层验证
+### 13.9 上层验证状态
 
-- RAID 关闭、4:1、8:1 分别执行 `mtd_debug` 跨多个逻辑 eraseblock 读写；
-- 各 profile 执行 bad block 标记与重新扫描；
-- 各 profile 执行 UBI attach、格式化、读写和 detach；
-- 同一 profile 重启 QEMU 后 data、OOB、parity 和坏块状态一致；
-- RAID profile 改变时只使用全新或完整擦除的 image；
-- 不出现 Page RAID 线程、异步任务或 parity metadata 介质访问。
+- RAID 关闭、2:1、4:1、8:1 均已完成 Linux KO 构建和编译符号契约；
+- 4:1 guest 已完成 `mtd_debug` page/OOB、跨 logical eraseblock、完整块
+  erase、markbad、BBT rescan，并在两次启动间验证 data/OOB/坏块持久化；
+- 8:1 guest 已完成精确几何、page/OOB、跨 logical eraseblock、完整块
+  erase、最后逻辑页和 7 个物理尾部页不可见验证；
+- 没有执行 RAID 关闭或 2:1 guest，也没有执行各 profile 的 UBI
+  attach/格式化/读写/detach，因此不把这些项目列为已完成；
+- guest 没有 ECC/read-retry/Page-RAID recovery fault-injection 接口，
+  相关失败路径只由 host QEMU/controller/page tests 覆盖；
+- profile guest 验证只使用全新 image；实现中没有 Page RAID 线程、异步
+  任务或 parity metadata 介质访问。
 
 ## 14. 实施顺序
 
@@ -2014,7 +2019,10 @@ NAND Core、legacy callback、精确几何 patch、ECC/read retry 和 BBT 基础
 23. 把 ECC page/OOB/raw callbacks 和 erase 路径切换到 `q3n_page_*`；
 24. 接入最终 retry mode 的单 data page parity 恢复；
 25. 验证 logical OOB、BBM、RAM BBT、尾部页和完整物理块 erase；
-26. 完成 RAID 关闭、2:1、4:1、8:1 的 host、KO、guest、UBI 和持久化回归。
+26. 完成 RAID 关闭、2:1、4:1、8:1 的 host、KO 和编译契约；完成 4:1
+    guest page/OOB/erase/BBT/persistence 与 8:1 guest
+    geometry/page/OOB/erase/tail 验证。未执行 RAID 关闭或 2:1 guest，
+    也不声明各 profile UBI 或 guest fault-injection 已完成。
 
 步骤 18 至 26 必须以测试先行方式逐项落地。RAID 关闭回归是每一步的门禁；
 不允许通过改变 `q3n_hw_*` 为多页语义来缩短实施路径。

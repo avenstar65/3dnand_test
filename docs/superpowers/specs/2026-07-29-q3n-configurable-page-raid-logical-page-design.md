@@ -584,12 +584,14 @@ missing_data = parity XOR data[0] XOR ... XOR data[N-1]
 
 ### 16.4 Linux/QEMU/guest
 
-- RAID 关闭：完整现有 smoke、Linux build 和 persistence 回归；
-- 2:1、4:1、8:1：分别完成 Linux KO 构建和初始化几何检查；
-- 4:1：guest page/OOB read/write、erase、markbad、BBT rescan；
-- 8:1：guest page/OOB read/write、erase和尾部页不可见检查；
-- read retry 后的单 data page RAID recovery；
-- 双 data page failure 返回 `-EBADMSG`；
+- RAID 关闭、2:1、4:1、8:1：分别完成 Linux KO 构建和编译符号契约；
+- 4:1：guest 精确几何、page/OOB read/write、跨块 I/O、erase、markbad、
+  BBT rescan 和两次启动 persistence；
+- 8:1：guest 精确几何、page/OOB read/write、跨块 I/O、erase、末页和
+  尾部页不可见检查；
+- RAID 关闭和 2:1 未执行 guest；不声明各 profile UBI 回归已完成；
+- read retry 后的单 data page RAID recovery 和双 data page failure
+  只由 host tests 覆盖，因为 guest 没有 fault-injection 接口；
 - QEMU 构建和已有物理页/ECC测试保持通过。
 
 ## 17. 验收标准
@@ -609,4 +611,7 @@ missing_data = parity XOR data[0] XOR ... XOR data[N-1]
 12. OOB、BBM、坏块和 BBT 语义保持明确。
 13. `nand_scan_with_ids()` 使用完整 ID 白名单和当前 profile 的设备私有逻辑
     scan ID 表。
-14. RAID 关闭、4:1 和 8:1 guest 验证通过。
+14. 四种 profile 的 Linux KO/编译契约通过；4:1 guest 的
+    page/OOB/erase/BBT/persistence 以及 8:1 guest 的
+    geometry/page/OOB/erase/tail 验证通过。不声明 RAID 关闭、2:1、
+    UBI 或 guest fault-injection 验证完成。

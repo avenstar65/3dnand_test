@@ -86,12 +86,20 @@ awk '
 	/^ \/\* MLC pairing schemes \*\// { copying = 0 }
 	copying && /^\+/ && !/^\+\+\+/ { print substr($0, 2) }
 ' "$helper_patch" >"$helper_source"
+bbt_size_source="$tmp_dir/exact-bbt-size.inc"
+awk '
+	/^\+[[:space:]]*len = DIV_ROUND_UP_ULL\(mtd->size \/ mtd->erasesize,/ {
+		copying = 1
+	}
+	copying && /^\+/ && !/^\+\+\+/ { print substr($0, 2) }
+	copying && /^\+[[:space:]]*len = 1;/ { copying = 0 }
+' "$bbt_patch" >"$bbt_size_source"
 grep -q '^static inline u64 nand_page_to_offs' "$helper_source" ||
 	fail "patched exact-geometry page helper is unavailable"
 grep -q '^static inline u64 nand_eraseblock_to_page' "$helper_source" ||
 	fail "patched exact-geometry eraseblock helper is unavailable"
-grep -q '^+.*DIV_ROUND_UP_ULL(mtd->size / mtd->erasesize, 4)' "$bbt_patch" ||
-	fail "patched NAND BBT does not allocate two exact bits per eraseblock"
+[ -s "$bbt_size_source" ] ||
+	fail "patched NAND BBT allocation body is unavailable"
 
 cat >"$tmp_dir/exact-geometry.c" <<'EOF'
 #include <stdbool.h>
@@ -105,6 +113,8 @@ typedef int64_t loff_t;
 
 #define BIT(n) (1U << (n))
 #define NAND_NON_POWER_OF_2_GEOMETRY BIT(15)
+#define DIV_ROUND_UP_ULL(value, divisor) \
+	(((value) + (divisor) - 1) / (divisor))
 
 struct mtd_info {
 	u32 writesize;
@@ -136,11 +146,31 @@ EOF
 cat "$helper_source" >>"$tmp_dir/exact-geometry.c"
 cat >>"$tmp_dir/exact-geometry.c" <<'EOF'
 
+static u64 nand_bbt_allocation_bytes(struct mtd_info *mtd)
+{
+	u64 len;
+
+#include "exact-bbt-size.inc"
+	return len;
+}
+
 struct profile {
 	const char *name;
 	u32 writesize;
 	u32 pages_per_block;
 	u32 erasesize;
+	u64 capacity;
+	u64 total_pages;
+	u64 first_block_last_page;
+	u64 first_block_last_offset;
+	u64 second_block_first_page;
+	u64 second_block_offset;
+	u64 last_block_first_page;
+	u64 last_block_first_offset;
+	u64 final_page;
+	u64 final_page_offset;
+	u64 last_byte_offset;
+	u64 misaligned_second_block_offset;
 };
 
 static void expect_u64(const char *profile, const char *field,
@@ -156,17 +186,14 @@ static void expect_u64(const char *profile, const char *field,
 
 static void check_profile(const struct profile *profile)
 {
-	const u64 blocks = 1664;
-	const u64 total_pages = blocks * profile->pages_per_block;
-	const u64 size = blocks * profile->erasesize;
 	struct mtd_info mtd = {
 		.writesize = profile->writesize,
 		.erasesize = profile->erasesize,
-		.size = size,
+		.size = profile->capacity,
 	};
 	struct nand_chip chip = {
 		.options = NAND_NON_POWER_OF_2_GEOMETRY,
-		.base.target_size = size,
+		.base.target_size = profile->capacity,
 		.mtd = &mtd,
 	};
 
@@ -175,55 +202,87 @@ static void check_profile(const struct profile *profile)
 	expect_u64(profile->name, "first page offset",
 		   nand_page_to_offs(&chip, 0), 0);
 	expect_u64(profile->name, "last page in first block offset",
-		   nand_page_to_offs(&chip, profile->pages_per_block - 1),
-		   profile->erasesize - profile->writesize);
+		   nand_page_to_offs(&chip, profile->first_block_last_page),
+		   profile->first_block_last_offset);
 	expect_u64(profile->name, "cross-block page offset",
-		   nand_page_to_offs(&chip, profile->pages_per_block),
-		   profile->erasesize);
+		   nand_page_to_offs(&chip, profile->second_block_first_page),
+		   profile->second_block_offset);
 	expect_u64(profile->name, "cross-block page number",
-		   nand_offs_to_page(&chip, profile->erasesize),
-		   profile->pages_per_block);
+		   nand_offs_to_page(&chip, profile->second_block_offset),
+		   profile->second_block_first_page);
 	expect_u64(profile->name, "cross-block eraseblock",
-		   nand_page_to_eraseblock(&chip, profile->pages_per_block), 1);
+		   nand_page_to_eraseblock(&chip,
+		       profile->second_block_first_page), 1);
 	expect_u64(profile->name, "cross-block offset eraseblock",
-		   nand_offs_to_eraseblock(&chip, profile->erasesize), 1);
+		   nand_offs_to_eraseblock(&chip,
+		       profile->second_block_offset), 1);
 	expect_u64(profile->name, "single target",
-		   nand_offs_to_target(&chip, size - 1), 0);
+		   nand_offs_to_target(&chip, profile->last_byte_offset), 0);
 	expect_u64(profile->name, "final page in target",
-		   nand_page_in_target(&chip, total_pages - 1),
-		   total_pages - 1);
+		   nand_page_in_target(&chip, profile->final_page),
+		   profile->final_page);
 	expect_u64(profile->name, "last block first page",
-		   nand_eraseblock_to_page(&chip, blocks - 1),
-		   (blocks - 1) * profile->pages_per_block);
+		   nand_eraseblock_to_page(&chip, 1663),
+		   profile->last_block_first_page);
 	expect_u64(profile->name, "last block offset",
-		   nand_page_to_offs(&chip,
-		       nand_eraseblock_to_page(&chip, blocks - 1)),
-		   (blocks - 1) * profile->erasesize);
+		   nand_page_to_offs(&chip, profile->last_block_first_page),
+		   profile->last_block_first_offset);
 	expect_u64(profile->name, "final page offset",
-		   nand_page_to_offs(&chip, total_pages - 1),
-		   size - profile->writesize);
+		   nand_page_to_offs(&chip, profile->final_page),
+		   profile->final_page_offset);
 	expect_u64(profile->name, "final page eraseblock",
-		   nand_page_to_eraseblock(&chip, total_pages - 1), blocks - 1);
+		   nand_page_to_eraseblock(&chip, profile->final_page), 1663);
+	expect_u64(profile->name, "literal total pages",
+		   nand_offs_to_page(&chip, profile->capacity),
+		   profile->total_pages);
 	expect_u64(profile->name, "erase alignment",
-		   nand_offs_in_eraseblock(&chip, profile->erasesize), 0);
+		   nand_offs_in_eraseblock(&chip,
+		       profile->second_block_offset), 0);
 	expect_u64(profile->name, "misaligned erase offset",
-		   nand_offs_in_eraseblock(&chip, profile->erasesize + 1), 1);
+		   nand_offs_in_eraseblock(&chip,
+		       profile->misaligned_second_block_offset), 1);
 	expect_u64(profile->name, "RAM BBT bytes",
-		   ((mtd.size / mtd.erasesize) + 3) / 4, 416);
+		   nand_bbt_allocation_bytes(&mtd), 416);
 }
 
 int main(void)
 {
 	static const struct profile profiles[] = {
-		{ "2:1", 32768, 533, 17465344 },
-		{ "4:1", 65536, 320, 20971520 },
-		{ "8:1", 131072, 177, 23199744 },
+		{
+			"2:1", 32768, 533, 17465344,
+			29062332416ULL, 886912,
+			532, 17432576, 533, 17465344,
+			886379, 29044867072ULL,
+			886911, 29062299648ULL,
+			29062332415ULL, 17465345,
+		},
+		{
+			"4:1", 65536, 320, 20971520,
+			34896609280ULL, 532480,
+			319, 20905984, 320, 20971520,
+			532160, 34875637760ULL,
+			532479, 34896543744ULL,
+			34896609279ULL, 20971521,
+		},
+		{
+			"8:1", 131072, 177, 23199744,
+			38604374016ULL, 294528,
+			176, 23068672, 177, 23199744,
+			294351, 38581174272ULL,
+			294527, 38604242944ULL,
+			38604374015ULL, 23199745,
+		},
+	};
+	struct mtd_info empty = {
+		.erasesize = 17465344,
 	};
 	unsigned int i;
 
 	for (i = 0; i < sizeof(profiles) / sizeof(profiles[0]); i++)
 		check_profile(&profiles[i]);
 
+	expect_u64("empty", "minimum RAM BBT bytes",
+		   nand_bbt_allocation_bytes(&empty), 1);
 	printf("ok: exact-geometry helpers verified for 2:1, 4:1 and 8:1\n");
 	return 0;
 }
