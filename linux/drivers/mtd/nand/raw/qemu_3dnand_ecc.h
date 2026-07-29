@@ -2,16 +2,16 @@
 #ifndef QEMU_3DNAND_ECC_H
 #define QEMU_3DNAND_ECC_H
 
-#include "qemu_3dnand_priv.h"
+#include "qemu_3dnand_page.h"
 
 struct q3n_ecc_stats {
 	u32 corrected;
 	u32 failed;
 };
 
-int q3n_ecc_account_result(const struct q3n_ecc_result *result,
-			   unsigned int retry_mode,
-			   struct q3n_ecc_stats *stats);
+int q3n_ecc_account_page_result(const struct q3n_page_result *result,
+				unsigned int retry_mode,
+				struct q3n_ecc_stats *stats);
 
 #ifndef Q3N_HOST_TEST
 int q3n_ecc_init(struct q3n *q3n);

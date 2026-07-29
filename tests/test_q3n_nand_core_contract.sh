@@ -45,6 +45,23 @@ for symbol in q3n_cmdfunc q3n_waitfunc q3n_read_byte q3n_read_buf \
 		fail "Q3N module does not define legacy callback $symbol"
 done
 
+for symbol in q3n_page_read q3n_page_write q3n_page_read_oob \
+	q3n_page_write_oob q3n_page_erase_block; do
+	printf '%s\n' "$defined" |
+		grep -Eq "[[:space:]][tT][[:space:]]+$symbol$" ||
+		fail "Q3N module does not define logical-page entry point $symbol"
+done
+
+if grep -q '^CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID=y$' \
+   "$kernel_build/.config"; then
+	printf '%s\n' "$defined" |
+		grep -Eq '[[:space:]][dDrR][[:space:]]+q3n_raid_page_ops$' ||
+		fail "RAID-enabled Q3N module omits q3n_raid_page_ops"
+elif printf '%s\n' "$defined" |
+     grep -Eq '[[:space:]][dDrR][[:space:]]+q3n_raid_page_ops$'; then
+	fail "RAID-disabled Q3N module includes q3n_raid_page_ops"
+fi
+
 if printf '%s\n' "$defined" |
    grep -Eq '[[:space:]][tT][[:space:]]+q3n_.*exec_op$'; then
 	fail "Q3N module still defines an exec_op implementation"

@@ -9,18 +9,19 @@
 
 #include "qemu_3dnand_ecc.h"
 #include "qemu_3dnand_hw.h"
+#include "qemu_3dnand_page.h"
 #include "qemu_3dnand_regs.h"
 
-int q3n_ecc_account_result(const struct q3n_ecc_result *result,
-			   unsigned int retry_mode,
-			   struct q3n_ecc_stats *stats)
+int q3n_ecc_account_page_result(const struct q3n_page_result *result,
+				unsigned int retry_mode,
+				struct q3n_ecc_stats *stats)
 {
 	u32 bitflips;
 
 	if (!result || !stats)
 		return -EINVAL;
 
-	if (result->status & Q3N_ECC_STATUS_UNCORRECTABLE) {
+	if (result->failed_data_pages) {
 		stats->failed++;
 		return Q3N_ECC_STRENGTH;
 	}
@@ -66,7 +67,7 @@ int q3n_ecc_read_page(struct nand_chip *chip, u8 *buf,
 {
 	struct q3n *q3n = nand_to_q3n(chip);
 	struct mtd_info *mtd = nand_to_mtd(chip);
-	struct q3n_ecc_result result = { };
+	struct q3n_page_result result = { };
 	struct q3n_ecc_stats stats = {
 		.corrected = mtd->ecc_stats.corrected,
 		.failed = mtd->ecc_stats.failed,
@@ -74,14 +75,14 @@ int q3n_ecc_read_page(struct nand_chip *chip, u8 *buf,
 	int ret;
 
 	mutex_lock(&q3n->lock);
-	ret = q3n_hw_read_page(q3n, page, buf,
-			       oob_required ? chip->oob_poi : NULL,
-			       false, &result);
+	ret = q3n_page_read(q3n, page, buf,
+			    oob_required ? chip->oob_poi : NULL,
+			    false, &result);
 	mutex_unlock(&q3n->lock);
 	if (ret)
 		return ret;
 
-	ret = q3n_ecc_account_result(&result, q3n->retry_mode, &stats);
+	ret = q3n_ecc_account_page_result(&result, q3n->retry_mode, &stats);
 	mtd->ecc_stats.corrected = stats.corrected;
 	mtd->ecc_stats.failed = stats.failed;
 	return ret;
@@ -94,8 +95,8 @@ int q3n_ecc_write_page(struct nand_chip *chip, const u8 *buf,
 	int ret;
 
 	mutex_lock(&q3n->lock);
-	ret = q3n_hw_program_page(q3n, page, buf,
-				  oob_required ? chip->oob_poi : NULL);
+	ret = q3n_page_write(q3n, page, buf,
+			     oob_required ? chip->oob_poi : NULL);
 	mutex_unlock(&q3n->lock);
 	return ret;
 }
@@ -107,9 +108,9 @@ int q3n_ecc_read_page_raw(struct nand_chip *chip, u8 *buf,
 	int ret;
 
 	mutex_lock(&q3n->lock);
-	ret = q3n_hw_read_page(q3n, page, buf,
-			       oob_required ? chip->oob_poi : NULL,
-			       true, NULL);
+	ret = q3n_page_read(q3n, page, buf,
+			    oob_required ? chip->oob_poi : NULL,
+			    true, NULL);
 	mutex_unlock(&q3n->lock);
 	return ret;
 }
@@ -126,7 +127,7 @@ int q3n_ecc_read_oob(struct nand_chip *chip, int page)
 	int ret;
 
 	mutex_lock(&q3n->lock);
-	ret = q3n_hw_read_oob(q3n, page, chip->oob_poi);
+	ret = q3n_page_read_oob(q3n, page, chip->oob_poi);
 	mutex_unlock(&q3n->lock);
 	return ret;
 }
@@ -137,7 +138,7 @@ int q3n_ecc_write_oob(struct nand_chip *chip, int page)
 	int ret;
 
 	mutex_lock(&q3n->lock);
-	ret = q3n_hw_program_oob(q3n, page, chip->oob_poi);
+	ret = q3n_page_write_oob(q3n, page, chip->oob_poi);
 	mutex_unlock(&q3n->lock);
 	return ret;
 }
@@ -157,12 +158,22 @@ int q3n_ecc_init(struct q3n *q3n)
 {
 	struct nand_chip *chip;
 	struct mtd_info *mtd;
+	u64 erasesize;
 
 	if (!q3n)
 		return -EINVAL;
 
 	chip = &q3n->chip;
 	mtd = nand_to_mtd(chip);
+	erasesize = (u64)q3n->geometry.writesize *
+		q3n->geometry.pages_per_block;
+	if (mtd->writesize != q3n->geometry.writesize ||
+	    mtd->oobsize != q3n->geometry.oobsize ||
+	    mtd->erasesize != erasesize ||
+	    mtd->size != q3n->page_profile.logical_size ||
+	    mtd->writesize % Q3N_ECC_STEP_SIZE)
+		return -EINVAL;
+
 	mtd_set_ooblayout(mtd, &q3n_ooblayout_ops);
 
 	chip->ecc.engine_type = NAND_ECC_ENGINE_TYPE_ON_HOST;
@@ -170,7 +181,7 @@ int q3n_ecc_init(struct q3n *q3n)
 	chip->ecc.size = Q3N_ECC_STEP_SIZE;
 	chip->ecc.strength = Q3N_ECC_STRENGTH;
 	chip->ecc.bytes = 0;
-	chip->ecc.steps = Q3N_PAGE_SIZE / Q3N_ECC_STEP_SIZE;
+	chip->ecc.steps = mtd->writesize / Q3N_ECC_STEP_SIZE;
 	chip->ecc.read_page = q3n_ecc_read_page;
 	chip->ecc.write_page = q3n_ecc_write_page;
 	chip->ecc.read_page_raw = q3n_ecc_read_page_raw;

@@ -11,6 +11,7 @@
 #include "qemu_3dnand_controller.h"
 #include "qemu_3dnand_ecc.h"
 #include "qemu_3dnand_hw.h"
+#include "qemu_3dnand_page.h"
 #include "qemu_3dnand_priv.h"
 
 #ifdef Q3N_HOST_TEST
@@ -134,7 +135,7 @@ static void q3n_legacy_erase2(struct q3n *q3n)
 
 	block = q3n->legacy.erase_page / q3n->geometry.pages_per_block;
 	q3n->legacy.erase_pending = false;
-	ret = q3n_hw_erase_block(q3n, block);
+	ret = q3n_page_erase_block(q3n, block);
 	if (ret)
 		q3n_legacy_record_error(q3n, ret);
 }

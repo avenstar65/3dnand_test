@@ -31,8 +31,10 @@ static unsigned int reset_calls;
 static unsigned int read_id_calls;
 static unsigned int status_calls;
 static unsigned int erase_calls;
+static unsigned int page_erase_calls;
 static size_t last_id_len;
 static u32 last_erase_block;
+static u32 last_logical_block;
 static u8 fake_status;
 
 static void expect_u64(const char *name, uint64_t got, uint64_t want)
@@ -54,8 +56,10 @@ static void reset_fake_hw(void)
 	read_id_calls = 0;
 	status_calls = 0;
 	erase_calls = 0;
+	page_erase_calls = 0;
 	last_id_len = 0;
 	last_erase_block = UINT32_MAX;
+	last_logical_block = UINT32_MAX;
 	fake_status = 0xc0;
 }
 
@@ -103,6 +107,13 @@ int q3n_hw_erase_block(struct q3n *q3n, u32 block)
 	erase_calls++;
 	last_erase_block = block;
 	return erase_result;
+}
+
+int q3n_page_erase_block(struct q3n *q3n, u32 logical_block)
+{
+	page_erase_calls++;
+	last_logical_block = logical_block;
+	return q3n_hw_erase_block(q3n, logical_block);
 }
 
 static void test_reset_clears_transaction_and_retry_state(void)
@@ -168,30 +179,33 @@ static void test_status_uses_one_byte_staging(void)
 		   0xff);
 }
 
-static void test_erase_is_two_phase_and_uses_exact_geometry(void)
+static void test_erase_is_two_phase_and_uses_logical_page_layer(void)
 {
 	struct q3n q3n;
 
 	reset_fake_hw();
 	init_q3n(&q3n);
+	q3n.geometry.pages_per_block = 320;
 
-	q3n_legacy_command(&q3n, NAND_CMD_ERASE1, -1, 1599);
+	q3n_legacy_command(&q3n, NAND_CMD_ERASE1, -1, 319);
 	expect_u64("misaligned erase error", q3n_legacy_wait(&q3n),
 		   (uint64_t)-EINVAL);
 	expect_u64("misaligned erase calls", erase_calls, 0);
+	expect_u64("misaligned page erase calls", page_erase_calls, 0);
 
-	q3n_legacy_command(&q3n, NAND_CMD_ERASE1, -1, 1600);
+	q3n_legacy_command(&q3n, NAND_CMD_ERASE1, -1, 320);
 	expect_u64("ERASE1 does not erase", erase_calls, 0);
 	q3n_legacy_command(&q3n, NAND_CMD_ERASE2, -1, -1);
-	expect_u64("ERASE2 calls hardware", erase_calls, 1);
-	expect_u64("ERASE2 block", last_erase_block, 1);
+	expect_u64("ERASE2 calls page layer", page_erase_calls, 1);
+	expect_u64("ERASE2 logical block", last_logical_block, 1);
+	expect_u64("ERASE2 physical block", last_erase_block, 1);
 
-	q3n_legacy_command(&q3n, NAND_CMD_ERASE1, -1, 2660800);
+	q3n_legacy_command(&q3n, NAND_CMD_ERASE1, -1, 532160);
 	q3n_legacy_command(&q3n, NAND_CMD_ERASE2, -1, -1);
 	expect_u64("last block erase calls", erase_calls, 2);
 	expect_u64("last block number", last_erase_block, 1663);
 
-	q3n_legacy_command(&q3n, NAND_CMD_ERASE1, -1, 2662400);
+	q3n_legacy_command(&q3n, NAND_CMD_ERASE1, -1, 532480);
 	expect_u64("out-of-range erase error", q3n_legacy_wait(&q3n),
 		   (uint64_t)-EINVAL);
 	expect_u64("out-of-range erase calls", erase_calls, 2);
@@ -299,7 +313,7 @@ int main(void)
 	test_reset_clears_transaction_and_retry_state();
 	test_read_id_reloads_full_staging_buffer();
 	test_status_uses_one_byte_staging();
-	test_erase_is_two_phase_and_uses_exact_geometry();
+	test_erase_is_two_phase_and_uses_logical_page_layer();
 	test_first_error_blocks_hardware_until_wait();
 	test_reset_failure_preserves_error();
 	test_page_oob_commands_are_sequencing_only();
