@@ -36,6 +36,12 @@ for file in \
   qemu_3dnand_ecc.h \
   qemu_3dnand_addr.c \
   qemu_3dnand_addr.h \
+  qemu_3dnand_layout.c \
+  qemu_3dnand_layout.h \
+  qemu_3dnand_page.c \
+  qemu_3dnand_page.h \
+  qemu_3dnand_page_raid.c \
+  qemu_3dnand_page_raid.h \
   qemu_3dnand_hw.c \
   qemu_3dnand_hw.h \
   qemu_3dnand_regs.h \

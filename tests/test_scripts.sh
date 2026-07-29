@@ -38,7 +38,9 @@ LINUX_DIR="$test_dir/linux" Q3N_LINUX_PATCH_DIR="$empty_patches" \
 for file in \
 	qemu_3dnand_module.c qemu_3dnand_init.c qemu_3dnand_flash.c \
 	ytmc_nand.c qemu_3dnand_controller.c qemu_3dnand_ecc.c \
-	qemu_3dnand_addr.c qemu_3dnand_hw.c qemu_3dnand_regs.h \
+	qemu_3dnand_addr.c qemu_3dnand_layout.c qemu_3dnand_layout.h \
+	qemu_3dnand_page.c qemu_3dnand_page.h qemu_3dnand_page_raid.c \
+	qemu_3dnand_page_raid.h qemu_3dnand_hw.c qemu_3dnand_regs.h \
 	qemu_3dnand_priv.h Kconfig.qemu_3dnand Makefile.qemu_3dnand; do
 	[ -f "$raw_dir/$file" ] || fail "overlay did not install $file"
 done
@@ -56,11 +58,16 @@ done
 makefile="$raw_dir/Makefile.qemu_3dnand"
 for object in qemu_3dnand_module.o qemu_3dnand_init.o \
 	qemu_3dnand_flash.o ytmc_nand.o qemu_3dnand_controller.o \
-	qemu_3dnand_ecc.o qemu_3dnand_addr.o qemu_3dnand_hw.o; do
+	qemu_3dnand_ecc.o qemu_3dnand_addr.o qemu_3dnand_hw.o \
+	qemu_3dnand_page.o qemu_3dnand_layout.o; do
 	grep -Fq "$object" "$makefile" ||
 		fail "production module does not link $object"
 done
-if grep -Eq 'raid|sched|qemu_3dnand_main' "$makefile"; then
+grep -Fq \
+	'qemu_3dnand-$(CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID) +=' \
+	"$makefile" ||
+	fail "production module does not conditionally link page RAID"
+if grep -Eq 'qemu_3dnand_(raid|sched|main)\.o' "$makefile"; then
 	fail "production module still links legacy RAID code"
 fi
 

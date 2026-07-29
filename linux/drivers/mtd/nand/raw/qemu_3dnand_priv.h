@@ -17,6 +17,9 @@ typedef uint64_t u64;
 #endif
 
 #include "qemu_3dnand_addr.h"
+#include "qemu_3dnand_layout.h"
+
+struct q3n_page_ops;
 
 struct q3n_ecc_result {
 	u32 status;
@@ -53,7 +56,15 @@ struct q3n {
 	struct nand_controller controller;
 	struct nand_chip chip;
 #endif
+	struct q3n_geometry physical_geometry;
 	struct q3n_geometry geometry;
+	struct q3n_page_profile page_profile;
+	const struct q3n_page_ops *page_ops;
+	u8 *parity_scratch;
+	u64 raid_recovered_pages;
+#ifndef Q3N_HOST_TEST
+	struct nand_flash_dev scan_ids[2];
+#endif
 	struct q3n_legacy_state legacy;
 	u8 id[8];
 	u32 retry_mode;

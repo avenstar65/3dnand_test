@@ -21,6 +21,11 @@
 - One logical stripe is `N` consecutive 16 KiB data pages followed by one 16 KiB parity page.
 - A stripe never crosses a 1600-page physical block; incomplete tail pages are inaccessible.
 - Program order is `D0..DN-1,P` under one driver lock. No rollback or power-fail atomicity is promised.
+- Before programming any physical main-data page, test its complete 16 KiB
+  buffer. If every byte is `0xff`, skip the main-data PROGRAM command. If
+  that data page has non-erased OOB, issue only the OOB program; if its OOB
+  is also all `0xff` or absent, skip the physical page entirely. Apply the
+  same main-data rule to parity after parity has been calculated.
 - Parity is main-data XOR only. Do not add parity metadata, commit markers, generations, CRC, caches, workers, or schedulers.
 - Logical OOB is the concatenation of the `N` data-page OOBs. Parity OOB stays erased and hidden.
 - Raw write still calculates parity. Raw read does not read parity, retry, or recover.
@@ -260,6 +265,23 @@ lock recursively. `q3n_hw_*` remains the only physical-I/O dependency.
   log must stop at the first failure, and no failed write may be reported as
   success.
 
+- [ ] **Step 2a: Add erased-physical-page skip tests.**
+
+  Prove the optimization through the real page layer:
+
+  ```text
+  identity data=all-ff, OOB absent/all-ff -> no hardware program
+  identity data=all-ff, OOB non-ff -> OOB-only program
+  RAID data slice=all-ff, OOB absent/all-ff -> that D program is omitted
+  RAID data slice=all-ff, OOB non-ff -> only that D OOB is programmed
+  computed parity=all-ff -> P program is omitted
+  computed parity contains any non-ff byte -> P remains last program
+  ```
+
+  The test must scan every byte, not only the first/last word. Include a
+  buffer that is all `0xff` except one middle byte and assert it is
+  programmed.
+
 - [ ] **Step 3: Write the failing RAID read/recovery tests.**
 
   Cover:
@@ -300,7 +322,12 @@ lock recursively. `q3n_hw_*` remains the only physical-I/O dependency.
 - [ ] **Step 6: Implement synchronous RAID write, OOB, erase, and read.**
 
   XOR exactly `Q3N_PAGE_SIZE` bytes into the 16 KiB scratch buffer. Program
-  data pages first and parity last. For normal reads, aggregate only data
+  data pages first and parity last. Before each physical main-data program,
+  use one shared erased-buffer helper over all 16 KiB. Skip all-`0xff` main
+  data; preserve non-erased OOB with `q3n_hw_program_oob()`, and skip an
+  all-`0xff` OOB-only request. Compute parity from every data slice whether
+  or not its physical program was skipped, then apply the same all-`0xff`
+  main-data skip to the parity page. For normal reads, aggregate only data
   ECC counters; on mode 3 and exactly one failed data page, read parity with
   ECC and reconstruct the missing slice:
 
@@ -612,5 +639,8 @@ reset -> full-ID physical whitelist match
 8. NAND Core read retry runs before exactly-one-data-page recovery.
 9. OOB, BBM, bad-block callbacks, and RAM BBT retain the documented ownership and mapping.
 10. No parity metadata, rollback, power-fail transaction, async cache, scheduler, or QEMU parity state is introduced.
-11. Host tests, exact-geometry patch tests, all four module configurations, default guest persistence, and 8:1 guest geometry pass.
-12. The implementation, overall design, detailed design, plan, branch, and GitHub state agree.
+11. A physical data or parity main buffer containing only `0xff` does not
+    issue a main-data program; non-erased OOB is still preserved through an
+    OOB-only program.
+12. Host tests, exact-geometry patch tests, all four module configurations, default guest persistence, and 8:1 guest geometry pass.
+13. The implementation, overall design, detailed design, plan, branch, and GitHub state agree.
