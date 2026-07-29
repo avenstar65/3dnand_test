@@ -8,6 +8,32 @@
 
 **Tech Stack:** Linux 7.0.12 raw NAND/MTD APIs, C11 host behavior tests, POSIX shell build tests, existing Q3N MMIO helpers, QEMU 11.0.2.
 
+## Execution Status
+
+| Task | Status | Evidence |
+| --- | --- | --- |
+| 1: configuration/layout/scan IDs | Complete | `f857763`; disabled and 2:1/4:1/8:1 literal layout tests |
+| 2: logical page and synchronous RAID | Complete | `aea0747`; identity, parity order, recovery, erased-main/OOB-only tests |
+| 3: NAND Core consumers | Complete | `7c4e357`; default 4:1 full Linux build and compiled contract |
+| 4: profiles/guest/docs | Complete | exact-geometry helper harness; four `.ko` profiles; 4:1 persistence/BBT and 8:1 tail guest acceptance |
+
+Task 4 module outputs:
+
+```text
+work/build/linux-7.0.12/drivers/mtd/nand/raw/qemu_3dnand.ko
+work/task4-build/disabled/linux-7.0.12/drivers/mtd/nand/raw/qemu_3dnand.ko
+work/task4-build/2/linux-7.0.12/drivers/mtd/nand/raw/qemu_3dnand.ko
+work/task4-build/8/linux-7.0.12/drivers/mtd/nand/raw/qemu_3dnand.ko
+```
+
+The isolated profile builds used `scripts/config` plus `olddefconfig`, built
+`drivers/mtd/nand/raw/`, and then ran `scripts/build-kernel.sh` and the compiled
+contract with the profile output selected. The default 4:1 guest ran
+`scripts/q3n-persistence-smoke.sh` and a profile acceptance boot. The 8:1 guest
+ran the repository QEMU with `BUILD_DIR=/workspace/work/task4-build/8`, a fresh
+image, and the 8:1 initramfs. Guest fault injection is not claimed because no
+guest-facing injection interface exists.
+
 ## Global Constraints
 
 - Work only on `codex/nand-core-ecc-read-retry` in the existing isolated worktree.
@@ -518,7 +544,7 @@ reset -> full-ID physical whitelist match
 - Modify: `docs/superpowers/specs/2026-07-29-q3n-configurable-page-raid-logical-page-design.md`
 - Modify: `docs/superpowers/plans/2026-07-29-q3n-configurable-page-raid-implementation.md`
 
-- [ ] **Step 1: Add failing configuration/object-composition tests.**
+- [x] **Step 1: Add failing configuration/object-composition tests.**
 
   Exercise copied overlay builds or Makefile evaluation for:
 
@@ -532,7 +558,7 @@ reset -> full-ID physical whitelist match
   Reject `N=3` through the runtime layout test even though Kconfig range is
   2..8. Run the new script before final wiring and confirm RED.
 
-- [ ] **Step 2: Extend exact-geometry patch behavior tests.**
+- [x] **Step 2: Extend exact-geometry patch behavior tests.**
 
   Reuse the patched Linux helper harness with literal logical
   writesize/pages-per-block/erasesize combinations:
@@ -548,7 +574,7 @@ reset -> full-ID physical whitelist match
   without adding a profile-specific Linux source patch; if a real helper
   defect is exposed, update the tracked patch file and its RED/GREEN test.
 
-- [ ] **Step 3: Run host and Linux build verification for disabled and 4:1.**
+- [x] **Step 3: Run host and Linux build verification for disabled and 4:1.**
 
   Run:
 
@@ -561,13 +587,13 @@ reset -> full-ID physical whitelist match
   Build a second kernel/module configuration with Page RAID disabled and
   verify its compiled contract has no RAID object/symbol.
 
-- [ ] **Step 4: Build-check 2:1 and 8:1.**
+- [x] **Step 4: Build-check 2:1 and 8:1.**
 
   Reconfigure the isolated kernel output to `N=2`, build
   `drivers/mtd/nand/raw/`, then repeat with `N=8`. Record the exact commands
   and successful module paths in the plan execution-status table.
 
-- [ ] **Step 5: Run guest integration with the default 4:1 profile.**
+- [x] **Step 5: Run guest integration with the default 4:1 profile.**
 
   Run the existing QEMU smoke/persistence workflow. Verify in guest:
 
@@ -583,7 +609,7 @@ reset -> full-ID physical whitelist match
   and cross-logical-block I/O. Confirm dmesg prints `4 data + 1 parity`,
   `stripes/block=320`, and `tail=0`.
 
-- [ ] **Step 6: Run an 8:1 geometry/visibility guest boot.**
+- [x] **Step 6: Run an 8:1 geometry/visibility guest boot.**
 
   Boot the `N=8` module/kernel and verify:
 
@@ -599,14 +625,14 @@ reset -> full-ID physical whitelist match
   Confirm the tail is absent from MTD addressing and a complete logical
   block erase succeeds.
 
-- [ ] **Step 7: Update documents with implementation evidence.**
+- [x] **Step 7: Update documents with implementation evidence.**
 
   Mark implemented items as complete, retain explicit exclusions for
   parity metadata and power-fail atomicity, and record host, kernel, QEMU,
   guest, BBT, and persistence evidence. Do not claim fault-injection cases
   that cannot be exercised in guest.
 
-- [ ] **Step 8: Run final verification.**
+- [x] **Step 8: Run final verification.**
 
   ```sh
   git diff --check
@@ -618,7 +644,7 @@ reset -> full-ID physical whitelist match
   Also run the successful guest commands from Steps 5–6 and inspect
   `git status` for generated artifacts.
 
-- [ ] **Step 9: Commit Task 4.**
+- [x] **Step 9: Commit Task 4.**
 
   ```sh
   git add tests/test_linux_patches.sh tests/test_q3n_page_raid_config.sh \

@@ -9,7 +9,25 @@
 - `2026-07-28-q3n-nand-core-ecc-read-retry-design.md`；
 - `2026-07-29-q3n-legacy-cmdfunc-waitfunc-design.md`。
 
-状态：已确认，待实现
+状态：已实现并验证
+
+## 0. 实现证据
+
+- host layout/page/ECC 测试覆盖 RAID 关闭、2:1、4:1、8:1，包含非法
+  `N=3`、精确几何、同步 `D0..DN-1,P`、全 `0xff` 物理 program 跳过、
+  OOB-only 保存、read retry 后单页恢复和双页失败；
+- Linux 7.0.12 分别生成 RAID 关闭、2:1、4:1、8:1 的
+  `qemu_3dnand.ko`；关闭配置不含 RAID 对象/符号，三个启用配置均含
+  `qemu_3dnand_page_raid.o`；
+- 默认 4:1 guest 报告 65536/4096/20971520/34896609280，完成 page/OOB、
+  跨 logical block、完整 block erase、markbad、模块重载 BBT rescan 和
+  两次启动持久化；
+- 8:1 guest 报告 131072/8192/23199744/38604374016，初始化日志明确
+  `stripes/block=177`、`used pages/block=1593`、`tail pages/block=7`，
+  最后一个 logical page 可访问而 MTD 末端地址被拒绝；
+- guest 没有 read-retry/page-recovery fault-injection 用户接口，因此
+  fault injection 只在 QEMU/controller/page host tests 中验收，不声明
+  guest fault-injection 已完成。
 
 ## 1. 目标
 
@@ -395,6 +413,13 @@ for (i = 0; i < profile->data_pages; i++)
 写入约束：
 
 - 持有 `q3n->lock` 直到 `D0..DN-1,P` 全部结束；
+- 每个 data page 的完整 16 KiB main buffer 全为 `0xff` 时，不发出
+  main-data PROGRAM；若其 OOB 含任一非 `0xff` byte，仍发出 OOB-only
+  PROGRAM，否则整页跳过；
+- parity 仍先从全部 data slice 计算；计算结果完整 16 KiB 全为
+  `0xff` 时跳过 parity main-data PROGRAM，非全 `0xff` 时仍作为最后
+  一个 main-data PROGRAM；
+- parity OOB 保持擦除态，因此 parity main 被跳过时没有额外 OOB program；
 - 任一 data program 失败后立即停止，不写 parity；
 - parity program 失败时整个逻辑页写失败；
 - 不回滚已经成功 program 的 data page；
@@ -537,6 +562,8 @@ missing_data = parity XOR data[0] XOR ... XOR data[N-1]
 - data 写失败后停止且不写 parity；
 - parity 写失败返回错误；
 - 成功后不保存 data 副本或 pending stripe；
+- data/parity main 全 `0xff` 时跳过物理 main program，data OOB 非
+  `0xff` 时仍由 OOB-only program 保存；
 - 单 data ECC failure 在 read retry 耗尽后恢复；
 - 两个 data failure 不恢复；
 - parity failure 不恢复；
@@ -575,9 +602,11 @@ missing_data = parity XOR data[0] XOR ... XOR data[N-1]
 6. parity 由 Linux 驱动 XOR 计算，QEMU 不计算。
 7. `q3n_hw_*` 继续保持单物理页接口。
 8. `N+1` 页在一个同步锁区间内顺序写入，parity 最后写。
-9. 不实现 parity metadata 和掉电原子性。
-10. read retry 耗尽后只恢复一个失败 data page。
-11. OOB、BBM、坏块和 BBT 语义保持明确。
-12. `nand_scan_with_ids()` 使用完整 ID 白名单和当前 profile 的设备私有逻辑
+9. 物理 main 全 `0xff` 时跳过 main-data PROGRAM；data OOB 非擦除内容
+   仍由 OOB-only PROGRAM 保存，parity 仍按全部 data slice 计算。
+10. 不实现 parity metadata 和掉电原子性。
+11. read retry 耗尽后只恢复一个失败 data page。
+12. OOB、BBM、坏块和 BBT 语义保持明确。
+13. `nand_scan_with_ids()` 使用完整 ID 白名单和当前 profile 的设备私有逻辑
     scan ID 表。
-13. RAID 关闭、4:1 和 8:1 guest 验证通过。
+14. RAID 关闭、4:1 和 8:1 guest 验证通过。

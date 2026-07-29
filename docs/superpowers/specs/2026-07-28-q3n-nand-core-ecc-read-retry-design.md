@@ -6,13 +6,13 @@
 
 适用内核基线：Linux 7.0.12
 
-状态：NAND Core/ECC/read-retry/legacy callback 基础已实现并验证；可配置
-Page RAID 扩展已确认，待实现
+状态：NAND Core/ECC/read-retry/legacy callback 和可配置 Page RAID
+均已实现并验证
 
 ## 0. 实现记录
 
-本设计已在 `codex/nand-core-ecc-read-retry` 分支实现。生产 KO 由下列 8 个
-对象组成：
+本设计已在 `codex/nand-core-ecc-read-retry` 分支实现。生产 KO 固定包含
+下列 10 个对象：
 
 ```text
 qemu_3dnand_module.o
@@ -23,15 +23,22 @@ qemu_3dnand_controller.o
 qemu_3dnand_ecc.o
 qemu_3dnand_addr.o
 qemu_3dnand_hw.o
+qemu_3dnand_page.o
+qemu_3dnand_layout.o
 ```
+
+`CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID=y` 时另外链接
+`qemu_3dnand_page_raid.o`；关闭时该对象和 `q3n_raid_page_ops` 均不进入
+生产模块。
 
 旧 `main/map/raid/sched` 对象不再复制或链接。实现结果如下：
 
 - probe 预读完整 ID `9c d7 98 a6 51 33 4e 44`，精确命中
   `ytmc_nand.c` 后，把对应的 sentinel-terminated `ids` 表传给
   `nand_scan_with_ids(&chip, 1, ids)`；
-- MTD 报告 writesize 16384、oobsize 1024、erasesize 26214400、
-  size 43620761600，共 1664 个可见擦除块；
+- RAID 关闭时 MTD 报告 writesize 16384、oobsize 1024、
+  erasesize 26214400、size 43620761600；默认 4:1 配置报告
+  65536/4096/20971520/34896609280；两者均保留 1664 个可见擦除块；
 - KO 不定义 MTD `_read/_write/_erase/_block_isbad/_block_markbad`
   回调，也不维护私有 BBT；编译产物只引用 NAND Core scan/cleanup 和
   MTD registration；
@@ -39,13 +46,12 @@ qemu_3dnand_hw.o
 - QEMU read retry 增益为 0/8/16/24 bit，raw read 不更新 ECC result；
 - NAND Core 标坏会先擦除目标块，再通过 OOB byte 0 写入 BBM；重启后
   由标准 416-byte RAM BBT 重新扫描得到坏块状态；
-- 当前生产对象尚未包含 Page RAID；已批准的后续扩展使用新的同步逻辑页层，
-  不恢复旧 raid/scheduler/debugfs 实现。
+- 同步逻辑页层已经实现 2:1、4:1、8:1 和 RAID 关闭 profile，不恢复旧
+  raid/scheduler/debugfs 实现。
 
 可配置 Page RAID 的详细规范记录在
 `2026-07-29-q3n-configurable-page-raid-logical-page-design.md`。本文后续章节
-已合并其总体架构、几何、接口、流程和验证要求。当前实现记录描述无 RAID
-基线；Page RAID 相关内容描述下一阶段目标，不能误读为已经交付。
+已合并其总体架构、几何、接口、流程和验证要求。
 
 Linux patch 必须按文件名顺序应用：
 
@@ -59,9 +65,13 @@ Linux patch 必须按文件名顺序应用：
 
 已完成的验证包括 host 边界/契约测试、真实 Linux 7.0.12 KO 与 bzImage
 构建、QEMU 11.0.2 构建、guest NAND Core probe/MTD 注册、读写擦、OOB
-BBM 以及跨重启 BBT 持久化。read-retry 的 40/41/49/57/65 bit 边界在
+BBM 以及跨重启 BBT 持久化。RAID 关闭、2:1、4:1、8:1 的模块配置均已
+编译并通过符号契约；4:1 guest 完成精确几何、page/OOB、跨块、擦除、
+markbad、BBT rescan 和两次启动持久化，8:1 guest 完成精确几何、完整逻辑
+块擦除、尾部页不可见和末页边界。read-retry 的 40/41/49/57/65 bit 边界在
 QEMU 模型和驱动 callback 测试中确定性覆盖；当前未提供 guest 内的 fault
-注入用户接口，因此不把 guest read-retry 注入列为已完成验收项。
+注入用户接口，因此不把 guest read-retry/RAID recovery 注入列为已完成
+验收项。
 
 扩展新器件时，只在对应 `<vendor>_nand.c` 中增加完整 ID 与几何表项，再把
 provider 接入 `qemu_3dnand_flash.c`。不得在 controller/hw 层硬编码厂商 ID，
@@ -1731,10 +1741,20 @@ parity = data[0] XOR data[1] XOR ... XOR data[N-1]
 一次写调用的固定顺序为 `D0..DN-1,P`：
 
 1. 清零 16 KiB `parity_scratch` 并 XOR 全部 data slice；
-2. 在同一同步锁区间内依次 program data pages；
+2. 在同一同步锁区间内依次处理 data pages；
 3. 任一 data page program 失败立即停止，不写 parity；
-4. data pages 全部成功后 program parity page；
+4. data pages 全部成功后处理 parity page；
 5. parity 成功后才向上返回成功。
+
+每个物理 main buffer 在发出 PROGRAM 前必须检查完整 16 KiB：
+
+- main 全为 `0xff` 时跳过该物理页的 main-data PROGRAM；
+- 对 data page，若对应 OOB 含任一非 `0xff` byte，main 跳过后仍通过
+  OOB-only PROGRAM 保存 OOB；OOB 缺失或也全为 `0xff` 时整页跳过；
+- parity 必须先由全部 `N` 个 data slice XOR 得到，再执行相同的全
+  `0xff` main 检查；即使 parity PROGRAM 被跳过，计算规则和逻辑写成功
+  语义也不改变；
+- parity OOB 始终缺失/擦除，不因跳过 main 而产生 OOB program。
 
 normal 和 raw write 都计算 parity。parity OOB 保持 `0xff`，本期不写
 parity metadata。已成功写入的物理页不回滚；任一中途失败后，该逻辑页所在
@@ -1795,6 +1815,9 @@ RAID 开关或比例变化后必须使用全新或完整擦除的 NAND image。
 - ECC 不可纠正只通过 `ecc_stats.failed` 报告给 NAND core；
 - raw read 不改变 ECC 统计；
 - OOB-only 操作不得意外改写主数据；
+- 全 `0xff` 的物理 main buffer 不发出 main-data PROGRAM，但 data OOB
+  中的非擦除内容仍通过 OOB-only PROGRAM 保存；计算得到的全 `0xff`
+  parity 同样跳过 main program；
 - RAID 写入固定 data 在前、parity 在后，返回成功前不允许其他 Q3N 请求
   插入该 stripe；
 - 同步命令原子性不等于掉电原子性；中途失败不回滚已 program 的物理页；
@@ -1938,6 +1961,8 @@ RAID 开关或比例变化后必须使用全新或完整擦除的 NAND image。
 - 非二次幂、0、1、3、越界比例和算术溢出在初始化时被拒绝；
 - 固定输入 XOR 得到预期 parity；
 - program 顺序严格为 `D0..DN-1,P`；
+- data/parity main 全 `0xff` 时跳过物理 main program，data OOB 非
+  `0xff` 时仍执行 OOB-only program；
 - 任一 data program 失败后不写 parity，parity program 失败向上报错；
 - 一个完整逻辑页写期间没有其他 Q3N 请求插入；
 - 单 data page 在标准 retry 耗尽后由 parity 恢复并报告 scrub；
