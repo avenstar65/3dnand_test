@@ -38,6 +38,18 @@ defined=$(nm --defined-only "$module")
 base_symbols=$(nm "$nand_base")
 bbt_symbols=$(nm "$nand_bbt")
 
+for symbol in q3n_cmdfunc q3n_waitfunc q3n_read_byte q3n_read_buf \
+	q3n_write_buf q3n_select_chip q3n_controller_legacy_init; do
+	printf '%s\n' "$defined" |
+		grep -Eq "[[:space:]][tT][[:space:]]+$symbol$" ||
+		fail "Q3N module does not define legacy callback $symbol"
+done
+
+if printf '%s\n' "$defined" |
+   grep -Eq '[[:space:]][tT][[:space:]]+q3n_.*exec_op$'; then
+	fail "Q3N module still defines an exec_op implementation"
+fi
+
 for symbol in nand_scan_with_ids nand_cleanup mtd_device_parse_register \
 	mtd_device_unregister; do
 	printf '%s\n' "$undefined" | grep -Eq "[[:space:]]U[[:space:]]+$symbol$" ||
@@ -68,4 +80,4 @@ for direct_mtd in add_mtd_device add_mtd_partitions mtd_device_register; do
 	fi
 done
 
-printf 'ok: compiled Q3N module delegates scan, bad-block, and BBT to NAND Core\n'
+printf 'ok: compiled Q3N module uses legacy callbacks and delegates bad-block/BBT to NAND Core\n'

@@ -65,6 +65,7 @@ int q3n_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	q3n->controller.ops = &q3n_controller_ops;
 	q3n->chip.controller = &q3n->controller;
 	nand_set_controller_data(&q3n->chip, q3n);
+	q3n_controller_legacy_init(&q3n->chip);
 
 	mtd = nand_to_mtd(&q3n->chip);
 	mtd->name = "qemu-3dnand";

@@ -25,6 +25,15 @@ struct q3n_ecc_result {
 	u32 failed_step;
 };
 
+struct q3n_legacy_state {
+	u8 data[8];
+	u8 data_len;
+	u8 data_pos;
+	u32 erase_page;
+	int error;
+	bool erase_pending;
+};
+
 #ifdef Q3N_HOST_TEST
 struct q3n_mmio {
 	u32 (*read)(void *context, u32 reg);
@@ -45,6 +54,7 @@ struct q3n {
 	struct nand_chip chip;
 #endif
 	struct q3n_geometry geometry;
+	struct q3n_legacy_state legacy;
 	u8 id[8];
 	u32 retry_mode;
 	bool scanned;
