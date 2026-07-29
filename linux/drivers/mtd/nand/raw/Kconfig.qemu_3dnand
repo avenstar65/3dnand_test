@@ -7,3 +7,13 @@ config MTD_NAND_QEMU_3DNAND
 	  NAND Core owns MTD operations, bad-block handling and the RAM BBT.
 	  The controller supplies page ECC, raw/OOB access and four read-retry
 	  modes for the whitelisted YTMC geometry.
+
+config MTD_NAND_QEMU_3DNAND_PAGE_RAID
+	bool "QEMU 3D NAND driver-side Page RAID"
+	depends on MTD_NAND_QEMU_3DNAND
+
+config MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES
+	int "Page RAID data pages per parity page"
+	range 2 8
+	default 4
+	depends on MTD_NAND_QEMU_3DNAND_PAGE_RAID
