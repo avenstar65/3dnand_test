@@ -16,7 +16,7 @@
 | 3 Linux callbacks | 完成 | KO 编译符号包含 7 个 legacy 入口且不含 `q3n_exec_op` |
 | 4 回归验证 | 完成 | ECC、hardware、Linux patch、全量 smoke 通过 |
 | 5 端到端验证 | 完成 | Linux 7.0.12 完整构建、guest persistence 两轮通过 |
-| 6 GitHub | 待完成 | 本地提交、push 和 PR #2 更新 |
+| 6 GitHub | 完成 | 分支已 push，draft PR #2 已更新为 legacy callback 架构 |
 
 下方 checkbox 保留原始 RED → GREEN 实施配方；本表记录实际执行结果。
 
