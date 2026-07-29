@@ -129,11 +129,12 @@ int q3n_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	used_pages = q3n->page_profile.stripes_per_block *
 		q3n->page_profile.stripe_pages;
 	dev_info(dev,
-		 "Page RAID %s: %u data + %u parity, logical page=%u oob=%u erase=%u capacity=%llu, stripes/block=%u used pages/block=%u tail pages/block=%u\n",
+		 "Page RAID %s: %u data + %u parity, logical page=%u physical page=%u oob=%u erase=%u capacity=%llu, stripes/block=%u used pages/block=%u tail pages/block=%u\n",
 		 raid_enabled ? "enabled" : "disabled",
 		 q3n->page_profile.data_pages,
 		 q3n->page_profile.parity_pages,
-		 q3n->geometry.writesize, q3n->geometry.oobsize,
+		 q3n->geometry.writesize,
+		 q3n->physical_geometry.writesize, q3n->geometry.oobsize,
 		 mtd->erasesize,
 		 (unsigned long long)q3n->page_profile.logical_size,
 		 q3n->page_profile.stripes_per_block, used_pages,

@@ -176,7 +176,7 @@ flowchart TD
 | `qemu_3dnand_page_raid.c` | XOR parity、同步 `D0..DN-1,P` 写入和恢复 |
 | `qemu_3dnand_page_raid.h` | RAID ops 初始化接口 |
 | `tests/test_q3n_layout.c/.sh` | 2:1、4:1、8:1 几何、边界和尾部页测试 |
-| `tests/test_q3n_page_raid.c/.sh` | XOR、写入顺序、错误、重试和恢复测试 |
+| `tests/test_q3n_page.c/.sh` | XOR、写入顺序、错误、重试和恢复测试 |
 
 ### 6.2 修改文件
 
@@ -257,7 +257,7 @@ ECC/controller 使用以下稳定入口：
 
 ```c
 int q3n_page_layer_init(struct q3n *q3n,
-			const struct q3n_geometry *physical);
+			bool raid_enabled, u32 data_pages);
 
 int q3n_page_read(struct q3n *q3n, u32 logical_page,
 		  void *data, void *oob, bool raw,

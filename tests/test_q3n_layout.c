@@ -67,6 +67,17 @@ static void expect_map(const struct q3n_page_profile *profile, uint32_t page,
 	expect_u64("map parity page", map.parity_page, parity_page);
 }
 
+static void expect_map_error(const char *name,
+			     const struct q3n_page_profile *profile,
+			     uint32_t page)
+{
+	struct q3n_page_map map = { 0 };
+	int ret;
+
+	ret = q3n_layout_map_page(profile, page, &map);
+	expect_error(name, ret);
+}
+
 int main(void)
 {
 	const struct q3n_geometry physical = {
@@ -93,6 +104,8 @@ int main(void)
 	expect_u64("disabled logical geometry copied", profile.logical.writesize,
 		   physical.writesize);
 	expect_map(&profile, 1600, 1600, 1600);
+	expect_map(&profile, 2662399, 2662399, 2662399);
+	expect_map_error("disabled one-past-end page accepted", &profile, 2662400);
 	expect_profile("2:1 profile", true, 2, 32768, 2048, 533, 1,
 		       17465344, 27716);
 	expect_profile("4:1 profile", true, 4, 65536, 4096, 320, 0,
@@ -140,16 +153,22 @@ int main(void)
 	expect_map(&profile, 0, 0, 4);
 	expect_map(&profile, 319, 1595, 1599);
 	expect_map(&profile, 320, 1600, 1604);
+	expect_map(&profile, 532479, 2662395, 2662399);
+	expect_map_error("4:1 one-past-end page accepted", &profile, 532480);
 
 	ret = q3n_layout_build(&profile, &physical, true, 8);
 	expect_u64("8:1 setup", ret, 0);
 	expect_map(&profile, 176, 1584, 1592);
 	expect_map(&profile, 177, 1600, 1608);
+	expect_map(&profile, 294527, 2662384, 2662392);
+	expect_map_error("8:1 one-past-end page accepted", &profile, 294528);
 
 	ret = q3n_layout_build(&profile, &physical, true, 2);
 	expect_u64("2:1 setup", ret, 0);
 	expect_map(&profile, 532, 1596, 1598);
 	expect_map(&profile, 533, 1600, 1602);
+	expect_map(&profile, 886911, 2662396, 2662398);
+	expect_map_error("2:1 one-past-end page accepted", &profile, 886912);
 
 	ret = q3n_layout_map_page(&profile,
 			profile.logical.pages_per_block * profile.logical.blocks, NULL);
@@ -158,6 +177,76 @@ int main(void)
 			profile.logical.pages_per_block * profile.logical.blocks,
 			&(struct q3n_page_map) { 0 });
 	expect_error("out-of-range logical page accepted", ret);
+
+	ret = q3n_layout_build(&profile, &physical, true, 4);
+	expect_u64("mutated-profile setup", ret, 0);
+	{
+		struct q3n_page_profile mutated = profile;
+
+		mutated.data_pages = 3;
+		expect_map_error("unsupported RAID data-page count accepted",
+				 &mutated, 0);
+		mutated = profile;
+		mutated.data_pages = 6;
+		expect_map_error("non-power-of-two RAID data-page count accepted",
+				 &mutated, 0);
+		mutated = profile;
+		mutated.data_pages = 16;
+		expect_map_error("out-of-profile power-of-two data-page count accepted",
+				 &mutated, 0);
+		mutated = profile;
+		mutated.parity_pages = 2;
+		expect_map_error("RAID profile with two parity pages accepted",
+				 &mutated, 0);
+		mutated = profile;
+		mutated.stripe_pages = profile.data_pages + 2;
+		expect_map_error("inconsistent RAID stripe width accepted",
+				 &mutated, 0);
+		mutated = profile;
+		mutated.logical.blocks--;
+		expect_map_error("inconsistent logical block count accepted",
+				 &mutated, 0);
+		mutated = profile;
+		mutated.logical.pages_per_block--;
+		expect_map_error("inconsistent logical pages per block accepted",
+				 &mutated, 0);
+		mutated = profile;
+		mutated.physical.pages_per_block--;
+		expect_map_error("inconsistent physical pages per block accepted",
+				 &mutated, 0);
+		mutated = profile;
+		mutated.logical.writesize--;
+		expect_map_error("inconsistent logical page size accepted",
+				 &mutated, 0);
+		mutated = profile;
+		mutated.logical_size--;
+		expect_map_error("inconsistent logical capacity accepted",
+				 &mutated, 0);
+		mutated = profile;
+		mutated.logical.writesize = 0;
+		expect_map_error("zero logical geometry accepted", &mutated, 0);
+		mutated = profile;
+		mutated.physical.pages_per_block = 0;
+		expect_map_error("zero physical geometry accepted", &mutated, 0);
+		mutated = profile;
+		mutated.physical.blocks = UINT32_MAX;
+		expect_map_error("overflowing physical geometry accepted",
+				 &mutated, 0);
+		mutated = profile;
+		mutated.logical.pages_per_block = UINT32_MAX;
+		mutated.logical.blocks = UINT32_MAX;
+		expect_map_error("overflowing logical geometry accepted",
+				 &mutated, 0);
+	}
+	{
+		struct q3n_page_profile cross_block = profile;
+
+		cross_block.stripes_per_block = 321;
+		cross_block.logical.pages_per_block = 321;
+		cross_block.tail_pages = 0;
+		expect_map_error("stripe crossing its physical block accepted",
+				 &cross_block, 320);
+	}
 
 	printf("ok: Q3N page RAID layout profiles verified\n");
 	return 0;

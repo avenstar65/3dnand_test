@@ -17,3 +17,8 @@ config MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES
 	range 2 8
 	default 4
 	depends on MTD_NAND_QEMU_3DNAND_PAGE_RAID
+	help
+	  Select the number of data pages protected by one parity page.
+	  Although the Kconfig range permits 3, 5, 6 and 7 to be built,
+	  probe rejects them because only powers of two 2, 4 and 8 are
+	  supported.

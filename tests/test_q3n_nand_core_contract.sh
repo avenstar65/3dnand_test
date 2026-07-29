@@ -30,6 +30,7 @@ nand_base="$kernel_build/drivers/mtd/nand/raw/nand_base.o"
 nand_bbt="$kernel_build/drivers/mtd/nand/raw/nand_bbt.o"
 
 command -v nm >/dev/null 2>&1 || fail "nm is unavailable"
+command -v strings >/dev/null 2>&1 || fail "strings is unavailable"
 [ -f "$nand_base" ] || fail "compiled nand_base.o is unavailable"
 [ -f "$nand_bbt" ] || fail "compiled nand_bbt.o is unavailable"
 
@@ -57,6 +58,9 @@ if grep -q '^CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID=y$' \
 	printf '%s\n' "$defined" |
 		grep -Eq '[[:space:]][dDrR][[:space:]]+q3n_raid_page_ops$' ||
 		fail "RAID-enabled Q3N module omits q3n_raid_page_ops"
+	strings "$module" |
+		grep -Fq 'logical page=%u physical page=%u oob=%u' ||
+		fail "RAID-enabled Q3N module log omits physical page size"
 elif printf '%s\n' "$defined" |
      grep -Eq '[[:space:]][dDrR][[:space:]]+q3n_raid_page_ops$'; then
 	fail "RAID-disabled Q3N module includes q3n_raid_page_ops"

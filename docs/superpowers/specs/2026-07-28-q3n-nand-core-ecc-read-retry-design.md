@@ -56,8 +56,8 @@ qemu_3dnand_layout.o
 Linux patch 必须按文件名顺序应用：
 
 1. `0001-mtd-rawnand-add-exact-geometry-helpers.patch`；
-2. `0002-mtd-rawnand-use-exact-geometry-in-io-paths.patch`；
-3. `0003-mtd-rawnand-use-exact-geometry-in-bbt.patch`。
+2. `0002-mtd-rawnand-use-exact-geometry-in-NAND-core.patch`；
+3. `0003-mtd-rawnand-use-exact-geometry-in-NAND-BBT.patch`。
 
 `scripts/apply-linux-patches.sh` 对每个 patch 先做 forward check；已应用时
 通过 reverse check 识别并跳过；两种检查都失败则立即停止。禁止手工修改
@@ -413,7 +413,13 @@ if (!physical_ids)
 	return dev_err_probe(dev, -ENODEV,
 			     "unsupported NAND flash ID\n");
 
-ret = q3n_page_layer_init(q3n, physical_ids);
+raid_enabled = IS_ENABLED(CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID);
+#if IS_ENABLED(CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID)
+data_pages = CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES;
+#else
+data_pages = 1;
+#endif
+ret = q3n_page_layer_init(q3n, raid_enabled, data_pages);
 if (ret)
 	return ret;
 
@@ -1576,11 +1582,11 @@ position/row 编码扩展，不能把本期 flag 的能力描述扩大到该场�
 计划在 Q3N 代码仓库跟踪：
 
 ```text
-patches/linux/
-├── series
+linux/patches/
 ├── 0001-mtd-rawnand-add-exact-geometry-helpers.patch
-├── 0002-mtd-rawnand-use-exact-geometry-in-io-paths.patch
-└── 0003-mtd-rawnand-use-exact-geometry-in-bbt.patch
+├── 0002-mtd-rawnand-use-exact-geometry-in-NAND-core.patch
+├── 0003-mtd-rawnand-use-exact-geometry-in-NAND-BBT.patch
+└── README.md
 
 scripts/
 └── apply-linux-patches.sh
@@ -1600,7 +1606,7 @@ Linux 测试代码如果需要修改，也必须包含在 patch series 中。
 
 patch 文件是 Linux 改动的唯一 source of truth。实施时可以在临时、可丢弃
 的 Linux git worktree 中制作和验证 commit，再通过 `git format-patch`
-导出到 `patches/linux/`。不能把临时 Linux worktree 中的已应用状态当作
+导出到 `linux/patches/`。不能把临时 Linux worktree 中的已应用状态当作
 交付物。
 
 `qemu_3dnand_module.c`、`qemu_3dnand_init.c`、
@@ -1610,7 +1616,7 @@ patch 文件是 Linux 改动的唯一 source of truth。实施时可以在临时
 `qemu_3dnand_addr.c`、`qemu_3dnand_hw.c`、`ytmc_nand.c` 及其内部头文件
 属于 Q3N 项目 driver overlay，直接在本仓库跟踪；`nand_base.c`、raw
 NAND `nand_bbt.c` 和 `rawnand.h` 等原生 Linux 文件仍只能通过
-`patches/linux/` 修改。
+`linux/patches/` 修改。
 
 仓库中的 `work/linux/linux-7.0.12` 仅是构建产物或外部源码副本：
 
