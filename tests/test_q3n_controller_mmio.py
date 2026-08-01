@@ -1,11 +1,15 @@
-import os
 import base64
+import argparse
+import os
 import signal
 import subprocess
 import tempfile
-import time
+from q3n_qtest_protocol import StderrCapture, read_response
 
-QEMU = "/workspace/work/build/qemu-11.0.2/qemu-system-x86_64"
+parser = argparse.ArgumentParser()
+parser.add_argument("--qemu", required=True)
+args = parser.parse_args()
+QEMU = args.qemu
 BAR = 0xfebe0000
 PCI_CONFIG = 0x80002000
 
@@ -54,12 +58,13 @@ def require(value, message):
         raise AssertionError(message)
 
 
-with tempfile.NamedTemporaryFile(prefix="q3n-controller-qtest-",
-                                 dir="/workspace/work", delete=False) as media:
-    media_path = media.name
-
 proc = None
+stderr_capture = None
+media_path = None
 try:
+    with tempfile.NamedTemporaryFile(prefix="q3n-controller-qtest-",
+                                     dir="/workspace/work", delete=False) as media:
+        media_path = media.name
     require(os.path.exists(QEMU), "build QEMU first with scripts/build-qemu.sh")
     proc = subprocess.Popen([
         QEMU, "-machine", "q35", "-nodefaults", "-nographic",
@@ -68,18 +73,15 @@ try:
         "-blockdev", "driver=raw,file=q3nfile,node-name=q3nmedia",
         "-device", "q3n-nand-pci,drive=q3nmedia,addr=4.0"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True)
-    time.sleep(0.2)
-    if proc.poll() is not None:
-        raise AssertionError("qtest startup: " + proc.stderr.read())
+        bufsize=0)
+    stderr_capture = StderrCapture(proc.stderr)
 
     def command(line):
         events = []
-        proc.stdin.write(line + "\n")
+        proc.stdin.write((line + "\n").encode("ascii"))
         proc.stdin.flush()
         while True:
-            response = proc.stdout.readline().strip()
-            require(response, "qtest closed while processing " + line)
+            response = read_response(proc.stdout, line, 15, stderr_capture)
             if response.startswith("IRQ "):
                 events.append(response)
             elif response.startswith("OK"):
@@ -112,6 +114,7 @@ try:
         require(not any(event.startswith("IRQ lower ") for event in events),
                 name + " lowered IRQ during completion: " + repr(events))
 
+    command("inb 0x80")
     command("irq_intercept_in ioapic")
     outl(0xcf8, PCI_CONFIG)
     require(inl(0xcfc) == 0x003d1b36, "PCI identity")
@@ -222,6 +225,7 @@ try:
     require(read(REG_RETRY_MODE) == 0 and read(REG_DATA) == 0xffffffff,
             "reset retry and cursor")
 finally:
+    failure = None
     if proc is not None and proc.poll() is None:
         proc.send_signal(signal.SIGINT)
         try:
@@ -229,6 +233,12 @@ finally:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=10)
+    if stderr_capture is not None:
+        stderr_capture.join()
     if proc is not None and proc.returncode not in (0, -signal.SIGINT):
-        raise SystemExit(proc.stderr.read())
-    os.unlink(media_path)
+        failure = (stderr_capture.text() if stderr_capture is not None
+                   else "<stderr capture was not initialized>")
+    if media_path is not None and os.path.exists(media_path):
+        os.unlink(media_path)
+    if failure is not None:
+        raise SystemExit(failure)
