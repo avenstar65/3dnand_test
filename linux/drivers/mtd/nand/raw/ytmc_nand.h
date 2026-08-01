@@ -7,6 +7,8 @@
 #ifdef Q3N_HOST_TEST
 #include <stdint.h>
 
+typedef uint32_t u32;
+
 #define NAND_NON_POWER_OF_2_GEOMETRY (1U << 15)
 #define NAND_NO_SUBPAGE_WRITE (1U << 9)
 
@@ -34,6 +36,19 @@ struct nand_flash_dev {
 #include <linux/mtd/rawnand.h>
 #endif
 
-struct nand_flash_dev *ytmc_nand_ids(void);
+struct q3n_flash_topology {
+	u32 dies;
+	u32 planes_per_die;
+	u32 blocks_per_plane;
+	u32 data_blocks_per_plane;
+	u32 pages_per_block;
+};
+
+struct q3n_flash_info {
+	struct nand_flash_dev nand;
+	struct q3n_flash_topology topology;
+};
+
+const struct q3n_flash_info *ytmc_nand_flash_info(void);
 
 #endif

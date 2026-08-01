@@ -11,18 +11,19 @@
 
 #include "qemu_3dnand_flash.h"
 
-struct nand_flash_dev *q3n_flash_ids_for_id(const u8 *id, size_t len)
+const struct q3n_flash_info *q3n_flash_info_for_id(const u8 *id, size_t len)
 {
-	struct nand_flash_dev *ids;
+	const struct q3n_flash_info *info = ytmc_nand_flash_info();
 
 	if (!id || len != YTMC_Q3N_ID_LEN)
 		return NULL;
 
-	ids = ytmc_nand_ids();
-	if (ids[0].id_len != len || memcmp(id, ids[0].id, len))
-		return NULL;
+	for (; info->nand.name; info++) {
+		if (info->nand.id_len == len && !memcmp(id, info->nand.id, len))
+			return info;
+	}
 
-	return ids;
+	return NULL;
 }
 
 int q3n_flash_build_scan_ids(struct nand_flash_dev scan_ids[2],

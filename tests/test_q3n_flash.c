@@ -19,6 +19,7 @@ int main(void)
 		0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44,
 	};
 	uint8_t candidate[YTMC_Q3N_ID_LEN];
+	const struct q3n_flash_info *info;
 	const struct nand_flash_dev *ids;
 	const struct q3n_geometry physical = {
 		.writesize = 16384,
@@ -43,11 +44,12 @@ int main(void)
 	};
 	size_t i;
 
-	ids = q3n_flash_ids_for_id(expected_id, sizeof(expected_id));
-	if (!ids)
+	info = q3n_flash_info_for_id(expected_id, sizeof(expected_id));
+	if (!info)
 		fail("full YTMC ID was not selected");
-	if (ids != ytmc_nand_ids())
+	if (info != ytmc_nand_flash_info())
 		fail("selector did not return the YTMC table");
+	ids = &info->nand;
 	if (ids[0].id_len != YTMC_Q3N_ID_LEN ||
 	    memcmp(ids[0].id, expected_id, sizeof(expected_id)))
 		fail("YTMC table does not preserve the full ID");
@@ -56,20 +58,25 @@ int main(void)
 		fail("YTMC geometry does not match the 40.625 GiB device");
 	if (!(ids[0].options & NAND_NON_POWER_OF_2_GEOMETRY))
 		fail("YTMC profile does not request exact geometry");
-	if (ids[1].name)
+	if (info[1].nand.name)
 		fail("YTMC ID table lacks its sentinel");
+	if (info->topology.dies != 2 || info->topology.planes_per_die != 4 ||
+	    info->topology.blocks_per_plane != 247 ||
+	    info->topology.data_blocks_per_plane != 208 ||
+	    info->topology.pages_per_block != 1600)
+		fail("YTMC topology does not match the Q3N device");
 
-	if (q3n_flash_ids_for_id(expected_id, YTMC_Q3N_ID_LEN - 1))
+	if (q3n_flash_info_for_id(expected_id, YTMC_Q3N_ID_LEN - 1))
 		fail("seven-byte prefix was accepted");
-	if (q3n_flash_ids_for_id(NULL, YTMC_Q3N_ID_LEN))
+	if (q3n_flash_info_for_id(NULL, YTMC_Q3N_ID_LEN))
 		fail("NULL ID was accepted");
-	if (q3n_flash_ids_for_id(expected_id, 0))
+	if (q3n_flash_info_for_id(expected_id, 0))
 		fail("zero-length ID was accepted");
 
 	for (i = 0; i < sizeof(candidate); i++) {
 		memcpy(candidate, expected_id, sizeof(candidate));
 		candidate[i] ^= 0x01;
-		if (q3n_flash_ids_for_id(candidate, sizeof(candidate)))
+		if (q3n_flash_info_for_id(candidate, sizeof(candidate)))
 			fail("one-byte ID mutation was accepted");
 	}
 

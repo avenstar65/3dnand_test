@@ -48,7 +48,8 @@ static int q3n_set_physical_geometry(struct q3n *q3n,
 int q3n_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct device *dev = &pdev->dev;
-	struct nand_flash_dev *physical_ids;
+	const struct q3n_flash_info *info;
+	const struct nand_flash_dev *physical_ids;
 	struct mtd_info *mtd;
 	struct q3n *q3n;
 	bool raid_enabled;
@@ -82,10 +83,11 @@ int q3n_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	ret = q3n_hw_read_id(q3n, q3n->id, sizeof(q3n->id));
 	if (ret)
 		return dev_err_probe(dev, ret, "READ ID failed\n");
-	physical_ids = q3n_flash_ids_for_id(q3n->id, sizeof(q3n->id));
-	if (!physical_ids)
+	info = q3n_flash_info_for_id(q3n->id, sizeof(q3n->id));
+	if (!info)
 		return dev_err_probe(dev, -ENODEV,
 				     "NAND ID is not in the Q3N whitelist\n");
+	physical_ids = &info->nand;
 
 	ret = q3n_set_physical_geometry(q3n, physical_ids);
 	if (ret)
