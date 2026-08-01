@@ -8,9 +8,20 @@ config MTD_NAND_QEMU_3DNAND
 	  The controller supplies page ECC, raw/OOB access and four read-retry
 	  modes for the whitelisted YTMC geometry.
 
-config MTD_NAND_QEMU_3DNAND_PAGE_RAID
-	bool "QEMU 3D NAND driver-side Page RAID"
+choice
+	prompt "QEMU 3D NAND storage mode"
+	default MTD_NAND_QEMU_3DNAND_IDENTITY
 	depends on MTD_NAND_QEMU_3DNAND
+
+config MTD_NAND_QEMU_3DNAND_IDENTITY
+	bool "One physical page per logical page"
+
+config MTD_NAND_QEMU_3DNAND_PAGE_RAID
+	bool "Driver-side Page RAID"
+
+config MTD_NAND_QEMU_3DNAND_MULTIPLANE
+	bool "Fixed four-plane groups"
+endchoice
 
 config MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES
 	int "Page RAID data pages per parity page"
