@@ -105,8 +105,7 @@ int q3n_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		return dev_err_probe(dev, ret,
 				     "cannot initialize logical page layer\n");
 
-	ret = q3n_flash_build_scan_ids(q3n->scan_ids, physical_ids,
-				       &q3n->page_profile);
+	ret = q3n_flash_build_scan_ids(q3n->scan_ids, info, &q3n->geometry);
 	if (ret)
 		goto err_cleanup_page_layer;
 

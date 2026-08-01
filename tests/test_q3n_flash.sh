@@ -11,6 +11,7 @@ trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 	"$repo_root/tests/test_q3n_flash.c" \
 	"$repo_root/linux/drivers/mtd/nand/raw/qemu_3dnand_flash.c" \
 	"$repo_root/linux/drivers/mtd/nand/raw/qemu_3dnand_layout.c" \
+	"$repo_root/linux/drivers/mtd/nand/raw/qemu_3dnand_multiplane_layout.c" \
 	"$repo_root/linux/drivers/mtd/nand/raw/ytmc_nand.c" \
 	-o "$tmp_dir/test_q3n_flash"
 

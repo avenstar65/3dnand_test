@@ -3,10 +3,12 @@
 #include <errno.h>
 #include <limits.h>
 #include <string.h>
+#define Q3N_U64_MAX UINT64_MAX
 #else
 #include <linux/errno.h>
 #include <linux/limits.h>
 #include <linux/string.h>
+#define Q3N_U64_MAX U64_MAX
 #endif
 
 #include "qemu_3dnand_flash.h"
@@ -26,30 +28,47 @@ const struct q3n_flash_info *q3n_flash_info_for_id(const u8 *id, size_t len)
 	return NULL;
 }
 
+static int q3n_flash_mul_u64(u64 left, u64 right, u64 *result)
+{
+	if (left && right > Q3N_U64_MAX / left)
+		return -EOVERFLOW;
+
+	*result = left * right;
+	return 0;
+}
+
 int q3n_flash_build_scan_ids(struct nand_flash_dev scan_ids[2],
-			     const struct nand_flash_dev *physical_ids,
-			     const struct q3n_page_profile *profile)
+			     const struct q3n_flash_info *info,
+			     const struct q3n_geometry *logical)
 {
 	u64 erasesize;
+	u64 size;
 	u64 chipsize;
+	int ret;
 
-	if (!scan_ids || !physical_ids || !profile)
+	if (!scan_ids || !info || !logical)
 		return -EINVAL;
-	if (!profile->logical.writesize || !profile->logical.oobsize ||
-	    !profile->logical.pages_per_block ||
-	    !profile->logical_size || profile->logical.oobsize > USHRT_MAX ||
-	    profile->logical_size % (1024 * 1024))
+	if (!logical->writesize || !logical->oobsize ||
+	    !logical->pages_per_block || !logical->blocks ||
+	    logical->oobsize > USHRT_MAX)
 		return -EINVAL;
 
-	erasesize = (u64)profile->logical.writesize *
-		profile->logical.pages_per_block;
-	chipsize = profile->logical_size / (1024 * 1024);
+	ret = q3n_flash_mul_u64(logical->writesize, logical->pages_per_block,
+				&erasesize);
+	if (ret)
+		return ret;
+	ret = q3n_flash_mul_u64(erasesize, logical->blocks, &size);
+	if (ret)
+		return ret;
+	if (size % (1024 * 1024))
+		return -EINVAL;
+	chipsize = size / (1024 * 1024);
 	if (erasesize > UINT_MAX || chipsize > UINT_MAX)
 		return -EOVERFLOW;
 
-	scan_ids[0] = physical_ids[0];
-	scan_ids[0].pagesize = profile->logical.writesize;
-	scan_ids[0].oobsize = profile->logical.oobsize;
+	scan_ids[0] = info->nand;
+	scan_ids[0].pagesize = logical->writesize;
+	scan_ids[0].oobsize = logical->oobsize;
 	scan_ids[0].erasesize = erasesize;
 	scan_ids[0].chipsize = chipsize;
 	memset(&scan_ids[1], 0, sizeof(scan_ids[1]));

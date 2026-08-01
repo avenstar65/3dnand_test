@@ -10,12 +10,12 @@ typedef uint8_t u8;
 #include <linux/types.h>
 #endif
 
-#include "qemu_3dnand_layout.h"
+#include "qemu_3dnand_addr.h"
 #include "ytmc_nand.h"
 
 const struct q3n_flash_info *q3n_flash_info_for_id(const u8 *id, size_t len);
 int q3n_flash_build_scan_ids(struct nand_flash_dev scan_ids[2],
-			     const struct nand_flash_dev *physical_ids,
-			     const struct q3n_page_profile *profile);
+			     const struct q3n_flash_info *info,
+			     const struct q3n_geometry *logical);
 
 #endif

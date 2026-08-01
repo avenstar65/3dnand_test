@@ -5,6 +5,7 @@
 
 #include "qemu_3dnand_flash.h"
 #include "qemu_3dnand_layout.h"
+#include "qemu_3dnand_multiplane_layout.h"
 #include "ytmc_nand.h"
 
 static void fail(const char *message)
@@ -28,6 +29,8 @@ int main(void)
 		.blocks = 1664,
 	};
 	struct q3n_page_profile profile;
+	struct q3n_multiplane_profile multiplane;
+	struct q3n_geometry invalid;
 	struct nand_flash_dev scan_ids[2];
 	const struct {
 		bool raid_enabled;
@@ -84,7 +87,7 @@ int main(void)
 		if (q3n_layout_build(&profile, &physical, profiles[i].raid_enabled,
 				     profiles[i].data_pages))
 			fail("could not build layout profile");
-		if (q3n_flash_build_scan_ids(scan_ids, ids, &profile))
+		if (q3n_flash_build_scan_ids(scan_ids, info, &profile.logical))
 			fail("could not build device-local scan IDs");
 		if (memcmp(scan_ids[0].id, ids[0].id, YTMC_Q3N_ID_LEN) ||
 		    scan_ids[0].id_len != ids[0].id_len ||
@@ -98,32 +101,63 @@ int main(void)
 		    scan_ids[0].erasesize != profiles[i].erasesize ||
 		    scan_ids[0].chipsize != profiles[i].chipsize)
 			fail("scan ID derivation did not replace logical geometry");
-		if (scan_ids[1].name || scan_ids[1].id_len || scan_ids[1].pagesize ||
-		    scan_ids[1].chipsize || scan_ids[1].erasesize || scan_ids[1].options ||
-		    scan_ids[1].oobsize)
+		if (memcmp(&scan_ids[1], &(struct nand_flash_dev) { 0 },
+			   sizeof(scan_ids[1])))
 			fail("scan ID table lacks an empty sentinel");
 	}
 
-	if (q3n_flash_build_scan_ids(NULL, ids, &profile) >= 0 ||
-	    q3n_flash_build_scan_ids(scan_ids, NULL, &profile) >= 0 ||
-	    q3n_flash_build_scan_ids(scan_ids, ids, NULL) >= 0)
+	if (q3n_multiplane_layout_build(&multiplane, &physical,
+				       &info->topology))
+		fail("could not build multi-plane layout profile");
+	if (q3n_flash_build_scan_ids(scan_ids, info, &multiplane.logical))
+		fail("could not build multi-plane scan IDs");
+	if (scan_ids[0].pagesize != 65536 || scan_ids[0].oobsize != 4096 ||
+	    scan_ids[0].erasesize != 104857600 || scan_ids[0].chipsize != 41600)
+		fail("multi-plane scan IDs did not use exact logical geometry");
+	if (memcmp(scan_ids[0].id, expected_id, sizeof(expected_id)) ||
+	    scan_ids[0].id_len != YTMC_Q3N_ID_LEN ||
+	    !(scan_ids[0].options & NAND_NON_POWER_OF_2_GEOMETRY))
+		fail("multi-plane scan IDs did not preserve NAND identity");
+	if (memcmp(&scan_ids[1], &(struct nand_flash_dev) { 0 },
+		   sizeof(scan_ids[1])))
+		fail("multi-plane scan IDs lack an empty sentinel");
+
+	if (q3n_flash_build_scan_ids(NULL, info, &profile.logical) >= 0 ||
+	    q3n_flash_build_scan_ids(scan_ids, NULL, &profile.logical) >= 0 ||
+	    q3n_flash_build_scan_ids(scan_ids, info, NULL) >= 0)
 		fail("NULL scan-ID argument accepted");
 
-	profile.logical_size++;
-	if (q3n_flash_build_scan_ids(scan_ids, ids, &profile) >= 0)
+	invalid = (struct q3n_geometry) {
+		.writesize = 1,
+		.oobsize = 1,
+		.pages_per_block = 1,
+		.blocks = 1,
+	};
+	if (q3n_flash_build_scan_ids(scan_ids, info, &invalid) >= 0)
 		fail("non-integral MiB logical capacity accepted");
-	profile.logical_size = ((uint64_t)UINT32_MAX + 1) * 1024 * 1024;
-	if (q3n_flash_build_scan_ids(scan_ids, ids, &profile) >= 0)
+	invalid = (struct q3n_geometry) {
+		.writesize = 2 * 1024 * 1024,
+		.oobsize = 1,
+		.pages_per_block = 1,
+		.blocks = UINT32_MAX,
+	};
+	if (q3n_flash_build_scan_ids(scan_ids, info, &invalid) >= 0)
 		fail("oversized chipsize accepted");
-	profile.logical_size = 1024 * 1024;
-	profile.logical.writesize = 2;
-	profile.logical.pages_per_block = UINT32_MAX;
-	if (q3n_flash_build_scan_ids(scan_ids, ids, &profile) >= 0)
+	invalid = (struct q3n_geometry) {
+		.writesize = 2,
+		.oobsize = 1,
+		.pages_per_block = UINT32_MAX,
+		.blocks = 1,
+	};
+	if (q3n_flash_build_scan_ids(scan_ids, info, &invalid) >= 0)
 		fail("oversized erasesize accepted");
-	profile.logical.writesize = 16384;
-	profile.logical.pages_per_block = 1600;
-	profile.logical.oobsize = (uint32_t)UINT16_MAX + 1;
-	if (q3n_flash_build_scan_ids(scan_ids, ids, &profile) >= 0)
+	invalid = (struct q3n_geometry) {
+		.writesize = 16384,
+		.oobsize = (uint32_t)UINT16_MAX + 1,
+		.pages_per_block = 1600,
+		.blocks = 1664,
+	};
+	if (q3n_flash_build_scan_ids(scan_ids, info, &invalid) >= 0)
 		fail("oversized OOB size accepted");
 
 	printf("ok: YTMC full-ID whitelist, geometry and scan IDs verified\n");
