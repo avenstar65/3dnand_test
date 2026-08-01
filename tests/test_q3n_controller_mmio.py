@@ -4,7 +4,8 @@ import os
 import signal
 import subprocess
 import tempfile
-from q3n_qtest_protocol import StderrCapture, read_response
+from q3n_qtest_protocol import (ResponseBuffer, StderrCapture, cleanup_qtest,
+                                 read_response)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--qemu", required=True)
@@ -61,6 +62,7 @@ def require(value, message):
 proc = None
 stderr_capture = None
 media_path = None
+response_buffer = ResponseBuffer()
 try:
     with tempfile.NamedTemporaryFile(prefix="q3n-controller-qtest-",
                                      dir="/workspace/work", delete=False) as media:
@@ -81,7 +83,8 @@ try:
         proc.stdin.write((line + "\n").encode("ascii"))
         proc.stdin.flush()
         while True:
-            response = read_response(proc.stdout, line, 15, stderr_capture)
+            response = read_response(proc.stdout, line, 15, stderr_capture,
+                                     response_buffer)
             if response.startswith("IRQ "):
                 events.append(response)
             elif response.startswith("OK"):
@@ -226,19 +229,11 @@ try:
             "reset retry and cursor")
 finally:
     failure = None
-    if proc is not None and proc.poll() is None:
-        proc.send_signal(signal.SIGINT)
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=10)
-    if stderr_capture is not None:
-        stderr_capture.join()
+    teardown_errors = cleanup_qtest(proc, stderr_capture, media_path)
     if proc is not None and proc.returncode not in (0, -signal.SIGINT):
         failure = (stderr_capture.text() if stderr_capture is not None
                    else "<stderr capture was not initialized>")
-    if media_path is not None and os.path.exists(media_path):
-        os.unlink(media_path)
+    if teardown_errors:
+        failure = "qtest teardown failed: " + "; ".join(teardown_errors)
     if failure is not None:
         raise SystemExit(failure)
