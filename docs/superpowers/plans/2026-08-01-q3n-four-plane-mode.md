@@ -144,19 +144,21 @@ struct q3n {
 - Produces CLI: `scripts/configure-kernel.sh --q3n-mode identity|page-raid-2|page-raid-4|page-raid-8|multiplane`。
 - Default: no option means `identity`。
 
-- [ ] **Step 1: 写失败的配置契约测试**
+- [ ] **Step 1: 写失败的配置行为测试**
 
-`tests/test_q3n_multiplane_config.sh` 必须检查：
+`tests/test_q3n_multiplane_config.sh` 在临时目录准备 fake Linux tree、记录参数的
+fake `make` 和 fake `scripts/kconfig/merge_config.sh`，然后实际运行
+`configure-kernel.sh`。断言：
 
-```sh
-grep -Fq 'choice' "$kconfig"
-grep -Fq 'config MTD_NAND_QEMU_3DNAND_IDENTITY' "$kconfig"
-grep -Fq 'config MTD_NAND_QEMU_3DNAND_MULTIPLANE' "$kconfig"
-grep -Fq 'default MTD_NAND_QEMU_3DNAND_IDENTITY' "$kconfig"
-grep -Fq 'depends on MTD_NAND_QEMU_3DNAND_PAGE_RAID' "$kconfig"
-```
+- 不传 mode 时 merge 收到 identity fragment；
+- 五个 mode 分别选择唯一且正确的 fragment；
+- 三个 RAID mode 生成的配置分别得到 ratio 2/4/8；
+- identity/multi-plane 生成配置不含 RAID ratio；
+- 未知 mode 返回非零并给出可操作错误；
+- 第二次执行不会把另一个 mode 的选择残留进 `.config`。
 
-逐个 fragment 断言恰好一个模式为 `y`，Page RAID ratio 只出现在三个 RAID fragment；再对 `configure-kernel.sh` 断言五个 mode 名、默认 identity 和未知 mode 的错误分支存在。把测试加入 `scripts/smoke-test.sh`。
+测试观察脚本的参数、退出码和生成配置，不 `grep` 实现源码。把测试加入
+`scripts/smoke-test.sh`。真实 Kconfig choice 语义由 Task 9 五模式构建验证。
 
 - [ ] **Step 2: 运行并确认 RED**
 
@@ -166,7 +168,8 @@ Run:
 sh tests/test_q3n_multiplane_config.sh
 ```
 
-Expected: FAIL，因为 `MTD_NAND_QEMU_3DNAND_IDENTITY` 和 `...MULTIPLANE` 尚不存在。
+Expected: FAIL，因为 `configure-kernel.sh` 尚不接受 `--q3n-mode`，也没有五个
+mode fragments。
 
 - [ ] **Step 3: 实现 Kconfig choice**
 
@@ -725,21 +728,17 @@ git commit -m "feat: add QEMU Q3N four-plane engine"
 - QEMU exposes `Q3N_CAP_MULTIPLANE`、commands 9..13、registers `0xc4..0xe8`。
 - Q3NNandState stores MP address、done/fail、ECC selector/array；reset clears all MP state。
 
-- [ ] **Step 1: 写 Linux/QEMU ABI parity 和结构 RED test**
+- [ ] **Step 1: 写 Linux/QEMU ABI 编译与设备行为 RED test**
 
-`test_q3n_qemu_multiplane_abi.sh` 从 Linux regs header 和 QEMU public header 提取 macro/enum 数值，逐项断言 capability、五个 command 和十个 register 完全相同；再断言：
+`test_q3n_qemu_multiplane_abi.sh` 为 QEMU public header 创建最小 stub includes，
+分别编译 Linux regs header 和 QEMU header 的小程序；两个程序输出 capability、
+五个 command 和十个 register 的数值，测试比较字面输出完全相同。该测试验证
+实际 C 定义可编译且 ABI 一致，不解析或 `grep` 源码。
 
-```text
-QEMU data buffer >= 65536
-CAP read includes Q3N_CAP_MULTIPLANE
-execute switch contains commands 9..13
-MMIO read/write handles MP_DIE/BLOCK/PAGE/ECC_SELECT
-read path exposes masks and selected ECC
-reset calls q3n_multiplane_result_reset or equivalent explicit clear
-meson lists q3n-multiplane.c
-```
-
-把测试加入 smoke。
+DATA slice、mask/ECC selector、reset state 和五条 command 的行为继续由
+`test_q3n_qemu_multiplane.c` 的真实 engine 调用与 `test_q3n_hw_multiplane.c`
+的 fake-MMIO 交叉验证；meson 集成由本任务末尾真实 `build-qemu.sh` 验证。
+把 ABI test 加入 smoke。
 
 - [ ] **Step 2: 运行并确认 RED**
 
@@ -1064,11 +1063,17 @@ git commit -m "feat: register Q3N multi-plane NAND Core profile"
 - Overlay copies all new Linux/QEMU source and header files idempotently。
 - Matrix builds identity、RAID 2/4/8、multi-plane into separate build roots。
 
-- [ ] **Step 1: 写 overlay/matrix RED test**
+- [ ] **Step 1: 写 overlay/matrix RED 行为测试**
 
-`tests/test_scripts.sh` 的 fake Linux tree检查六个新 Linux files均被复制；fake QEMU tree检查 `q3n-multiplane.c/.h` 被复制到 `hw/block`，meson line恰好出现一次且包含新 `.c`。第二次 apply checksum不变。
+`tests/test_scripts.sh` 运行 overlay 脚本作用于 fake Linux/QEMU trees，断言六个
+Linux files、QEMU `q3n-multiplane.c/.h` 和有效 meson entry 的实际输出状态；
+第二次 apply 后 checksum 不变。
 
-同时断言 `scripts/q3n-kernel-matrix.sh` 列出五个 mode，并为每个 mode使用独立 `BUILD_DIR=$work_dir/build-matrix/$mode`，调用 compiled contract。
+对 matrix，在临时 fixture repo 中复制待测 `q3n-kernel-matrix.sh` 和
+`common.sh`，提供记录调用的 fake `uname`、`configure-kernel.sh`、`make` 和
+compiled-contract script，实际运行 matrix。断言调用日志恰好包含五个 mode、
+五个互不相同的 `BUILD_DIR=$work_dir/build-matrix/$mode`，且每个 build 后调用
+一次 compiled contract。测试不检查脚本文本。
 
 - [ ] **Step 2: 运行并确认 RED**
 
@@ -1160,21 +1165,22 @@ git commit -m "build: verify all Q3N storage modes"
 - Produces CLI: `scripts/run-qemu.sh --nand-mode identity|page-raid|multiplane [--nand-image path] [--fresh-nand]`。
 - Produces guest command: `mtd_q3n_multiplane_smoke` and `MTD_SMOKE=q3n-multiplane-smoke`。
 
-- [ ] **Step 1: 写 runtime/guest RED structure test**
+- [ ] **Step 1: 写 runtime/guest RED 行为测试**
 
-`tests/test_scripts.sh` 检查：
+`tests/test_scripts.sh` 用 fake `uname`、kernel artifacts、`.config`、QEMU binary
+和 image directory 实际运行 `run-qemu.sh`，从 fake QEMU 记录的 argv 断言：
 
-```text
---nand-mode documented and parsed
-multiplane default image is q3n-nand-multiplane.raw
-identity/page-raid default remains q3n-nand.raw
---nand-image remains supported
-mode is checked against built kernel .config
-rootfs init dispatches q3n-multiplane-smoke
-host wrapper passes --nand-mode multiplane
-```
+- `--nand-mode multiplane` 选择 `q3n-nand-multiplane.raw`；
+- identity/page-raid 选择旧 `q3n-nand.raw`；
+- `--nand-image` 覆盖路径但不改变 mode；
+- mode 与 `.config` 不匹配时 QEMU 未被调用且脚本失败；
+- `--fresh-nand` 只重置解析后的一个 image。
 
-Guest function marker必须包含 geometry literals、first/last page、cross-eraseblock、PLACE/RAW OOB、BBM、module reload等验收段。
+`rootfs/profile.d/mtd.sh` 提供由 `rootfs/init` 调用的
+`mtd_smoke_command_for()`；host test source 该文件并断言
+`q3n-multiplane-smoke` 映射到 `mtd_q3n_multiplane_smoke`。功能覆盖不靠源码
+marker，由本任务末尾真实 guest smoke 验证 first/last page、跨 eraseblock、
+PLACE/RAW OOB、BBM 和 module reload。
 
 - [ ] **Step 2: 运行并确认 RED**
 
@@ -1272,9 +1278,15 @@ git commit -m "test: add Q3N multi-plane guest smoke"
 - Produces guest stages: `q3n-multiplane-persist-prepare` and `q3n-multiplane-persist-verify`。
 - Uses only `work/media/q3n-nand-multiplane.raw`。
 
-- [ ] **Step 1: 写 persistence entry RED test**
+- [ ] **Step 1: 写 persistence entry RED 行为测试**
 
-结构测试断言两个 rootfs dispatch、两个 guest functions、host script两次都传 `--nand-mode multiplane`，且只有 prepare传 `--fresh-nand`。Host script必须解析并比较 `main_digest`、完整 4096-byte OOB digest和四 BBM结果。
+在临时 fixture repo 中运行真实 host persistence script，并用 fake
+`run-qemu.sh` 记录参数、生成 sparse multi-plane image、分别输出固定 prepare/
+verify digest与 BBM记录。断言两个 stage均传 `--nand-mode multiplane`、仅 prepare
+传 `--fresh-nand`、相同 digest/BBM成功、任一 main/OOB/BBM不一致时脚本失败。
+
+另外 source `rootfs/profile.d/mtd.sh` 并调用 `mtd_smoke_command_for()`，断言两个
+persistence stage映射到各自 guest函数。测试运行产物，不检查源码文本。
 
 - [ ] **Step 2: 运行并确认 RED**
 
@@ -1342,17 +1354,19 @@ git commit -m "test: verify Q3N multi-plane persistence"
 - Documentation must describe implemented code, not future design。
 - Final evidence covers host、five Linux modes、QEMU、MP guest、MP persistence、old RAID regression。
 
-- [ ] **Step 1: 写文档一致性 RED check**
+- [ ] **Step 1: 建立实现证据清单**
 
-在 `tests/test_q3n_qemu_multiplane_abi.sh` 增加对 register reference 的 exact command/register values、mask invariants、ECC-vs-fail语义和 DATA slice顺序检查。
-
-Run:
+人类阅读的寄存器文档不添加文本匹配测试。先保存以下已通过实现证据，作为
+文档逐项核对输入：
 
 ```bash
 sh tests/test_q3n_qemu_multiplane_abi.sh
+sh tests/test_q3n_qemu_multiplane.sh
+sh tests/test_q3n_hw_multiplane.sh
 ```
 
-Expected: FAIL，因为寄存器参考尚未记录 MP ABI。
+Expected: all exit 0，并输出已编译 ABI values、group mask/ECC behavior 和
+Linux MMIO sequencing 的字面结果。Task 12 属于文档同步，不要求人为制造 RED。
 
 - [ ] **Step 2: 更新寄存器与使用文档**
 
@@ -1435,7 +1449,7 @@ Expected: 第一条无未解释占位符；第二条无 driver-owned MTD/exec_op
 ```bash
 git add docs/qemu-3dnand-register-reference.md \
         docs/superpowers/specs/2026-08-01-q3n-four-plane-mode-design.md \
-        README.md tests/test_q3n_qemu_multiplane_abi.sh
+        README.md
 git commit -m "docs: document Q3N four-plane interface"
 ```
 
