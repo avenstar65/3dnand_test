@@ -179,6 +179,18 @@ assert_config_has 'CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE=y'
 assert_config_has '# CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID is not set'
 assert_config_lacks 'CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES=8'
 
+# A prior RAID mode already clears identity, so exercise the independent
+# identity-to-multiplane transition to ensure the multiplane fragment clears it.
+run_configure identity
+assert_config_has 'CONFIG_MTD_NAND_QEMU_3DNAND_IDENTITY=y'
+run_configure multiplane
+assert_config_has '# CONFIG_MTD_NAND_QEMU_3DNAND_IDENTITY is not set'
+assert_config_has '# CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID is not set'
+assert_config_has 'CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE=y'
+assert_config_lacks 'CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES=2'
+assert_config_lacks 'CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES=4'
+assert_config_lacks 'CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES=8'
+
 if LC_ALL=C PATH="$fake_bin:$PATH" LINUX_DIR="$linux_dir" BUILD_DIR="$build_root" \
 	Q3N_LINUX_PATCH_DIR="$empty_patches" FAKE_MERGE_LOG="$merge_log" \
 	sh "$repo_root/scripts/configure-kernel.sh" --q3n-mode unknown \
