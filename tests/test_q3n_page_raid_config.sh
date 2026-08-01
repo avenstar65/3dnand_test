@@ -44,6 +44,9 @@ check_profile()
 		fail "PAGE_RAID=$raid N=$data_pages omitted qemu_3dnand_page.o"
 	contains_word "$objects" qemu_3dnand_layout.o ||
 		fail "PAGE_RAID=$raid N=$data_pages omitted qemu_3dnand_layout.o"
+	if contains_word "$objects" qemu_3dnand_multiplane_layout.o; then
+		fail "PAGE_RAID=$raid N=$data_pages unexpectedly linked qemu_3dnand_multiplane_layout.o"
+	fi
 
 	if [ "$want_raid_object" = yes ]; then
 		contains_word "$objects" qemu_3dnand_page_raid.o ||
