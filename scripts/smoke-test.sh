@@ -6,6 +6,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 sh "$repo_root/tests/test_scripts.sh"
 sh "$repo_root/tests/test_q3n_overlay.sh"
 sh "$repo_root/tests/test_q3n_controller.sh"
+sh "$repo_root/tests/test_q3n_qemu_multiplane.sh"
 sh "$repo_root/tests/test_linux_patches.sh"
 sh "$repo_root/tests/test_q3n_page_raid_config.sh"
 sh "$repo_root/tests/test_q3n_multiplane_config.sh"
