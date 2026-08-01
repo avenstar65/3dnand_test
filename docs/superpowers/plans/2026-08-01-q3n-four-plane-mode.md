@@ -412,7 +412,9 @@ id_len=8, full ID unchanged, options still include NAND_NON_POWER_OF_2_GEOMETRY
 second entry all zero
 ```
 
-把 `tests/test_linux_patches.sh` 的 profile 增加 `last_block` 和 `bbt_bytes` 字段，消除当前 literal `1663/416`，再增加：
+把 `tests/test_linux_patches.sh` 的 profile 增加 `logical_blocks` 和
+`bbt_bytes` 字段，消除当前 literal `1663/416`；`check_profile()` 必须从非零
+`logical_blocks` 派生 `last_block = logical_blocks - 1`。再增加：
 
 ```c
 {
