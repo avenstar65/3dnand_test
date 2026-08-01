@@ -15,7 +15,10 @@ struct write_event {
 struct fake_mmio {
 	struct write_event writes[32];
 	size_t nwrites;
+	uint32_t reads[32];
+	size_t nreads;
 	uint32_t status;
+	uint32_t capabilities;
 	uint8_t id[8];
 	size_t id_pos;
 };
@@ -26,8 +29,16 @@ static uint32_t fake_read(void *context, uint32_t reg)
 	uint32_t value = 0;
 	size_t i;
 
+	if (fake->nreads >= sizeof(fake->reads) / sizeof(fake->reads[0])) {
+		fprintf(stderr, "FAIL: read log overflow\n");
+		exit(1);
+	}
+	fake->reads[fake->nreads++] = reg;
+
 	if (reg == Q3N_REG_STATUS)
 		return fake->status;
+	if (reg == Q3N_REG_CAP)
+		return fake->capabilities;
 	if (reg != Q3N_REG_DATA)
 		return 0;
 
@@ -68,6 +79,7 @@ int main(void)
 {
 	struct fake_mmio fake = {
 		.status = Q3N_STATUS_READY,
+		.capabilities = 0x12345670U,
 		.id = { 0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44 },
 	};
 	struct q3n q3n = {
@@ -80,6 +92,7 @@ int main(void)
 	uint8_t id[8] = { 0 };
 	uint8_t short_id[2] = { 0 };
 	uint8_t nand_status = 0;
+	size_t reads_before;
 	int ret;
 
 	ret = q3n_hw_read_id(&q3n, id, sizeof(id));
@@ -107,6 +120,18 @@ int main(void)
 	ret = q3n_hw_set_retry_mode(&q3n, 4);
 	if (ret >= 0 || fake.nwrites != 5) {
 		fprintf(stderr, "FAIL: invalid retry mode reached MMIO\n");
+		return 1;
+	}
+
+	reads_before = fake.nreads;
+	if (Q3N_CAP_MULTIPLANE != (1U << 4)) {
+		fprintf(stderr, "FAIL: multi-plane capability bit is wrong\n");
+		return 1;
+	}
+	if (q3n_hw_read_capabilities(&q3n) != fake.capabilities ||
+	    fake.nreads != reads_before + 1 ||
+	    fake.reads[reads_before] != Q3N_REG_CAP) {
+		fprintf(stderr, "FAIL: capabilities did not read CAP exactly\n");
 		return 1;
 	}
 

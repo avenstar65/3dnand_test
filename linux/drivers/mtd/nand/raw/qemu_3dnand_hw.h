@@ -4,6 +4,13 @@
 
 #include "qemu_3dnand_priv.h"
 
+u32 q3n_hw_reg_read(struct q3n *q3n, u32 reg);
+void q3n_hw_reg_write(struct q3n *q3n, u32 reg, u32 value);
+int q3n_hw_wait_ready_status(struct q3n *q3n, u32 *status);
+void q3n_hw_read_window(struct q3n *q3n, void *buffer, size_t length);
+void q3n_hw_write_window(struct q3n *q3n, const void *buffer, size_t length);
+u32 q3n_hw_read_capabilities(struct q3n *q3n);
+
 int q3n_hw_reset(struct q3n *q3n);
 int q3n_hw_read_id(struct q3n *q3n, u8 *id, size_t len);
 int q3n_hw_read_page(struct q3n *q3n, u32 page, void *data, void *oob,
