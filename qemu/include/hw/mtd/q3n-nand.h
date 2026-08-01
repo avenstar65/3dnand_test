@@ -21,7 +21,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(Q3NNandState, Q3N_NAND)
 #define Q3N_PCI_DEVICE_ID              0x003d
 #define Q3N_PCI_REVISION               0x01
 
-#define Q3N_MMIO_SIZE                 0x10000
+#define Q3N_MMIO_SIZE                 0x20000
 
 #define Q3N_DIES                      2
 #define Q3N_PLANES_PER_DIE            4
@@ -84,6 +84,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(Q3NNandState, Q3N_NAND)
 #define Q3N_CAP_PERSISTENT_MEDIA        (1U << 1)
 #define Q3N_CAP_BAD_BLOCK_MARKER        (1U << 2)
 #define Q3N_CAP_READ_RETRY              (1U << 3)
+#define Q3N_CAP_MULTIPLANE              (1U << 4)
 
 #define Q3N_BLOCK_STATUS_BAD            (1U << 0)
 #define Q3N_BLOCK_STATUS_ERASED         (1U << 1)
@@ -131,6 +132,16 @@ enum q3n_reg {
     Q3N_REG_STAT_LDPC_FAILED_STEPS = 0x00b8,
     Q3N_REG_READ_FLAGS         = 0x00bc,
     Q3N_REG_RETRY_MODE         = 0x00c0,
+    Q3N_REG_MP_DIE             = 0x00c4,
+    Q3N_REG_MP_BLOCK           = 0x00c8,
+    Q3N_REG_MP_PAGE            = 0x00cc,
+    Q3N_REG_MP_DONE_MASK       = 0x00d0,
+    Q3N_REG_MP_FAIL_MASK       = 0x00d4,
+    Q3N_REG_MP_ECC_SELECT      = 0x00d8,
+    Q3N_REG_MP_ECC_STATUS      = 0x00dc,
+    Q3N_REG_MP_ECC_MAX_BITFLIPS = 0x00e0,
+    Q3N_REG_MP_ECC_CORRECTED_BITS = 0x00e4,
+    Q3N_REG_MP_ECC_FAILED_STEP = 0x00e8,
     Q3N_REG_DATA               = 0x1000,
 };
 
@@ -147,6 +158,11 @@ enum q3n_cmd {
     Q3N_CMD_READ_PAGE_OOB = 6,
     Q3N_CMD_PROGRAM_PAGE_OOB = 7,
     Q3N_CMD_GET_BLOCK_STATUS = 8,
+    Q3N_CMD_MP_READ_PAGE = 9,
+    Q3N_CMD_MP_PROGRAM_PAGE = 10,
+    Q3N_CMD_MP_READ_OOB = 11,
+    Q3N_CMD_MP_PROGRAM_OOB = 12,
+    Q3N_CMD_MP_ERASE_GROUP = 13,
 };
 
 enum q3n_status {
