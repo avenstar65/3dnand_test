@@ -52,3 +52,11 @@ helper/init change.  Rootfs rebuild, focused test, shell syntax and host smoke
 were run.  README/register reference now distinguish synchronous current Page
 RAID (layout, parity program and one-page recovery) from the removed async
 scheduler/debugfs ABI.
+
+## Final documentation-value audit
+
+Corrected the implemented READ_ID to `9c d7 98 a6 51 33 4e 44`, `GEOM0` packed
+value to `0x04004000`, and the v2 image logical length to 116,549,226,496 B
+(sparse allocation remains smaller).  Non-raw single-page reads replace
+scalar ECC; raw single-page reads preserve it.  Multi-plane raw reads clear
+their per-plane ECC array without clearing scalar/global recent ECC.

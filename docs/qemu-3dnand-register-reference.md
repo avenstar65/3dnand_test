@@ -107,8 +107,9 @@
 | 2 | `Q3N_STATUS_ECC_UNCORRECTABLE` | 最近一次页读取存在不可纠正 LDPC 错误 |
 
 开始执行命令时，控制器清除 `READY` 和普通 `ERROR`。命令完成后重新置
-`READY`。新的 main 页读取或 RESET 会清除上一笔 ECC 结果；OOB-only
-读取不改变 ECC 结果。
+`READY`。非 raw `READ_PAGE` 会清除并以本次结果替换 scalar ECC；raw
+`READ_PAGE` 保留此前的 scalar ECC。RESET 清除 scalar ECC，OOB-only 读取
+不改变它。
 
 不可纠正 LDPC 错误使用 `Q3N_STATUS_ECC_UNCORRECTABLE` 和 ECC 结果寄存器
 报告，不等同于底层介质 I/O 失败。
@@ -139,7 +140,7 @@
 `READ_ID` 在 PIO buffer 中返回：
 
 ```text
-2c d7 90 a6 51 33 4e 44
+9c d7 98 a6 51 33 4e 44
 ```
 
 后四个字节的 ASCII 表示为 `Q3ND`。
@@ -251,13 +252,13 @@ bits [31:16] = logical OOB size
 当前值：
 
 ```text
-Q3N_REG_GEOM0 = 0x00804000
+Q3N_REG_GEOM0 = 0x04004000
 ```
 
 表示：
 
 - page size：`0x4000` = 16384 B；
-- logical OOB：`0x80` = 1024 B。
+- logical OOB：高 16 位为 `0x0400` = 1024 B。
 
 ### 7.2 GEOM1
 
@@ -406,7 +407,8 @@ Q3N_REG_ECC_GEOM1 = 0x00100060
 
 ## 13. ECC 读取结果
 
-每次 `READ_PAGE` 开始前，控制器清除旧 ECC 结果，读取完成后锁存：
+非 raw `READ_PAGE` 开始前清除旧 scalar ECC，读取完成后以本次结果锁存；
+raw `READ_PAGE` 保留先前的 scalar ECC 寄存器值：
 
 | 寄存器 | 说明 |
 | --- | --- |
@@ -422,6 +424,9 @@ Q3N_REG_ECC_GEOM1 = 0x00100060
 | 0 | `Q3N_ECC_STATUS_CLEAN` |
 | bit0 | `Q3N_ECC_STATUS_CORRECTED` |
 | bit1 | `Q3N_ECC_STATUS_UNCORRECTABLE` |
+
+这一规则只针对 single-page scalar ECC。multi-plane raw read 会清零其四个
+per-plane ECC array，但不会清除 single-page scalar/global 最近 ECC 寄存器。
 
 没有失败 step 时：
 

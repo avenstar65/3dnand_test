@@ -95,8 +95,9 @@ OOB、坏块标记和 bitflip overlay 会在 QEMU 正常退出后保留。需要
 ./scripts/run-qemu.sh --fresh-nand
 ```
 
-也可以用 `--nand-image PATH` 选择独立镜像。镜像是约 51 GiB 的固定布局 sparse
-raw 文件，实际只为 header、已写物理页和 overlay 分配空间。
+也可以用 `--nand-image PATH` 选择独立镜像。当前 v2 物理镜像的固定逻辑长度为
+116,549,226,496 B（约 108.5 GiB）；它仍是 sparse raw 文件，实际分配通常远小于
+逻辑长度，只包含 header、已写物理页和 overlay。
 
 four-plane mode 必须配合 multi-plane 内核配置，默认使用独立的
 `work/media/q3n-nand-multiplane.raw`，不会迁移、删除或复用旧镜像：
@@ -141,7 +142,9 @@ main 摘要和 block-isbad 状态跨重启保留，并验证坏块写擦拒绝�
 
 read retry 由 NAND Core 调度，共 4 个模式。QEMU 模型按模式提供
 `0/8/16/24` bit 的纠错增益；普通读更新 ECC 结果，raw read 返回原始受损数据
-且不改变最近一次 ECC 结果。自动化在 host 模型和驱动 callback 契约层覆盖
+且不改变最近一次 single-page scalar/global ECC 结果；multi-plane raw read
+则清零其 per-plane ECC array，但不清 scalar/global 最近结果。自动化在 host
+模型和驱动 callback 契约层覆盖
 40、41、49、57、65 bit 边界。
 
 自动执行 MTD smoke 并在成功后关闭虚拟机：
