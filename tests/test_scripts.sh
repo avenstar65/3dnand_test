@@ -206,4 +206,142 @@ grep -Fq "make|||-C $matrix_repo/linux/linux-7.0.12 O=$matrix_repo/work/build-ma
 [ "$(grep -c ' modules$' "$matrix_log")" -eq 5 ] ||
 	fail "matrix did not rebuild Q3N through a complete module target for every mode"
 
+# run-qemu mode selection is exercised through a fake QEMU binary.  These are
+# boundary tests: the script must resolve one image, verify the selected
+# kernel profile before launch, and leave unrelated media untouched.
+runtime_root="$test_dir/runtime"
+runtime_bin="$runtime_root/bin"
+runtime_work="$runtime_root/work"
+runtime_linux="$runtime_root/linux/linux-7.0.12"
+runtime_qemu_log="$runtime_root/qemu.argv"
+mkdir -p "$runtime_bin" "$runtime_linux" \
+	"$runtime_work/build/qemu-11.0.2" \
+	"$runtime_work/build/linux-7.0.12/arch/x86/boot" \
+	"$runtime_work/rootfs"
+runtime_media_dir=$(CDPATH= cd -- "$runtime_work" && pwd -P)/media
+: >"$runtime_work/build/linux-7.0.12/arch/x86/boot/bzImage"
+: >"$runtime_work/rootfs/initramfs.cpio.gz"
+cat >"$runtime_bin/uname" <<'EOF'
+#!/usr/bin/env sh
+printf '%s\n' Linux
+EOF
+cat >"$runtime_work/build/qemu-11.0.2/qemu-system-x86_64-unsigned" <<'EOF'
+#!/usr/bin/env sh
+printf '%s\n' "$@" >>"$Q3N_TEST_QEMU_LOG"
+EOF
+chmod +x "$runtime_bin/uname" \
+	"$runtime_work/build/qemu-11.0.2/qemu-system-x86_64-unsigned"
+
+run_qemu_fixture() {
+	PATH="$runtime_bin:$PATH" Q3N_TEST_QEMU_LOG="$runtime_qemu_log" \
+	WORK_DIR="$runtime_work" LINUX_DIR="$runtime_linux" \
+	sh "$repo_root/scripts/run-qemu.sh" "$@"
+}
+
+printf '%s\n' 'CONFIG_MTD_NAND_QEMU_3DNAND_IDENTITY=y' \
+	>"$runtime_work/build/linux-7.0.12/.config"
+: >"$runtime_qemu_log"
+run_qemu_fixture
+grep -Fqx "driver=file,filename=$runtime_media_dir/q3n-nand.raw,node-name=q3n-file" \
+	"$runtime_qemu_log" || fail "identity mode did not select the legacy image"
+
+printf '%s\n' 'CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID=y' \
+	>"$runtime_work/build/linux-7.0.12/.config"
+: >"$runtime_qemu_log"
+run_qemu_fixture --nand-mode page-raid
+grep -Fqx "driver=file,filename=$runtime_media_dir/q3n-nand.raw,node-name=q3n-file" \
+	"$runtime_qemu_log" || fail "page-raid mode did not retain the legacy image"
+
+printf '%s\n' 'CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE=y' \
+	>"$runtime_work/build/linux-7.0.12/.config"
+printf 'legacy-image-must-survive\n' >"$runtime_work/media/q3n-nand.raw"
+printf 'stale-multiplane\n' >"$runtime_work/media/q3n-nand-multiplane.raw"
+: >"$runtime_qemu_log"
+run_qemu_fixture --nand-mode multiplane --fresh-nand
+grep -Fqx "driver=file,filename=$runtime_media_dir/q3n-nand-multiplane.raw,node-name=q3n-file" \
+	"$runtime_qemu_log" || fail "multiplane mode did not select its dedicated image"
+[ "$(cat "$runtime_work/media/q3n-nand.raw")" = 'legacy-image-must-survive' ] ||
+	fail "fresh multiplane mode changed the legacy image"
+[ ! -s "$runtime_work/media/q3n-nand-multiplane.raw" ] ||
+	fail "fresh multiplane mode did not reset only its resolved image"
+
+explicit_image="$runtime_work/media/explicit NAND.raw"
+explicit_image_canonical="$runtime_media_dir/explicit NAND.raw"
+printf 'explicit-stale\n' >"$explicit_image"
+: >"$runtime_qemu_log"
+run_qemu_fixture --nand-mode multiplane --nand-image "$explicit_image" --fresh-nand
+grep -Fqx "driver=file,filename=$explicit_image_canonical,node-name=q3n-file" \
+	"$runtime_qemu_log" || fail "explicit NAND image did not override the path"
+[ ! -s "$explicit_image" ] || fail "fresh did not reset the explicit image"
+[ "$(cat "$runtime_work/media/q3n-nand.raw")" = 'legacy-image-must-survive' ] ||
+	fail "fresh explicit mode changed another image"
+
+printf '%s\n' 'CONFIG_MTD_NAND_QEMU_3DNAND_IDENTITY=y' \
+	>"$runtime_work/build/linux-7.0.12/.config"
+rm -f "$runtime_qemu_log"
+if run_qemu_fixture --nand-mode multiplane; then
+	fail "multiplane launch accepted an identity kernel config"
+fi
+[ ! -e "$runtime_qemu_log" ] ||
+	fail "mode/config mismatch launched QEMU"
+
+. "$repo_root/rootfs/profile.d/mtd.sh"
+mtd_q3n_multiplane_smoke() { printf 'guest-multiplane-command-ran\n'; }
+guest_command=$(mtd_smoke_command_for q3n-multiplane-smoke) ||
+	fail "multiplane guest stage did not resolve"
+[ "$guest_command" = mtd_q3n_multiplane_smoke ] ||
+	fail "multiplane guest stage resolved the wrong command"
+[ "$("$guest_command")" = guest-multiplane-command-ran ] ||
+	fail "resolved multiplane guest command did not execute"
+
+wrapper_repo="$test_dir/multiplane-wrapper"
+wrapper_log="$wrapper_repo/run-qemu.argv"
+mkdir -p "$wrapper_repo/scripts/lib" "$wrapper_repo/work"
+cp "$repo_root/scripts/lib/common.sh" "$wrapper_repo/scripts/lib/common.sh"
+[ -f "$repo_root/scripts/q3n-multiplane-smoke.sh" ] ||
+	fail "multiplane host wrapper is missing"
+cp "$repo_root/scripts/q3n-multiplane-smoke.sh" \
+	"$wrapper_repo/scripts/q3n-multiplane-smoke.sh"
+[ -f "$repo_root/scripts/q3n-multiplane-media-verify.sh" ] ||
+	fail "multiplane media verifier is missing"
+cp "$repo_root/scripts/q3n-multiplane-media-verify.sh" \
+	"$wrapper_repo/scripts/q3n-multiplane-media-verify.sh"
+cat >"$wrapper_repo/scripts/run-qemu.sh" <<'EOF'
+#!/usr/bin/env sh
+printf '%s\n' "$@" >"$Q3N_TEST_WRAPPER_LOG"
+printf '%s\n' 'q3n multi-plane guest complete logical_block=3 die=1 block_in_plane=1 page=0 main_digest=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+printf '%s\n' 'MTD smoke 测试通过，关闭虚拟机'
+EOF
+cat >"$wrapper_repo/scripts/q3n-multiplane-media-verify.sh" <<'EOF'
+#!/usr/bin/env sh
+printf '%s\n' "$@" >"$Q3N_TEST_VERIFY_LOG"
+[ "${Q3N_TEST_VERIFY_FAIL:-0}" = 0 ] || exit 1
+EOF
+chmod +x "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" \
+	"$wrapper_repo/scripts/run-qemu.sh" \
+	"$wrapper_repo/scripts/q3n-multiplane-media-verify.sh"
+verify_log="$wrapper_repo/verify.argv"
+Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
+	WORK_DIR="$wrapper_repo/work" \
+	sh "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" >/dev/null
+grep -Fqx -- --nand-mode "$wrapper_log" ||
+	fail "multiplane wrapper omitted the NAND mode flag"
+grep -Fqx multiplane "$wrapper_log" || fail "multiplane wrapper selected wrong mode"
+grep -Fqx -- --fresh-nand "$wrapper_log" ||
+	fail "multiplane wrapper omitted fresh media reset"
+grep -Fqx 'MTD_SMOKE=q3n-multiplane-smoke' "$wrapper_log" ||
+	fail "multiplane wrapper omitted the guest smoke stage"
+grep -Fqx -- --logical-block "$verify_log" ||
+	fail "multiplane verifier did not receive the logical block"
+grep -Fqx 3 "$verify_log" || fail "multiplane verifier selected wrong block"
+grep -Fqx -- --expected-erased-digest "$verify_log" ||
+	fail "multiplane verifier did not receive the NAND Core erase digest"
+grep -Fqx 71189f7fb6aed638640078fba3a35fda6c39c8962e74dcc75935aac948da9063 \
+	"$verify_log" || fail "multiplane verifier received the wrong erase digest"
+if Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
+	Q3N_TEST_VERIFY_FAIL=1 WORK_DIR="$wrapper_repo/work" \
+	sh "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" >/dev/null 2>&1; then
+	fail "multiplane wrapper accepted a lower-level digest mismatch"
+fi
+
 printf 'ok: Q3N Linux/QEMU overlays and isolated storage-mode matrix verified\n'

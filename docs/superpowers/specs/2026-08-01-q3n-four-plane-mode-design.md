@@ -510,6 +510,12 @@ bad。其他 plane slice 中的原始 BBM byte 保持可见。
 RAM BBT 每个 logical block group 使用一个 entry。416 个 block、每 block
 两 bit 时，BBT 数据为 104 bytes。驱动不维护另一份坏块表。
 
+`MEMSETBADBLOCK` 的 generic NAND Core 路径由
+`nand_block_markbad_lowlevel()` 实现；它会在写 BBM/更新 BBT 前调用
+`nand_erase_nand()`。因此 multi-plane 验收不把 markbad 后的 main 保持作为
+契约：应验证四个 BBM、重载后的 BBT 与物理 group 的擦除态。这个规则不改变
+普通 OOB-only program 不修改 main 的约束。
+
 ### 10.5 ERASE
 
 ```mermaid

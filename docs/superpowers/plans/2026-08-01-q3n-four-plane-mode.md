@@ -1216,7 +1216,7 @@ oobavail=4092 (从 sysfs 或 mtdinfo 可观察值)
 3. 擦最后 block 415，写读 page 665599。
 4. `mtd_badblock page-write/page-read` 分别验证 PLACE 和 RAW main+4096 OOB。
 5. 首页 raw OOB向 offset 1024写 `0x00`，断言 logical offset 0及四个 BBM offsets读回 `00`，`MEMGETBADBLOCK`返回 bad。
-6. 在另一个 block program first-page main，记录 digest，执行 `MEMSETBADBLOCK`，断言 main digest不变且四 BBM均为 00。
+6. 在另一个 block program first-page main，记录 digest，执行 `MEMSETBADBLOCK`，断言四 BBM均为 `00`；generic NAND Core 的 `nand_block_markbad_lowlevel()` 会先调用 `nand_erase_nand()`，因此不要求标坏后 main 保持。guest 应确认正常/raw MTD 访问该 bad block 被拒绝，host 使用独立 QEMU MMIO raw read 确认四-plane main 为 64 KiB `0xff` 的固定 digest。
 7. `modprobe -r qemu_3dnand; modprobe qemu_3dnand` 后重新查 MTD，断言 bad group仍被 NAND Core BBT观察。
 
 函数失败路径只清临时文件，不修改旧 image。最终输出唯一 marker `q3n multi-plane smoke passed`。
@@ -1469,7 +1469,7 @@ git commit -m "docs: document Q3N four-plane interface"
 - [ ] MP PROGRAM对全 `0xff` slice不跳写；identity/Page RAID的原全 `0xff`优化不变。
 - [ ] QEMU合法命令 masks union为0x0f且互斥；预校验失败masks为0且介质不变；partial failure可观测且不rollback。
 - [ ] ECC uncorrectable只进入per-plane ECC；每个 retry mode重读完整group，corrected=sum、max bitflips=max、failed plane mask准确。
-- [ ] 首页四 BBM读AND、写归一化；任一 plane bad使logical group bad；markbad不改变main；NAND Core BBT重扫可见。
+- [ ] 首页四 BBM读AND、写归一化；任一 plane bad使logical group bad；NAND Core markbad 擦除后 BBM/BBT重扫可见，host raw 验证为擦除态。
 - [ ] `cmdfunc/waitfunc`、NAND Core bad-block/BBT和patch-only精确几何路径保持。
 - [ ] QEMU一次group command只产生一次READY/completion IRQ；文档不声称真实并行性能、回滚或掉电原子性。
 - [ ] identity、RAID 2:1/4:1/8:1、multi-plane五个隔离构建通过。
