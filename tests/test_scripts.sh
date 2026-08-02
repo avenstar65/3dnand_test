@@ -560,6 +560,16 @@ printf 'q3n multi-plane persistence %s passed\n' "$stage_name"
 	if [ "$kind" = expected ]; then other_stage=verify; else other_stage=prepare; fi
 	printf 'q3n multi-plane persistence %s passed\n' "$other_stage"
 }
+if [ "${Q3N_TEST_PERSIST_CROSS_NAMESPACE:-}" = "$kind" ]; then
+	if [ "$kind" = expected ]; then other_stage=verify; else other_stage=prepare; fi
+	case "${Q3N_TEST_PERSIST_CROSS_NAMESPACE_VARIANT:-failed}" in
+		failed) printf 'q3n multi-plane persistence %s failed\n' "$other_stage" ;;
+		injected) printf 'q3n multi-plane persistence %s injected\n' "$other_stage" ;;
+		prefixed) printf 'injected q3n multi-plane persistence %s failed\n' "$other_stage" ;;
+		suffixed) printf 'q3n multi-plane persistence %s passed injected\n' "$other_stage" ;;
+		*) exit 95 ;;
+	esac
+fi
 [ "${Q3N_TEST_PERSIST_PREFIXED:-}" != "$kind" ] ||
 	printf 'injected q3n multi-plane persistence %s main_digest=%s oob_digest=%s bbm=%s\n' "$kind" "$main" "$oob" "$bbm"
 if [ "${Q3N_TEST_PERSIST_LEGACY_STAGE:-}" = "$kind" ]; then
@@ -570,6 +580,27 @@ if [ "${Q3N_TEST_PERSIST_LEGACY_STAGE:-}" = "$kind" ]; then
 			mv "$Q3N_TEST_PERSIST_OLD" "$Q3N_TEST_PERSIST_OLD.replaced"
 			printf replacement >"$Q3N_TEST_PERSIST_OLD"
 			;;
+	esac
+fi
+if [ "${Q3N_TEST_PERSIST_LEGACY_RESTORE_STAGE:-}" = "$kind" ]; then
+	case "${Q3N_TEST_PERSIST_LEGACY_RESTORE_ACTION:-}" in
+		mutate-restore)
+			if [ "$kind" = expected ]; then
+				cp "$Q3N_TEST_PERSIST_OLD" "$Q3N_TEST_PERSIST_OLD.saved"
+				printf x >>"$Q3N_TEST_PERSIST_OLD"
+			else
+				mv "$Q3N_TEST_PERSIST_OLD.saved" "$Q3N_TEST_PERSIST_OLD"
+			fi
+			;;
+		replace-restore)
+			if [ "$kind" = expected ]; then
+				mv "$Q3N_TEST_PERSIST_OLD" "$Q3N_TEST_PERSIST_OLD.saved"
+				printf replacement >"$Q3N_TEST_PERSIST_OLD"
+			else
+				mv "$Q3N_TEST_PERSIST_OLD.saved" "$Q3N_TEST_PERSIST_OLD"
+			fi
+			;;
+		*) exit 96 ;;
 	esac
 fi
 printf '%s\n' 'MTD smoke 测试通过，关闭虚拟机'
@@ -620,6 +651,17 @@ if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_CROSS_STAGE=verified \
 	fail "persistence wrapper accepted a prepare success stage during verify"
 fi
 for persist_phase in expected verified; do
+	for persist_variant in failed injected prefixed suffixed; do
+		if Q3N_TEST_PERSIST_LOG="$persist_log" \
+			Q3N_TEST_PERSIST_CROSS_NAMESPACE="$persist_phase" \
+			Q3N_TEST_PERSIST_CROSS_NAMESPACE_VARIANT="$persist_variant" \
+			WORK_DIR="$persist_repo/work" \
+			sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+			fail "persistence wrapper accepted opposite stage namespace $persist_variant during $persist_phase"
+		fi
+	done
+done
+for persist_phase in expected verified; do
 	if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_DUPLICATE="$persist_phase" \
 		WORK_DIR="$persist_repo/work" \
 		sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
@@ -649,6 +691,42 @@ for persist_action in mutate remove replace; do
 		fi
 	done
 done
+for persist_action in mutate-restore replace-restore; do
+	: >"$persist_log"
+	printf 'legacy-image-must-survive\n' >"$persist_old"
+	if Q3N_TEST_PERSIST_LOG="$persist_log" \
+		Q3N_TEST_PERSIST_OLD="$persist_old" \
+		Q3N_TEST_PERSIST_LEGACY_RESTORE_ACTION="$persist_action" \
+		Q3N_TEST_PERSIST_LEGACY_RESTORE_STAGE=expected \
+		WORK_DIR="$persist_repo/work" \
+		sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+		fail "persistence wrapper accepted legacy $persist_action across boot boundary"
+	fi
+[ "$(grep -Ec '^stage=q3n-multiplane-persist-prepare ' "$persist_log")" = 1 ] ||
+		fail "legacy $persist_action did not reach prepare boundary"
+[ "$(grep -Ec '^stage=q3n-multiplane-persist-verify ' "$persist_log")" = 0 ] ||
+		fail "legacy $persist_action was not rejected before verify"
+done
+: >"$persist_log"
+printf 'legacy-image-must-survive\n' >"$persist_old"
+if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_OLD="$persist_old" \
+	Q3N_TEST_PERSIST_LEGACY_ACTION=mutate \
+	Q3N_TEST_PERSIST_LEGACY_STAGE=verified WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted legacy mutation during verify"
+fi
+[ "$(grep -Ec '^stage=q3n-multiplane-persist-prepare ' "$persist_log")" = 1 ] &&
+	[ "$(grep -Ec '^stage=q3n-multiplane-persist-verify ' "$persist_log")" = 1 ] ||
+	fail "legacy verify mutation did not fail at the verify boundary"
+printf 'legacy-symlink-target\n' >"$persist_old.target"
+rm -f -- "$persist_old"
+ln -s "$(basename -- "$persist_old.target")" "$persist_old"
+if Q3N_TEST_PERSIST_LOG="$persist_log" WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted a symlinked legacy image"
+fi
+rm -f -- "$persist_old"
+printf 'legacy-image-must-survive\n' >"$persist_old"
 if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_MAIN=bad \
 	WORK_DIR="$persist_repo/work" \
 	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then

@@ -95,8 +95,8 @@ run_stage()
 		"q3n multi-plane persistence stage success"
 	require_none "$log" "q3n multi-plane persistence $other_record" \
 		"q3n multi-plane persistence $other_record record"
-	require_none "$log" "q3n multi-plane persistence $other_completion passed" \
-		"q3n multi-plane persistence $other_completion stage success"
+	require_none "$log" "q3n multi-plane persistence $other_completion" \
+		"q3n multi-plane persistence $other_completion stage namespace"
 	require_one "$log" '^MTD smoke 测试通过，关闭虚拟机$' '^MTD smoke' \
 		"q3n multi-plane guest success"
 	require_one "$log" \
@@ -122,22 +122,46 @@ metadata_field()
 }
 
 legacy_nand_image="$work_dir/media/q3n-nand.raw"
+[ ! -L "$legacy_nand_image" ] ||
+	die "legacy q3n NAND image must not be a symlink: $legacy_nand_image"
 [ -f "$legacy_nand_image" ] ||
 	die "legacy q3n NAND image is missing: $legacy_nand_image"
 legacy_dir=$(CDPATH= cd -- "$(dirname -- "$legacy_nand_image")" && pwd -P)
 legacy_nand_image="$legacy_dir/$(basename -- "$legacy_nand_image")"
-legacy_nand_before="$legacy_nand_image:$(image_fingerprint "$legacy_nand_image")" ||
+[ "$(basename -- "$legacy_nand_image")" = q3n-nand.raw ] ||
+	die "legacy q3n NAND image has an unexpected basename: $legacy_nand_image"
+[ ! -L "$legacy_nand_image" ] && [ -f "$legacy_nand_image" ] ||
+	die "legacy q3n NAND image is not a canonical regular file: $legacy_nand_image"
+
+legacy_fingerprint()
+{
+	[ ! -L "$legacy_nand_image" ] && [ -f "$legacy_nand_image" ] ||
+		return 1
+	printf '%s:%s\n' "$legacy_nand_image" "$(image_fingerprint "$legacy_nand_image")"
+}
+
+legacy_prepare_before=$(legacy_fingerprint) ||
 	die "legacy q3n NAND image stat failed before prepare"
+printf 'q3n multi-plane persistence legacy prepare-before=%s\n' "$legacy_prepare_before"
 
 run_stage q3n-multiplane-persist-prepare "$prepare_log" 1 expected prepare
-run_stage q3n-multiplane-persist-verify "$verify_log" 0 verified verify
+legacy_prepare_after=$(legacy_fingerprint) ||
+	die "legacy q3n NAND image stat failed after prepare"
+printf 'q3n multi-plane persistence legacy prepare-after=%s\n' "$legacy_prepare_after"
+[ "$legacy_prepare_after" = "$legacy_prepare_before" ] ||
+	die "legacy q3n NAND image changed during prepare"
 
-[ -f "$legacy_nand_image" ] ||
-	die "legacy q3n NAND image is missing after verify"
-legacy_nand_after="$legacy_nand_image:$(image_fingerprint "$legacy_nand_image")" ||
+legacy_verify_before=$(legacy_fingerprint) ||
+	die "legacy q3n NAND image stat failed before verify"
+printf 'q3n multi-plane persistence legacy verify-before=%s\n' "$legacy_verify_before"
+[ "$legacy_verify_before" = "$legacy_prepare_before" ] ||
+	die "legacy q3n NAND image changed between persistence boots"
+run_stage q3n-multiplane-persist-verify "$verify_log" 0 verified verify
+legacy_verify_after=$(legacy_fingerprint) ||
 	die "legacy q3n NAND image stat failed after verify"
-[ "$legacy_nand_after" = "$legacy_nand_before" ] ||
-	die "legacy q3n NAND image changed during persistence smoke"
+printf 'q3n multi-plane persistence legacy verify-after=%s\n' "$legacy_verify_after"
+[ "$legacy_verify_after" = "$legacy_verify_before" ] ||
+	die "legacy q3n NAND image changed during verify"
 
 prepare_line=$(sed 's/\r$//' "$prepare_log" | grep -E \
 	'^q3n multi-plane persistence expected main_digest=[0-9a-f]{64} oob_digest=[0-9a-f]{64} bbm=[0-9a-f]{8}$')

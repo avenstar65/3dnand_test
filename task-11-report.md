@@ -95,3 +95,30 @@ q3n multi-plane persistence verified main_digest=944044fe482bc4e91085c15c5a923a1
 [    2.219763] reboot: Power down
 legacy_after=/Users/yangyu/Documents/3dnand-nand-core-ecc-read-retry-worktree/work/media/q3n-nand.raw:82254988:116549226496:1785342127:345728
 ```
+
+## Review round 2 — boot boundaries and namespace hardening
+
+- The wrapper rejects the entire opposite phase namespace, rather than only
+  its exact `passed` line.  Thus a prepare log cannot contain any
+  `q3n multi-plane persistence verify...` line, and vice versa, whether the
+  line is failed, injected, malformed, prefixed, or suffixed.
+- The canonical, non-symlink regular legacy image is fingerprinted at four
+  boundaries: prepare-before, prepare-after, verify-before, and verify-after.
+  All four values must be identical.  This deliberately observes changes made
+  by either completed `run-qemu` invocation; no host-side stat can observe a
+  transient change that is restored before that same invocation returns.
+- RED: the previous wrapper accepted `q3n multi-plane persistence verify
+  failed` during prepare.  GREEN behavior coverage rejects four opposite
+  namespace variants in both directions, mutation/replacement in prepare
+  that an old wrapper could restore during verify, a verify mutation, and a
+  final-component legacy symlink.
+- Fresh real two-boot evidence:
+
+```text
+q3n multi-plane persistence legacy prepare-before=/Users/yangyu/Documents/3dnand-nand-core-ecc-read-retry-worktree/work/media/q3n-nand.raw:82254988:116549226496:1785342127:345728
+q3n multi-plane persistence legacy prepare-after=/Users/yangyu/Documents/3dnand-nand-core-ecc-read-retry-worktree/work/media/q3n-nand.raw:82254988:116549226496:1785342127:345728
+q3n multi-plane persistence legacy verify-before=/Users/yangyu/Documents/3dnand-nand-core-ecc-read-retry-worktree/work/media/q3n-nand.raw:82254988:116549226496:1785342127:345728
+q3n multi-plane persistence legacy verify-after=/Users/yangyu/Documents/3dnand-nand-core-ecc-read-retry-worktree/work/media/q3n-nand.raw:82254988:116549226496:1785342127:345728
+q3n multi-plane persistence expected main_digest=944044fe482bc4e91085c15c5a923a1b9e02eac98d3bce04997d6dbecd2a5b8d oob_digest=f0f9ce8608610d597e3416195182a2d1f47d53cf00f1e72e3824a5bc3bfa7ce8 bbm=00000000
+q3n multi-plane persistence verified main_digest=944044fe482bc4e91085c15c5a923a1b9e02eac98d3bce04997d6dbecd2a5b8d oob_digest=f0f9ce8608610d597e3416195182a2d1f47d53cf00f1e72e3824a5bc3bfa7ce8 bbm=00000000
+```
