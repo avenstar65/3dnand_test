@@ -25,6 +25,10 @@ Base: `29eff25`.
   then that full OOB pattern I/O was absent.  It now executes the guest command
   boundary and verifies full-4096-byte PLACE/RAW pattern operations and both
   normal and RAW marked-block MEMREAD rejection paths.
+- Review round 2 closes the remaining shutdown-log ambiguity: the wrapper now
+  requires exactly one total `reboot: Power down` record and exactly one
+  anchored kernel-format record.  RED fixtures covered a valid line plus a
+  suffixed injected line and two exact valid lines; both are rejected.
 - `sh scripts/smoke-test.sh` passed after the host changes.
 
 ## Implemented acceptance path

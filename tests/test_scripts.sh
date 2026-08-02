@@ -321,6 +321,10 @@ fi
 if [ "${Q3N_TEST_NO_POWERDOWN:-0}" = 0 ]; then
   printf '%s\n' '[    3.433730] reboot: Power down'
 fi
+[ "${Q3N_TEST_DUPLICATE_POWERDOWN:-0}" = 0 ] || \
+  printf '%s\n' '[    3.433730] reboot: Power down'
+[ "${Q3N_TEST_MALFORMED_POWERDOWN:-0}" = 0 ] || \
+  printf '%s\n' '[    3.433730] reboot: Power down injected'
 EOF
 cat >"$wrapper_repo/scripts/q3n-multiplane-media-verify.sh" <<'EOF'
 #!/usr/bin/env sh
@@ -390,6 +394,16 @@ if Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
 	Q3N_TEST_NO_POWERDOWN=1 WORK_DIR="$wrapper_repo/work" \
 	sh "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" >/dev/null 2>&1; then
 	fail "multiplane wrapper accepted missing kernel powerdown"
+fi
+if Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
+	Q3N_TEST_DUPLICATE_POWERDOWN=1 WORK_DIR="$wrapper_repo/work" \
+	sh "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" >/dev/null 2>&1; then
+	fail "multiplane wrapper accepted duplicate kernel powerdown"
+fi
+if Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
+	Q3N_TEST_MALFORMED_POWERDOWN=1 WORK_DIR="$wrapper_repo/work" \
+	sh "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" >/dev/null 2>&1; then
+	fail "multiplane wrapper accepted injected kernel powerdown"
 fi
 if Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
 	Q3N_TEST_NO_SUCCESS_STAGE=1 WORK_DIR="$wrapper_repo/work" \

@@ -34,8 +34,10 @@ success_exact_count=$(line_count '^MTD smoke 测试通过，关闭虚拟机$')
 success_prefix_count=$(line_count '^MTD smoke')
 [ "$success_exact_count" = 1 ] && [ "$success_prefix_count" = 1 ] ||
   die "q3n multi-plane guest success stage must appear exactly once"
-powerdown_count=$(line_count '^\[[[:space:]]*[0-9][0-9]*\.[0-9][0-9]*\] reboot: Power down$')
-[ "$powerdown_count" = 1 ] || die "q3n multi-plane kernel powerdown marker missing"
+powerdown_exact_count=$(line_count '^\[[[:space:]]*[0-9][0-9]*\.[0-9][0-9]*\] reboot: Power down$')
+powerdown_prefix_count=$(line_count 'reboot: Power down')
+[ "$powerdown_exact_count" = 1 ] && [ "$powerdown_prefix_count" = 1 ] ||
+  die "q3n multi-plane kernel powerdown record must appear exactly once"
 
 guest_line=$(sed 's/\r$//' "$log" | grep -E "$guest_pattern")
 logical_block=$(printf '%s\n' "$guest_line" | sed -n 's/.* logical_block=\([0-9][0-9]*\) .*/\1/p')
