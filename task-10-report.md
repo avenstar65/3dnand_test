@@ -15,6 +15,16 @@ Base: `29eff25`.
   it does not grep implementation markers.
 - The wrapper test supplies guest metadata to a fake verifier and proves a
   verifier nonzero exit (digest mismatch) prevents the final pass marker.
+- Review round 1 added RED/GREEN behavior coverage for duplicate or malformed
+  guest metadata, missing kernel powerdown, inconsistent topology, unexpected
+  pre-mark digest, and a verifier that mutates its base image.  The wrapper
+  accepts exactly one anchored guest-complete record and one success-stage
+  record, requires the actual kernel `reboot: Power down` record, and compares
+  base-image inode/size/mtime/allocated-block fingerprints around verification.
+- A guest fixture first proved that an unexpected pre-mark digest was accepted,
+  then that full OOB pattern I/O was absent.  It now executes the guest command
+  boundary and verifies full-4096-byte PLACE/RAW pattern operations and both
+  normal and RAW marked-block MEMREAD rejection paths.
 - `sh scripts/smoke-test.sh` passed after the host changes.
 
 ## Implemented acceptance path
@@ -35,6 +45,12 @@ The host then starts built QEMU in qtest mode against the same image, issues a
 raw multi-plane MMIO read for the recorded logical group, reconstructs all
 four 16 KiB slices, and verifies the known SHA-256 for 64 KiB of erased
 `0xff` bytes before printing the single final marker.
+
+PLACE and RAW use the acceptance helper's `page-pattern-*` operations: every
+one of the 4096 OOB bytes is compared against a deterministic pattern, while
+the four BBM offsets `0/1024/2048/3072` stay `ff` in their good blocks.  The
+markbad test confirms both PLACE (normal `MEMREAD`) and RAW `MEMREAD` reject
+the block after `MEMSETBADBLOCK`.
 
 ## Real guest evidence and NAND Core markbad semantics
 
@@ -76,6 +92,17 @@ Its final host lines were:
 q3n multi-plane media erase verified logical_block=3 main_digest=71189f7fb6aed638640078fba3a35fda6c39c8962e74dcc75935aac948da9063
 q3n multi-plane smoke passed
 ```
+
+The qtest verifier launches QEMU with `-snapshot`, because this device
+requires a writable block node even for the read command.  It records the
+same base-image fingerprint before and after qtest; the wrapper repeats that
+comparison and rejects any mutation.  The snapshot overlay lets the actual
+qtest read proceed without persisting a base-image write.
+
+An additional direct verifier run preserved the multi-plane base fingerprint
+`82866920:116549226496:1785642841:2304768` (inode:size:mtime:allocated
+512-byte blocks) exactly before and after.  The legacy image still has its
+recorded `82254988:116549226496:1785342127:345728` fingerprint.
 
 ## Artifacts and preservation
 

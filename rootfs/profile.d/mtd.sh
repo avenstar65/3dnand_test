@@ -123,16 +123,18 @@ mtd_q3n_multiplane_smoke() {
   flash_erase -q "$mtd_dev" 0 1 || return 1
   mtd_badblock page-write raw "$mtd_dev" 0 0x31 128 1 0xa1 || return 1
   mtd_badblock page-read raw "$mtd_dev" 0 0x31 128 1 0xa1 || return 1
-  mtd_badblock page-write place "$mtd_dev" "$page1599_offset" \
-    0x32 128 1 0xa2 || return 1
-  mtd_badblock page-read place "$mtd_dev" "$page1599_offset" \
-    0x32 128 1 0xa2 || return 1
+  mtd_badblock page-pattern-write place "$mtd_dev" "$page1599_offset" \
+    0x32 0xa2 || return 1
+  mtd_badblock page-pattern-read place "$mtd_dev" "$page1599_offset" \
+    0x32 0xa2 || return 1
+  [ "$(mtd_badblock get "$mtd_dev" "$page1599_offset")" = 0 ] || return 1
 
   flash_erase -q "$mtd_dev" "$page1600_offset" 1 || return 1
-  mtd_badblock page-write raw "$mtd_dev" "$page1600_offset" \
-    0x33 128 1 0xa3 || return 1
-  mtd_badblock page-read raw "$mtd_dev" "$page1600_offset" \
-    0x33 128 1 0xa3 || return 1
+  mtd_badblock page-pattern-write raw "$mtd_dev" "$page1600_offset" \
+    0x33 0xa3 || return 1
+  mtd_badblock page-pattern-read raw "$mtd_dev" "$page1600_offset" \
+    0x33 0xa3 || return 1
+  [ "$(mtd_badblock get "$mtd_dev" "$page1600_offset")" = 0 ] || return 1
 
   flash_erase -q "$mtd_dev" "$last_block_offset" 1 || return 1
   mtd_badblock page-write raw "$mtd_dev" "$last_page_offset" \
@@ -151,17 +153,27 @@ mtd_q3n_multiplane_smoke() {
   echo "q3n multi-plane stage: NAND Core markbad erase"
   flash_erase -q "$mtd_dev" "$markbad_offset" 1 || return 1
   markbad_page_seek=$((markbad_offset / writesize))
-  mtd_badblock page-write raw "$mtd_dev" "$markbad_offset" \
-    0x35 128 1 0xa5 || return 1
+  mtd_badblock page-pattern-write raw "$mtd_dev" "$markbad_offset" \
+    0x35 0xa5 || return 1
   dd if="$mtd_dev" of=/tmp/q3n-multiplane-main-before.bin bs="$writesize" \
     count=1 skip="$markbad_page_seek" 2>/dev/null || return 1
   markbad_digest_before=$(sha256sum /tmp/q3n-multiplane-main-before.bin | \
     awk '{print $1}') || return 1
+  [ "$markbad_digest_before" = \
+    f790d342cca81bc826050f0b6ce23ce7b4c06c7f174ce97c499653e4202fd450 ] || {
+    echo "q3n multi-plane smoke: pre-mark main digest mismatch"
+    return 1
+  }
   mtd_badblock set "$mtd_dev" "$markbad_offset" >/dev/null || return 1
   mtd_q3n_multiplane_all_bbm_zero "$markbad_offset" || return 1
-  if mtd_badblock page-read raw "$mtd_dev" "$markbad_offset" \
-       0x35 128 1 0xa5 >/tmp/q3n-multiplane-post-mark.err 2>&1; then
-    echo "q3n multi-plane smoke: NAND Core unexpectedly read a marked block"
+  if mtd_badblock page-pattern-read place "$mtd_dev" "$markbad_offset" \
+       0x35 0xa5 >/tmp/q3n-multiplane-post-mark-normal.err 2>&1; then
+    echo "q3n multi-plane smoke: normal MEMREAD unexpectedly read a marked block"
+    return 1
+  fi
+  if mtd_badblock page-pattern-read raw "$mtd_dev" "$markbad_offset" \
+       0x35 0xa5 >/tmp/q3n-multiplane-post-mark-raw.err 2>&1; then
+    echo "q3n multi-plane smoke: raw MEMREAD unexpectedly read a marked block"
     return 1
   fi
   [ "$(mtd_badblock get "$mtd_dev" "$markbad_offset")" = 1 ] || return 1

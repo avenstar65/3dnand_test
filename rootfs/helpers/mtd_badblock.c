@@ -17,9 +17,10 @@ static int usage(const char *prog)
 		"       %s oob-read-unchecked MODE DEVICE PAGE_OFFSET OOB_OFFSET LENGTH\n"
 		"       %s oob-write MODE DEVICE PAGE_OFFSET OOB_OFFSET LENGTH BYTE\n"
 		"       %s page-read|page-write MODE DEVICE PAGE_OFFSET DATA_BYTE OOB_OFFSET OOB_LENGTH OOB_BYTE\n"
+		"       %s page-pattern-read|page-pattern-write MODE DEVICE PAGE_OFFSET DATA_BYTE OOB_SEED\n"
 		"       %s span-read|span-write MODE DEVICE PAGE_OFFSET PAGE_COUNT OOB_OFFSET OOB_BYTE\n"
 		"MODE is place or raw; page OOB commands never wrap to another page.\n",
-		prog, prog, prog, prog, prog, prog, prog);
+		prog, prog, prog, prog, prog, prog, prog, prog);
 	return 2;
 }
 
@@ -158,13 +159,22 @@ static int bytes_are(const unsigned char *buf, size_t length,
 	return 1;
 }
 
+static unsigned char page_pattern_byte(size_t offset, unsigned char seed)
+{
+	/* Keep all four multi-plane BBM bytes erased in a good block. */
+	if (!(offset % 1024))
+		return 0xff;
+	return (unsigned char)(seed + offset * 17u + (offset >> 8) * 29u);
+}
+
 static int page_io(int fd, int write, uint8_t mode,
 		   const struct mtd_info_user *info, uint64_t page_offset,
 		   unsigned char data_value, uint64_t oob_offset,
-		   uint64_t oob_length, unsigned char oob_value)
+		   uint64_t oob_length, unsigned char oob_value, int patterned)
 {
 	unsigned char *data;
 	unsigned char *oob;
+	size_t i;
 	int ret;
 
 	if (validate_page_oob(info, page_offset, oob_offset, oob_length))
@@ -178,7 +188,10 @@ static int page_io(int fd, int write, uint8_t mode,
 	}
 	memset(data, write ? data_value : 0, info->writesize);
 	memset(oob, write ? 0xff : 0, info->oobsize);
-	if (write)
+	if (write && patterned)
+		for (i = 0; i < info->oobsize; i++)
+			oob[i] = page_pattern_byte(i, oob_value);
+	else if (write)
 		memset(oob + oob_offset, oob_value, oob_length);
 	if (write) {
 		struct mtd_write_req req = {
@@ -202,9 +215,19 @@ static int page_io(int fd, int write, uint8_t mode,
 		};
 
 		ret = ioctl(fd, MEMREAD, &req);
-		if (!ret &&
-		    (!bytes_are(data, info->writesize, data_value) ||
-		     !bytes_are(oob + oob_offset, oob_length, oob_value))) {
+		if (!ret && !bytes_are(data, info->writesize, data_value)) {
+			errno = EIO;
+			ret = -1;
+		}
+		if (!ret && patterned) {
+			for (i = 0; i < info->oobsize; i++)
+				if (oob[i] != page_pattern_byte(i, oob_value)) {
+					errno = EIO;
+					ret = -1;
+					break;
+				}
+		} else if (!ret && !bytes_are(oob + oob_offset, oob_length,
+						  oob_value)) {
 			errno = EIO;
 			ret = -1;
 		}
@@ -323,7 +346,16 @@ static int run_extended(int argc, char **argv)
 			return usage(argv[0]);
 		}
 		ret = page_io(fd, write, mode, &info, page_offset, data_value,
-			      first, second, oob_value);
+			      first, second, oob_value, 0);
+	} else if (!strcmp(argv[1], "page-pattern-read") ||
+		   !strcmp(argv[1], "page-pattern-write")) {
+		if (argc != 7 || parse_byte(argv[5], &data_value) ||
+		    parse_byte(argv[6], &oob_value)) {
+			close(fd);
+			return usage(argv[0]);
+		}
+		ret = page_io(fd, write, mode, &info, page_offset, data_value,
+			      0, info.oobsize, oob_value, 1);
 	} else if (!strcmp(argv[1], "span-read") ||
 		   !strcmp(argv[1], "span-write")) {
 		if (argc != 8 || parse_u64(argv[5], &first) ||

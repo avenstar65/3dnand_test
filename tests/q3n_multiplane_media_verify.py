@@ -3,6 +3,7 @@
 import argparse
 import base64
 import hashlib
+import os
 import signal
 import subprocess
 
@@ -12,6 +13,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--qemu", required=True)
 parser.add_argument("--image", required=True)
 parser.add_argument("--logical-block", required=True, type=int)
+parser.add_argument("--die", required=True, type=int)
+parser.add_argument("--block-in-plane", required=True, type=int)
+parser.add_argument("--page", required=True, type=int)
 parser.add_argument("--expected-erased-digest", required=True)
 args = parser.parse_args()
 
@@ -32,6 +36,9 @@ CHUNK_SIZE = 16384
 
 if args.logical_block < 0 or args.logical_block >= 416:
     raise SystemExit("logical block outside multi-plane geometry")
+if (args.die != args.logical_block % 2 or
+        args.block_in_plane != args.logical_block // 2 or args.page != 0):
+    raise SystemExit("logical block metadata does not match multi-plane geometry")
 if (len(args.expected_erased_digest) != 64 or
         any(c not in "0123456789abcdef" for c in args.expected_erased_digest)):
     raise SystemExit("invalid expected erased digest")
@@ -39,11 +46,15 @@ if (len(args.expected_erased_digest) != 64 or
 proc = None
 capture = None
 buffer = ResponseBuffer()
+before_stat = os.stat(args.image)
+before_fingerprint = (before_stat.st_ino, before_stat.st_size,
+                      before_stat.st_mtime_ns, before_stat.st_blocks)
 try:
     proc = subprocess.Popen([
         args.qemu, "-machine", "q35", "-nodefaults", "-nographic",
-        "-accel", "qtest", "-qtest", "stdio",
-        "-blockdev", "driver=file,filename=" + args.image + ",node-name=q3nfile",
+        "-accel", "qtest", "-qtest", "stdio", "-snapshot",
+        "-blockdev", "driver=file,filename=" + args.image +
+        ",node-name=q3nfile",
         "-blockdev", "driver=raw,file=q3nfile,node-name=q3nmedia",
         "-device", "q3n-nand-pci,drive=q3nmedia,addr=4.0"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -76,12 +87,12 @@ try:
     command(f"outl 0xcf8 0x{PCI_CONFIG | 0x04:x}")
     command("outw 0xcfc 0x6")
 
-    die = args.logical_block % 2
-    block_in_plane = args.logical_block // 2
     write(REG_READ_FLAGS, 1)
-    write(REG_MP_DIE, die)
-    write(REG_MP_BLOCK, block_in_plane)
-    write(REG_MP_PAGE, 0)
+    if read(REG_READ_FLAGS) != 1:
+        raise RuntimeError("QEMU did not latch the raw read flag")
+    write(REG_MP_DIE, args.die)
+    write(REG_MP_BLOCK, args.block_in_plane)
+    write(REG_MP_PAGE, args.page)
     write(REG_LEN, MP_MAIN_SIZE)
     write(REG_CMD, CMD_MP_READ_PAGE)
     if read(REG_MP_DONE_MASK) != 0x0f or read(REG_MP_FAIL_MASK) != 0:
@@ -106,3 +117,8 @@ finally:
     errors = teardown_qtest(proc, capture)
     if errors:
         raise SystemExit("qtest teardown failed: " + "; ".join(errors))
+    after_stat = os.stat(args.image)
+    after_fingerprint = (after_stat.st_ino, after_stat.st_size,
+                         after_stat.st_mtime_ns, after_stat.st_blocks)
+    if after_fingerprint != before_fingerprint:
+        raise SystemExit("qtest verifier modified the base image")

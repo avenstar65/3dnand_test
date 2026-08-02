@@ -296,7 +296,7 @@ guest_command=$(mtd_smoke_command_for q3n-multiplane-smoke) ||
 
 wrapper_repo="$test_dir/multiplane-wrapper"
 wrapper_log="$wrapper_repo/run-qemu.argv"
-mkdir -p "$wrapper_repo/scripts/lib" "$wrapper_repo/work"
+mkdir -p "$wrapper_repo/scripts/lib" "$wrapper_repo/work/media"
 cp "$repo_root/scripts/lib/common.sh" "$wrapper_repo/scripts/lib/common.sh"
 [ -f "$repo_root/scripts/q3n-multiplane-smoke.sh" ] ||
 	fail "multiplane host wrapper is missing"
@@ -309,18 +309,39 @@ cp "$repo_root/scripts/q3n-multiplane-media-verify.sh" \
 cat >"$wrapper_repo/scripts/run-qemu.sh" <<'EOF'
 #!/usr/bin/env sh
 printf '%s\n' "$@" >"$Q3N_TEST_WRAPPER_LOG"
-printf '%s\n' 'q3n multi-plane guest complete logical_block=3 die=1 block_in_plane=1 page=0 main_digest=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
-printf '%s\n' 'MTD smoke 测试通过，关闭虚拟机'
+metadata="q3n multi-plane guest complete logical_block=3 die=${Q3N_TEST_GUEST_DIE:-1} block_in_plane=${Q3N_TEST_GUEST_BLOCK:-1} page=${Q3N_TEST_GUEST_PAGE:-0} main_digest=${Q3N_TEST_GUEST_DIGEST:-f790d342cca81bc826050f0b6ce23ce7b4c06c7f174ce97c499653e4202fd450}"
+printf '%s\n' "$metadata"
+[ "${Q3N_TEST_DUPLICATE_METADATA:-0}" = 0 ] || printf '%s\n' "$metadata"
+[ "${Q3N_TEST_MALFORMED_METADATA:-0}" = 0 ] || printf '%s\n' "$metadata injected"
+if [ "${Q3N_TEST_NO_SUCCESS_STAGE:-0}" = 0 ]; then
+  printf '%s\n' 'MTD smoke 测试通过，关闭虚拟机'
+fi
+[ "${Q3N_TEST_DUPLICATE_SUCCESS:-0}" = 0 ] || \
+  printf '%s\n' 'MTD smoke 测试通过，关闭虚拟机'
+if [ "${Q3N_TEST_NO_POWERDOWN:-0}" = 0 ]; then
+  printf '%s\n' '[    3.433730] reboot: Power down'
+fi
 EOF
 cat >"$wrapper_repo/scripts/q3n-multiplane-media-verify.sh" <<'EOF'
 #!/usr/bin/env sh
 printf '%s\n' "$@" >"$Q3N_TEST_VERIFY_LOG"
+if [ "${Q3N_TEST_VERIFY_MUTATE:-0}" != 0 ]; then
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --image ]; then
+      shift
+      printf x >>"$1"
+      break
+    fi
+    shift
+  done
+fi
 [ "${Q3N_TEST_VERIFY_FAIL:-0}" = 0 ] || exit 1
 EOF
 chmod +x "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" \
 	"$wrapper_repo/scripts/run-qemu.sh" \
 	"$wrapper_repo/scripts/q3n-multiplane-media-verify.sh"
 verify_log="$wrapper_repo/verify.argv"
+: >"$wrapper_repo/work/media/q3n-nand-multiplane.raw"
 Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
 	WORK_DIR="$wrapper_repo/work" \
 	sh "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" >/dev/null
@@ -334,6 +355,13 @@ grep -Fqx 'MTD_SMOKE=q3n-multiplane-smoke' "$wrapper_log" ||
 grep -Fqx -- --logical-block "$verify_log" ||
 	fail "multiplane verifier did not receive the logical block"
 grep -Fqx 3 "$verify_log" || fail "multiplane verifier selected wrong block"
+grep -Fqx -- --die "$verify_log" ||
+	fail "multiplane verifier did not receive the recorded die"
+grep -Fqx 1 "$verify_log" || fail "multiplane verifier received the wrong die"
+grep -Fqx -- --block-in-plane "$verify_log" ||
+	fail "multiplane verifier did not receive the recorded plane block"
+grep -Fqx -- --page "$verify_log" ||
+	fail "multiplane verifier did not receive the recorded page"
 grep -Fqx -- --expected-erased-digest "$verify_log" ||
 	fail "multiplane verifier did not receive the NAND Core erase digest"
 grep -Fqx 71189f7fb6aed638640078fba3a35fda6c39c8962e74dcc75935aac948da9063 \
@@ -343,5 +371,105 @@ if Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
 	sh "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" >/dev/null 2>&1; then
 	fail "multiplane wrapper accepted a lower-level digest mismatch"
 fi
+if Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
+	Q3N_TEST_DUPLICATE_METADATA=1 WORK_DIR="$wrapper_repo/work" \
+	sh "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" >/dev/null 2>&1; then
+	fail "multiplane wrapper accepted duplicate guest metadata"
+fi
+if Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
+	Q3N_TEST_DUPLICATE_SUCCESS=1 WORK_DIR="$wrapper_repo/work" \
+	sh "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" >/dev/null 2>&1; then
+	fail "multiplane wrapper accepted duplicate guest success stage"
+fi
+if Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
+	Q3N_TEST_MALFORMED_METADATA=1 WORK_DIR="$wrapper_repo/work" \
+	sh "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" >/dev/null 2>&1; then
+	fail "multiplane wrapper accepted injected guest metadata"
+fi
+if Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
+	Q3N_TEST_NO_POWERDOWN=1 WORK_DIR="$wrapper_repo/work" \
+	sh "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" >/dev/null 2>&1; then
+	fail "multiplane wrapper accepted missing kernel powerdown"
+fi
+if Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
+	Q3N_TEST_NO_SUCCESS_STAGE=1 WORK_DIR="$wrapper_repo/work" \
+	sh "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" >/dev/null 2>&1; then
+	fail "multiplane wrapper accepted missing guest success stage"
+fi
+if Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
+	Q3N_TEST_GUEST_DIE=0 WORK_DIR="$wrapper_repo/work" \
+	sh "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" >/dev/null 2>&1; then
+	fail "multiplane wrapper accepted inconsistent guest topology"
+fi
+if Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
+	Q3N_TEST_GUEST_DIGEST=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+	WORK_DIR="$wrapper_repo/work" \
+	sh "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" >/dev/null 2>&1; then
+	fail "multiplane wrapper accepted an unexpected pre-mark digest"
+fi
+if Q3N_TEST_WRAPPER_LOG="$wrapper_log" Q3N_TEST_VERIFY_LOG="$verify_log" \
+	Q3N_TEST_VERIFY_MUTATE=1 WORK_DIR="$wrapper_repo/work" \
+	sh "$wrapper_repo/scripts/q3n-multiplane-smoke.sh" >/dev/null 2>&1; then
+	fail "multiplane wrapper accepted verifier mutation of its base image"
+fi
+
+# Exercise the guest acceptance function through its command boundary.  The
+# fixture makes bad-block MEMREADs fail, records the requested operations, and
+# lets the test prove that an unexpected pre-mark digest is fatal.
+guest_fixture="$test_dir/multiplane-guest-fixture.sh"
+guest_log="$test_dir/multiplane-guest.argv"
+cat >"$guest_fixture" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+. "$1"
+mtd_load_q3n() { :; }
+mtd_find_q3n() { printf '%s\n' 0; }
+cat() {
+	case "$1" in
+		*/writesize) printf '%s\n' 65536 ;;
+		*/oobsize) printf '%s\n' 4096 ;;
+		*/oobavail) printf '%s\n' 4092 ;;
+		*/erasesize) printf '%s\n' 104857600 ;;
+		*/size) printf '%s\n' 43620761600 ;;
+		*) command cat "$1" ;;
+	esac
+}
+flash_erase() { :; }
+modprobe() { :; }
+dd() { :; }
+sha256sum() { printf '%s  %s\n' "${Q3N_TEST_GUEST_SHA}" "$1"; }
+mtd_badblock() {
+	printf '%s\n' "$*" >>"$Q3N_TEST_GUEST_LOG"
+	case "$1" in
+		oob-read) printf '%s\n' 00 ;;
+		set) guest_marked=1 ;;
+		get) printf '%s\n' "${guest_marked:-0}" ;;
+		page-read|page-pattern-read)
+			[ "${guest_marked:-0}" = 1 ] && return 1
+			;;
+	esac
+	return 0
+}
+mtd_q3n_multiplane_smoke
+EOF
+chmod +x "$guest_fixture"
+if Q3N_TEST_GUEST_LOG="$guest_log" \
+	Q3N_TEST_GUEST_SHA=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+	sh "$guest_fixture" "$repo_root/rootfs/profile.d/mtd.sh" >/dev/null 2>&1; then
+	fail "multiplane guest accepted an unexpected pre-mark digest"
+fi
+: >"$guest_log"
+Q3N_TEST_GUEST_LOG="$guest_log" \
+Q3N_TEST_GUEST_SHA=f790d342cca81bc826050f0b6ce23ce7b4c06c7f174ce97c499653e4202fd450 \
+sh "$guest_fixture" "$repo_root/rootfs/profile.d/mtd.sh" >/dev/null ||
+	fail "multiplane guest fixture did not complete"
+grep -Fqx 'page-pattern-write place /dev/mtd0 104792064 0x32 0xa2' "$guest_log" ||
+	fail "multiplane guest did not request full PLACE OOB pattern I/O"
+grep -Fqx 'page-pattern-read raw /dev/mtd0 104857600 0x33 0xa3' "$guest_log" ||
+	fail "multiplane guest did not request full RAW OOB pattern I/O"
+grep -Fqx 'page-pattern-read place /dev/mtd0 314572800 0x35 0xa5' "$guest_log" ||
+	fail "multiplane guest did not reject normal MEMREAD after markbad"
+grep -Fqx 'page-pattern-read raw /dev/mtd0 314572800 0x35 0xa5' "$guest_log" ||
+	fail "multiplane guest did not reject raw MEMREAD after markbad"
 
 printf 'ok: Q3N Linux/QEMU overlays and isolated storage-mode matrix verified\n'
