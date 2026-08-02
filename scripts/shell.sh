@@ -28,5 +28,9 @@ docker run --rm $tty_args \
   -e JOBS \
   -e KERNEL_ARCH \
   -e CROSS_COMPILE \
+  -e BUILD_DIR \
+  -e Q3N_EXPECTED_MODE \
+  -e Q3N_REQUIRE_KERNEL_BUILD \
+  -e Q3N_KERNEL_BUILD_DIR \
   "$image_name" \
   "$@"

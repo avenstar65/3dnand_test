@@ -10,6 +10,7 @@
 #include "qemu/osdep.h"
 #include "hw/mtd/q3n-media.h"
 #include "hw/mtd/q3n-nand.h"
+#include "q3n-multiplane.h"
 #include "q3n-media-overlay.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/qdev-properties-system.h"
@@ -22,6 +23,22 @@
 
 #define Q3N_ID_VALUE                  0x314e3351U /* "Q3N1" */
 
+_Static_assert(Q3N_PLANES_PER_DIE == Q3N_MULTIPLANE_WIDTH,
+               "Q3N controller and multi-plane engine width differ");
+_Static_assert(Q3N_DIES == Q3N_MULTIPLANE_DIES,
+               "Q3N controller and multi-plane engine die count differs");
+_Static_assert(Q3N_BLOCKS_PER_PLANE == Q3N_MULTIPLANE_BLOCKS_PER_PLANE,
+               "Q3N controller and multi-plane engine block count differs");
+_Static_assert(Q3N_DEFAULT_DATA_BLOCKS_PER_PLANE ==
+               Q3N_MULTIPLANE_DATA_BLOCKS_PER_PLANE,
+               "Q3N controller and multi-plane engine data block count differs");
+_Static_assert(Q3N_PAGES_PER_BLOCK == Q3N_MULTIPLANE_PAGES_PER_BLOCK,
+               "Q3N controller and multi-plane engine page count differs");
+_Static_assert(Q3N_PAGE_SIZE == Q3N_MULTIPLANE_MAIN_SLICE_SIZE,
+               "Q3N controller and multi-plane engine main slice differs");
+_Static_assert(Q3N_LOGICAL_OOB_SIZE == Q3N_MULTIPLANE_OOB_SLICE_SIZE,
+               "Q3N controller and multi-plane engine OOB slice differs");
+
 /* Q3N_CONTROLLER_HELPERS_BEGIN */
 #define Q3N_LDPC_PROFILE_VERSION      1U
 typedef struct Q3NEccResult {
@@ -31,6 +48,25 @@ typedef struct Q3NEccResult {
     uint32_t failed_step;
     uint32_t failed_steps;
 } Q3NEccResult;
+
+static bool q3n_retry_mode_valid(uint32_t mode)
+{
+    return mode < Q3N_READ_RETRY_MODES;
+}
+
+static uint32_t q3n_retry_gain(uint32_t mode)
+{
+    static const uint8_t gains[Q3N_READ_RETRY_MODES] = { 0, 8, 16, 24 };
+
+    return q3n_retry_mode_valid(mode) ? gains[mode] : 0;
+}
+
+static uint32_t q3n_effective_bitflips(uint32_t raw_bitflips, uint32_t mode)
+{
+    uint32_t gain = q3n_retry_gain(mode);
+
+    return raw_bitflips > gain ? raw_bitflips - gain : 0;
+}
 
 static void q3n_generate_ldpc_step(uint64_t page_key, uint32_t step,
                                    const uint8_t *data, uint8_t *ldpc)
@@ -74,7 +110,8 @@ static uint32_t q3n_overlay_popcount(const uint8_t *overlay, uint32_t size)
 static Q3NEccResult q3n_decode_ldpc(uint64_t page_key, const uint8_t *data,
                                     const uint8_t *ldpc,
                                     const uint8_t *main_overlay,
-                                    const uint8_t *ldpc_overlay, bool erased)
+                                    const uint8_t *ldpc_overlay, bool erased,
+                                    uint32_t retry_mode)
 {
     Q3NEccResult result = {
         .status = Q3N_ECC_STATUS_CLEAN,
@@ -95,6 +132,7 @@ static Q3NEccResult q3n_decode_ldpc(uint64_t page_key, const uint8_t *data,
         bitflips = q3n_overlay_popcount(main_errors, Q3N_ECC_STEP_SIZE) +
                    q3n_overlay_popcount(ldpc_errors,
                                         Q3N_LDPC_BYTES_PER_STEP);
+        bitflips = q3n_effective_bitflips(bitflips, retry_mode);
         if (!erased) {
             q3n_generate_ldpc_step(page_key, step,
                                    data + step * Q3N_ECC_STEP_SIZE,
@@ -177,6 +215,8 @@ struct Q3NNandState {
     uint32_t fault_count;
     uint32_t fault_region;
     uint32_t op_class;
+    uint32_t read_flags;
+    uint32_t retry_mode;
     uint64_t fail_program_addr;
     bool fail_next_program;
     uint32_t block_status;
@@ -185,7 +225,15 @@ struct Q3NNandState {
     uint32_t ecc_corrected_bits;
     uint32_t ecc_failed_step;
 
-    uint8_t data_buf[Q3N_PAGE_SIZE + Q3N_LOGICAL_OOB_SIZE];
+    uint32_t mp_die;
+    uint32_t mp_block;
+    uint32_t mp_page;
+    uint32_t mp_done_mask;
+    uint32_t mp_fail_mask;
+    uint32_t mp_ecc_select;
+    Q3NMultiplaneEccResult mp_ecc[Q3N_MULTIPLANE_WIDTH];
+
+    uint8_t data_buf[Q3N_MULTIPLANE_MAIN_SIZE];
     uint8_t ldpc[Q3N_PHYSICAL_LDPC_SIZE];
     uint8_t main_overlay[Q3N_PAGE_SIZE];
     uint8_t ldpc_overlay[Q3N_LDPC_TOTAL_BYTES];
@@ -216,11 +264,14 @@ static bool q3n_decode_addr(Q3NNandState *s, uint64_t byte_addr,
 }
 
 static int q3n_read_page(Q3NNandState *s, uint32_t block, uint32_t page,
-                         uint8_t *buf)
+                         uint8_t *buf, bool raw, Q3NEccResult *ecc)
 {
     uint64_t page_key = (uint64_t)block * Q3N_PAGES_PER_BLOCK + page;
     bool erased;
-    Q3NEccResult result;
+    Q3NEccResult result = {
+        .status = Q3N_ECC_STATUS_CLEAN,
+        .failed_step = Q3N_ECC_NO_FAILED_STEP,
+    };
     int ret;
 
     ret = q3n_media_read_page(s->media, block, page, buf, s->ldpc,
@@ -231,23 +282,32 @@ static int q3n_read_page(Q3NNandState *s, uint32_t block, uint32_t page,
         return ret;
     }
 
+    if (raw) {
+        for (uint32_t i = 0; i < Q3N_PAGE_SIZE; i++) {
+            buf[i] ^= s->main_overlay[i];
+        }
+        if (ecc) {
+            *ecc = result;
+        }
+        return 0;
+    }
+
     erased = q3n_media_is_erased(buf, Q3N_PAGE_SIZE) &&
              q3n_media_is_erased(s->ldpc, Q3N_PHYSICAL_LDPC_SIZE);
 
     result = q3n_decode_ldpc(page_key, buf, s->ldpc,
-                             s->main_overlay, s->ldpc_overlay, erased);
-    s->ecc_status = result.status;
-    s->ecc_max_bitflips = result.ecc_max_bitflips;
-    s->ecc_corrected_bits = result.ecc_corrected_bits;
-    s->ecc_failed_step = result.failed_step;
+                             s->main_overlay, s->ldpc_overlay, erased,
+                             s->retry_mode);
     s->stats.ldpc_corrected_bits += result.ecc_corrected_bits;
     if (result.status == Q3N_ECC_STATUS_UNCORRECTABLE) {
-        s->status |= Q3N_STATUS_ECC_UNCORRECTABLE;
         s->stats.ldpc_uncorrectable_pages++;
         s->stats.ldpc_failed_steps += result.failed_steps;
         for (uint32_t i = 0; i < Q3N_PAGE_SIZE; i++) {
             buf[i] ^= s->main_overlay[i];
         }
+    }
+    if (ecc) {
+        *ecc = result;
     }
     return 0;
 }
@@ -269,7 +329,9 @@ static bool q3n_program_page(Q3NNandState *s, uint32_t block,
     if (block >= s->physical_block_count || page >= Q3N_PAGES_PER_BLOCK) {
         return false;
     }
-    if (s->fail_next_program && s->addr == s->fail_program_addr) {
+    if (s->fail_next_program &&
+        ((uint64_t)block * Q3N_PAGES_PER_BLOCK + page) * Q3N_PAGE_SIZE ==
+        s->fail_program_addr) {
         q3n_disarm_program_fault(s);
         s->stats.faults_injected++;
         return false;
@@ -332,6 +394,207 @@ static bool q3n_erase_block(Q3NNandState *s, uint32_t block)
     return true;
 }
 
+static void q3n_finish_ok(Q3NNandState *s);
+static void q3n_finish_error(Q3NNandState *s);
+static void q3n_clear_ecc_result(Q3NNandState *s);
+
+static int q3n_mp_read_adapter(void *opaque, uint32_t block, uint32_t page,
+                               uint8_t *destination, bool raw,
+                               Q3NMultiplaneEccResult *ecc)
+{
+    Q3NNandState *s = opaque;
+    Q3NEccResult result;
+    int ret;
+
+    ret = q3n_read_page(s, block, page, destination, raw, &result);
+    if (ret) {
+        return ret;
+    }
+    ecc->status = result.status;
+    ecc->max_bitflips = result.ecc_max_bitflips;
+    ecc->corrected_bits = result.ecc_corrected_bits;
+    ecc->failed_step = result.failed_step;
+    return 0;
+}
+
+static int q3n_mp_program_adapter(void *opaque, uint32_t block,
+                                  uint32_t page, const uint8_t *source)
+{
+    return q3n_program_page(opaque, block, page, source) ? 0 : -EIO;
+}
+
+static int q3n_mp_read_oob_adapter(void *opaque, uint32_t block,
+                                   uint32_t page, uint8_t *destination)
+{
+    Q3NNandState *s = opaque;
+
+    return q3n_media_read_logical_oob(s->media, block, page, destination);
+}
+
+static int q3n_mp_program_oob_adapter(void *opaque, uint32_t block,
+                                      uint32_t page, const uint8_t *source)
+{
+    Q3NNandState *s = opaque;
+
+    if (q3n_media_program_logical_oob(s->media, block, page, source)) {
+        return -EIO;
+    }
+    s->stats.page_programs++;
+    return 0;
+}
+
+static int q3n_mp_erase_adapter(void *opaque, uint32_t block,
+                                uint32_t page)
+{
+    (void)page;
+    return q3n_erase_block(opaque, block) ? 0 : -EIO;
+}
+
+static const Q3NMultiplaneOps q3n_mp_ops = {
+    .read = q3n_mp_read_adapter,
+    .program = q3n_mp_program_adapter,
+    .read_oob = q3n_mp_read_oob_adapter,
+    .program_oob = q3n_mp_program_oob_adapter,
+    .erase = q3n_mp_erase_adapter,
+};
+
+static Q3NMultiplaneRequest q3n_mp_request(const Q3NNandState *s, bool raw)
+{
+    return (Q3NMultiplaneRequest) {
+        .die = s->mp_die,
+        .block = s->mp_block,
+        .page = s->mp_page,
+        .main_len = s->len,
+        .oob_len = s->oob_len,
+        .raw = raw,
+    };
+}
+
+static void q3n_mp_clear_result(Q3NNandState *s)
+{
+    s->mp_done_mask = 0;
+    s->mp_fail_mask = 0;
+}
+
+static void q3n_mp_clear_ecc(Q3NNandState *s)
+{
+    memset(s->mp_ecc, 0, sizeof(s->mp_ecc));
+}
+
+static void q3n_mp_latch_result(Q3NNandState *s,
+                                const Q3NMultiplaneResult *result,
+                                bool with_ecc)
+{
+    s->mp_done_mask = result->done_mask;
+    s->mp_fail_mask = result->fail_mask;
+    if (with_ecc) {
+        memcpy(s->mp_ecc, result->ecc, sizeof(s->mp_ecc));
+    }
+}
+
+static bool q3n_mp_has_uncorrectable(const Q3NNandState *s)
+{
+    for (unsigned plane = 0; plane < Q3N_MULTIPLANE_WIDTH; plane++) {
+        if (s->mp_ecc[plane].status == Q3N_ECC_STATUS_UNCORRECTABLE) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void q3n_mp_finish(Q3NNandState *s, int ret)
+{
+    if (ret || s->mp_fail_mask) {
+        q3n_finish_error(s);
+    } else {
+        q3n_finish_ok(s);
+    }
+}
+
+static void q3n_cmd_mp_read_page(Q3NNandState *s)
+{
+    Q3NMultiplaneRequest request = q3n_mp_request(
+        s, s->read_flags & Q3N_READ_F_RAW);
+    Q3NMultiplaneResult result = { 0 };
+    int ret;
+
+    q3n_mp_clear_result(s);
+    q3n_mp_clear_ecc(s);
+    if (!request.raw) {
+        q3n_clear_ecc_result(s);
+    }
+    ret = q3n_multiplane_execute_read(&request, &q3n_mp_ops, s,
+                                      s->data_buf, &result);
+    q3n_mp_latch_result(s, &result, true);
+    if (!ret && q3n_mp_has_uncorrectable(s)) {
+        s->status |= Q3N_STATUS_ECC_UNCORRECTABLE;
+    }
+    if (!ret) {
+        s->data_count = Q3N_MULTIPLANE_MAIN_SIZE;
+        s->data_pos = 0;
+    }
+    q3n_mp_finish(s, ret);
+}
+
+static void q3n_cmd_mp_program_page(Q3NNandState *s)
+{
+    Q3NMultiplaneRequest request = q3n_mp_request(s, false);
+    Q3NMultiplaneResult result = { 0 };
+    int ret;
+
+    q3n_mp_clear_result(s);
+    ret = s->data_count < Q3N_MULTIPLANE_MAIN_SIZE ? -EINVAL :
+        q3n_multiplane_execute_program(&request, &q3n_mp_ops, s,
+                                       s->data_buf, &result);
+    q3n_mp_latch_result(s, &result, false);
+    q3n_mp_finish(s, ret);
+}
+
+static void q3n_cmd_mp_read_oob(Q3NNandState *s)
+{
+    Q3NMultiplaneRequest request = q3n_mp_request(s, false);
+    Q3NMultiplaneResult result = { 0 };
+    int ret;
+
+    q3n_mp_clear_result(s);
+    ret = q3n_multiplane_execute_read_oob(&request, &q3n_mp_ops, s,
+                                          s->data_buf, &result);
+    q3n_mp_latch_result(s, &result, false);
+    if (!ret) {
+        s->data_count = Q3N_MULTIPLANE_OOB_SIZE;
+        s->data_pos = 0;
+    }
+    q3n_mp_finish(s, ret);
+}
+
+static void q3n_cmd_mp_program_oob(Q3NNandState *s)
+{
+    Q3NMultiplaneRequest request = q3n_mp_request(s, false);
+    Q3NMultiplaneResult result = { 0 };
+    int ret;
+
+    q3n_mp_clear_result(s);
+    ret = s->data_count < Q3N_MULTIPLANE_OOB_SIZE ? -EINVAL :
+        q3n_multiplane_execute_program_oob(&request, &q3n_mp_ops, s,
+                                           s->data_buf, &result);
+    q3n_mp_latch_result(s, &result, false);
+    q3n_mp_finish(s, ret);
+}
+
+static void q3n_cmd_mp_erase_group(Q3NNandState *s)
+{
+    Q3NMultiplaneRequest request = q3n_mp_request(s, false);
+    Q3NMultiplaneResult result = { 0 };
+    int ret;
+
+    q3n_mp_clear_result(s);
+    request.main_len = 0;
+    request.oob_len = 0;
+    ret = q3n_multiplane_execute_erase(&request, &q3n_mp_ops, s, &result);
+    q3n_mp_latch_result(s, &result, false);
+    q3n_mp_finish(s, ret);
+}
+
 static void q3n_raise_irq(Q3NNandState *s, uint32_t bits)
 {
     s->irq_status |= bits;
@@ -354,6 +617,18 @@ static void q3n_clear_ecc_result(Q3NNandState *s)
     s->ecc_failed_step = Q3N_ECC_NO_FAILED_STEP;
 }
 
+static void q3n_latch_ecc_result(Q3NNandState *s,
+                                 const Q3NEccResult *result)
+{
+    s->ecc_status = result->status;
+    s->ecc_max_bitflips = result->ecc_max_bitflips;
+    s->ecc_corrected_bits = result->ecc_corrected_bits;
+    s->ecc_failed_step = result->failed_step;
+    if (result->status == Q3N_ECC_STATUS_UNCORRECTABLE) {
+        s->status |= Q3N_STATUS_ECC_UNCORRECTABLE;
+    }
+}
+
 static void q3n_finish_ok(Q3NNandState *s)
 {
     s->status |= Q3N_STATUS_READY;
@@ -368,7 +643,9 @@ static void q3n_finish_error(Q3NNandState *s)
 
 static void q3n_cmd_read_id(Q3NNandState *s)
 {
-    static const uint8_t id[] = { 0x2c, 0xd7, 0x90, 0xa6, 'Q', '3', 'N', 'D' };
+    static const uint8_t id[] = {
+        0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44
+    };
 
     memset(s->data_buf, 0xff, sizeof(s->data_buf));
     memcpy(s->data_buf, id, sizeof(id));
@@ -382,8 +659,12 @@ static void q3n_cmd_read_page(Q3NNandState *s)
     uint32_t block;
     uint32_t page;
     uint32_t column;
+    bool raw = s->read_flags & Q3N_READ_F_RAW;
+    Q3NEccResult ecc;
 
-    q3n_clear_ecc_result(s);
+    if (!raw) {
+        q3n_clear_ecc_result(s);
+    }
     if (!q3n_decode_addr(s, s->addr, &block, &page, &column) || column != 0) {
         q3n_finish_error(s);
         return;
@@ -395,9 +676,12 @@ static void q3n_cmd_read_page(Q3NNandState *s)
         s->stats.fg_ops++;
     }
 
-    if (q3n_read_page(s, block, page, s->data_buf)) {
+    if (q3n_read_page(s, block, page, s->data_buf, raw, &ecc)) {
         q3n_finish_error(s);
         return;
+    }
+    if (!raw) {
+        q3n_latch_ecc_result(s, &ecc);
     }
 
     s->data_count = Q3N_PAGE_SIZE;
@@ -526,6 +810,14 @@ static void q3n_cmd_reset(Q3NNandState *s)
     s->cmd = Q3N_CMD_NOP;
     s->data_pos = 0;
     s->data_count = 0;
+    s->read_flags = 0;
+    s->retry_mode = 0;
+    s->mp_die = 0;
+    s->mp_block = 0;
+    s->mp_page = 0;
+    q3n_mp_clear_result(s);
+    s->mp_ecc_select = 0;
+    q3n_mp_clear_ecc(s);
     s->irq_status = 0;
     qemu_irq_lower(s->irq);
     q3n_clear_ecc_result(s);
@@ -562,6 +854,21 @@ static void q3n_execute_cmd(Q3NNandState *s, uint32_t cmd)
         break;
     case Q3N_CMD_GET_BLOCK_STATUS:
         q3n_cmd_get_block_status(s);
+        break;
+    case Q3N_CMD_MP_READ_PAGE:
+        q3n_cmd_mp_read_page(s);
+        break;
+    case Q3N_CMD_MP_PROGRAM_PAGE:
+        q3n_cmd_mp_program_page(s);
+        break;
+    case Q3N_CMD_MP_READ_OOB:
+        q3n_cmd_mp_read_oob(s);
+        break;
+    case Q3N_CMD_MP_PROGRAM_OOB:
+        q3n_cmd_mp_program_oob(s);
+        break;
+    case Q3N_CMD_MP_ERASE_GROUP:
+        q3n_cmd_mp_erase_group(s);
         break;
     case Q3N_CMD_RESET:
         q3n_cmd_reset(s);
@@ -617,7 +924,7 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
     Q3NNandState *s = opaque;
 
     if (offset >= Q3N_REG_DATA &&
-        offset < Q3N_REG_DATA + Q3N_PAGE_SIZE + Q3N_LOGICAL_OOB_SIZE) {
+        offset < Q3N_REG_DATA + Q3N_MULTIPLANE_MAIN_SIZE) {
         return q3n_read_data_window(s, size);
     }
 
@@ -626,7 +933,8 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
         return Q3N_ID_VALUE;
     case Q3N_REG_CAP:
         return Q3N_CAP_BASIC_FLASH | Q3N_CAP_PERSISTENT_MEDIA |
-               Q3N_CAP_BAD_BLOCK_MARKER;
+               Q3N_CAP_BAD_BLOCK_MARKER | Q3N_CAP_READ_RETRY |
+               Q3N_CAP_MULTIPLANE;
     case Q3N_REG_STATUS:
         return s->status;
     case Q3N_REG_CMD:
@@ -707,6 +1015,30 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
         return (uint32_t)s->stats.ldpc_uncorrectable_pages;
     case Q3N_REG_STAT_LDPC_FAILED_STEPS:
         return (uint32_t)s->stats.ldpc_failed_steps;
+    case Q3N_REG_READ_FLAGS:
+        return s->read_flags;
+    case Q3N_REG_RETRY_MODE:
+        return s->retry_mode;
+    case Q3N_REG_MP_DIE:
+        return s->mp_die;
+    case Q3N_REG_MP_BLOCK:
+        return s->mp_block;
+    case Q3N_REG_MP_PAGE:
+        return s->mp_page;
+    case Q3N_REG_MP_DONE_MASK:
+        return s->mp_done_mask;
+    case Q3N_REG_MP_FAIL_MASK:
+        return s->mp_fail_mask;
+    case Q3N_REG_MP_ECC_SELECT:
+        return s->mp_ecc_select;
+    case Q3N_REG_MP_ECC_STATUS:
+        return s->mp_ecc[s->mp_ecc_select].status;
+    case Q3N_REG_MP_ECC_MAX_BITFLIPS:
+        return s->mp_ecc[s->mp_ecc_select].max_bitflips;
+    case Q3N_REG_MP_ECC_CORRECTED_BITS:
+        return s->mp_ecc[s->mp_ecc_select].corrected_bits;
+    case Q3N_REG_MP_ECC_FAILED_STEP:
+        return s->mp_ecc[s->mp_ecc_select].failed_step;
     default:
         return 0;
     }
@@ -718,7 +1050,7 @@ static void q3n_mmio_write(void *opaque, hwaddr offset, uint64_t value,
     Q3NNandState *s = opaque;
 
     if (offset >= Q3N_REG_DATA &&
-        offset < Q3N_REG_DATA + Q3N_PAGE_SIZE + Q3N_LOGICAL_OOB_SIZE) {
+        offset < Q3N_REG_DATA + Q3N_MULTIPLANE_MAIN_SIZE) {
         q3n_write_data_window(s, value, size);
         return;
     }
@@ -750,6 +1082,34 @@ static void q3n_mmio_write(void *opaque, hwaddr offset, uint64_t value,
     case Q3N_REG_OP_CLASS:
         if (value <= Q3N_OP_PARITY_WRITE) {
             s->op_class = value;
+        }
+        break;
+    case Q3N_REG_READ_FLAGS:
+        if (!(value & ~Q3N_READ_F_RAW)) {
+            s->read_flags = value;
+        }
+        break;
+    case Q3N_REG_RETRY_MODE:
+        if (q3n_retry_mode_valid(value)) {
+            s->retry_mode = value;
+        } else {
+            s->status |= Q3N_STATUS_ERROR;
+        }
+        break;
+    case Q3N_REG_MP_DIE:
+        s->mp_die = value;
+        break;
+    case Q3N_REG_MP_BLOCK:
+        s->mp_block = value;
+        break;
+    case Q3N_REG_MP_PAGE:
+        s->mp_page = value;
+        break;
+    case Q3N_REG_MP_ECC_SELECT:
+        if (value < Q3N_MULTIPLANE_WIDTH) {
+            s->mp_ecc_select = value;
+        } else {
+            s->status |= Q3N_STATUS_ERROR;
         }
         break;
     case Q3N_REG_FAULT_ADDR_LO:

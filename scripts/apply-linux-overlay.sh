@@ -9,16 +9,51 @@ raw_dir="$linux_dir/drivers/mtd/nand/raw"
 
 [ -d "$raw_dir" ] || die "Linux 源码缺少 raw NAND 目录: $raw_dir"
 
+sh "$repo_root/scripts/apply-linux-patches.sh" "$linux_dir"
+
 info "应用 qemu_3dnand Linux overlay 到: $linux_dir"
 
-rm -f "$raw_dir/qemu_3dnand.c"
-cp "$overlay_dir/qemu_3dnand_main.c" "$raw_dir/qemu_3dnand_main.c"
-cp "$overlay_dir/qemu_3dnand.h" "$raw_dir/qemu_3dnand.h"
-cp "$overlay_dir/qemu_3dnand_priv.h" "$raw_dir/qemu_3dnand_priv.h"
-cp "$overlay_dir/qemu_3dnand_map.c" "$raw_dir/qemu_3dnand_map.c"
-cp "$overlay_dir/qemu_3dnand_raid.c" "$raw_dir/qemu_3dnand_raid.c"
-cp "$overlay_dir/qemu_3dnand_sched.c" "$raw_dir/qemu_3dnand_sched.c"
-cp "$overlay_dir/qemu_3dnand_kunit.c" "$raw_dir/qemu_3dnand_kunit.c"
+rm -f \
+  "$raw_dir/qemu_3dnand.c" \
+  "$raw_dir/qemu_3dnand_main.c" \
+  "$raw_dir/qemu_3dnand_map.c" \
+  "$raw_dir/qemu_3dnand_raid.c" \
+  "$raw_dir/qemu_3dnand_sched.c" \
+  "$raw_dir/qemu_3dnand_kunit.c" \
+  "$raw_dir/qemu_3dnand.h"
+
+for file in \
+  qemu_3dnand_module.c \
+  qemu_3dnand_init.c \
+  qemu_3dnand_init.h \
+  qemu_3dnand_flash.c \
+  qemu_3dnand_flash.h \
+  ytmc_nand.c \
+  ytmc_nand.h \
+  qemu_3dnand_controller.c \
+  qemu_3dnand_controller.h \
+  qemu_3dnand_ecc.c \
+  qemu_3dnand_ecc.h \
+  qemu_3dnand_addr.c \
+  qemu_3dnand_addr.h \
+  qemu_3dnand_layout.c \
+  qemu_3dnand_layout.h \
+  qemu_3dnand_page.c \
+  qemu_3dnand_page.h \
+  qemu_3dnand_page_raid.c \
+  qemu_3dnand_page_raid.h \
+  qemu_3dnand_multiplane_layout.c \
+  qemu_3dnand_multiplane_layout.h \
+  qemu_3dnand_hw_multiplane.c \
+  qemu_3dnand_hw_multiplane.h \
+  qemu_3dnand_multiplane.c \
+  qemu_3dnand_multiplane.h \
+  qemu_3dnand_hw.c \
+  qemu_3dnand_hw.h \
+  qemu_3dnand_regs.h \
+  qemu_3dnand_priv.h; do
+  cp "$overlay_dir/$file" "$raw_dir/$file"
+done
 cp "$overlay_dir/Kconfig.qemu_3dnand" "$raw_dir/Kconfig.qemu_3dnand"
 cp "$overlay_dir/Makefile.qemu_3dnand" "$raw_dir/Makefile.qemu_3dnand"
 

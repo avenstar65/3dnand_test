@@ -2,9 +2,9 @@
 
 This directory contains the QEMU source overlay for a basic 3D NAND flash
 device and controller model. QEMU intentionally does not implement page-raid,
-parity-log layout, parity recovery, or MTD-visible policy. Those belong to the
-Linux `qemu_3dnand` driver so the same simulated flash can be used to validate
-different kernel-side mapping schemes.
+parity-log layout, parity recovery, or MTD-visible policy. The current Linux
+`qemu_3dnand` branch does not implement those policies either; it exposes the
+data pool through standard Raw NAND Core semantics.
 
 The repository can fetch and build QEMU 11.x automatically. To apply this
 overlay manually, copy the files into a QEMU source tree:
@@ -32,7 +32,7 @@ Implemented base functions:
 | First-page `OOB[0]` bad-block marker | Implemented (`0xff` good, `0x00` bad) |
 | 25MiB data block erase | Implemented |
 | Basic page read/program/block erase commands | Implemented |
-| Independent 128 B logical-OOB read/program commands | Implemented |
+| Independent 1024 B logical-OOB read/program commands | Implemented |
 | Arbitrary/repeated page program with NAND bytewise-AND semantics | Implemented |
 | MMIO data-loss fault injection | Implemented |
 | Basic media statistics | Implemented |
@@ -41,8 +41,8 @@ Implemented base functions:
 | Page-RAID runtime-state replay | Not implemented in this phase |
 | Linux PCI probe driver | Implemented |
 | Linux MTD registration | Implemented in the Linux overlay |
-| Linux driver-owned scheme D page-raid | Implemented in the Linux overlay |
-| Linux raw NAND `exec_op()` integration | Not implemented |
+| Linux driver-owned scheme D page-raid | Not implemented in this branch |
+| Linux raw NAND legacy `cmdfunc()`/`waitfunc()` integration | Implemented |
 | Machine/DT wiring | PCI path used first; DT path not implemented |
 
 The MMIO interface is intentionally simple for the first bring-up:
@@ -54,9 +54,9 @@ The MMIO interface is intentionally simple for the first bring-up:
 | `Q3N_REG_CMD` | `0x0010` | Execute base, main-page, or logical-OOB commands |
 | `Q3N_REG_ADDR_LO/HI` | `0x0014/0x0018` | Physical byte address in the simulated media |
 | `Q3N_REG_LEN` | `0x001c` | Resets PIO buffer for a transfer |
-| `Q3N_REG_GEOM0/1` | `0x0020/0x0024` | 16 KiB page/128 B logical OOB and pages/block geometry |
+| `Q3N_REG_GEOM0/1` | `0x0020/0x0024` | 16 KiB page/1024 B logical OOB and pages/block geometry |
 | `Q3N_REG_POOL0/1` | `0x0028/0x002c` | Data/parity/meta/reserve pool sizes |
-| `Q3N_REG_OOB_LEN` | `0x0030` | Logical-OOB transfer length (must be 128; resets PIO staging) |
+| `Q3N_REG_OOB_LEN` | `0x0030` | Logical-OOB transfer length (must be 1024; resets PIO staging) |
 | `Q3N_REG_STAT_*` | `0x0040..0x005c` | Page program/block erase/read-error/fault counters |
 | `Q3N_REG_FAULT_ADDR_LO/HI` | `0x0060/0x0064` | Physical byte address for fault injection |
 | `Q3N_REG_FAULT_CTRL` | `0x0068` | Trigger data loss, next-program failure, or persistent bitflip injection |
@@ -84,19 +84,19 @@ the default sparse raw image as `q3n-nand-pci,drive=q3n-media`; `--fresh-nand`
 removes that image before QEMU starts and `--nand-image` selects another path.
 
 Image v2 begins with a 4 KiB `Q3NMEDIA` header followed by fixed physical-page
-slots. Each physical page is exactly `0x4680` bytes:
+slots. Each physical page is exactly `0x4a00` bytes:
 
 ```text
 0x0000..0x3fff main
 0x4000         OOB head / BBM / logical OOB[0]
 0x4001..0x4600 LDPC
-0x4601..0x467f OOB tail / logical OOB[1..127]
+0x4601..0x49ff OOB tail / logical OOB[1..1023]
 ```
 
 The first physical page of every block reserves `0x4000` as the
-Linux-compatible bad-block marker. Linux `_block_markbad` constructs a 128 B
-logical OOB buffer with byte 0 cleared and submits the ordinary OOB PROGRAM
-command; there is no dedicated mark-bad command.
+Linux-compatible bad-block marker. NAND Core constructs a 1024 B logical OOB
+buffer with byte 0 cleared and submits the ordinary OOB PROGRAM command; there
+is no dedicated mark-bad command.
 
 The page slots are followed by sparse, fixed-size error-overlay slots. Each page
 has a 16384 B main bitmap and a 1536 B LDPC bitmap. Fault injection XORs bits in
@@ -105,9 +105,9 @@ erasing a block clears all of its overlays. Version 1 images are intentionally
 rejected because their physical-page stride and OOB semantics are incompatible
 with version 2.
 
-The controller exposes only a 128 B logical OOB: byte 0 maps to `0x4000`, and
-bytes 1..127 map to `0x4601..0x467f`. Commands 6 and 7 transfer exactly those
-128 bytes and never transfer main data. OOB PROGRAM applies NAND bytewise-AND
+The controller exposes only a 1024 B logical OOB: byte 0 maps to `0x4000`, and
+bytes 1..1023 map to `0x4601..0x49ff`. Commands 6 and 7 transfer exactly those
+1024 bytes and never transfer main data. OOB PROGRAM applies NAND bytewise-AND
 semantics while preserving main and LDPC. Main PROGRAM independently updates
 the 16 KiB main and deterministically generates all 16 simulated LDPC steps
 from the physical page key, profile, step, and 1024 B main-data step while
@@ -124,8 +124,8 @@ This format contains no stripe, parity, generation, MTD, UBI, or FTL semantics.
 The current durability contract covers normal QEMU shutdown; crash/kill
 recovery is not claimed.
 
-QEMU persists raw NAND bytes and bitflip overlays.  The driver does not
-restore Page-RAID runtime state after reload or VM restart in this phase.
+QEMU persists raw NAND bytes and bitflip overlays. Page RAID state does not
+exist in this branch.
 
 For x86_64 bring-up, use the PCI wrapper:
 
@@ -133,15 +133,9 @@ For x86_64 bring-up, use the PCI wrapper:
 work/build/qemu-11.0.2/qemu-system-x86_64-unsigned -machine q35 -device q3n-nand-pci ...
 ```
 
-The Linux overlay currently registers an MTD device named `qemu-3dnand`. Its
-first read/write/erase path talks to the QEMU model through the controller MMIO
-commands. The Linux driver maps MTD logical pages to the QEMU physical media and
-owns the current scheme D page-raid/parity-log policy. A raw NAND `exec_op()`
-controller integration remains a later phase if we want the Linux raw NAND core
-to perform NAND scan and command sequencing itself.
-
-In the guest, `mtd.sh q3n-stats` reads debugfs counters and
-`mtd.sh q3n-inject-loss <logical-byte-address>` injects a single data page loss
-through the QEMU fault registers. QEMU only reports the physical read failure;
-the Linux driver decides whether the missing page can be rebuilt from its
-driver-owned page-raid metadata.
+The Linux overlay registers an MTD device named `qemu-3dnand` through
+`nand_scan_with_ids()`. Raw NAND Core owns MTD read/write/erase, bad-block and
+BBT behavior. The Linux driver uses legacy `cmdfunc()`/`waitfunc()` callbacks
+for RESET, READID, STATUS and ERASE, page/OOB ECC callbacks for data transfer,
+and `setup_read_retry()` for NAND Core retry iteration. It does not register
+controller `exec_op()`. No Page RAID object is linked.

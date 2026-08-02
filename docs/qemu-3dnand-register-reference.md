@@ -7,18 +7,18 @@
 - PCI Vendor ID：`0x1b36`
 - PCI Device ID：`0x003d`
 - PCI Revision：`0x01`
-- MMIO 空间大小：`0x10000`
+- MMIO 空间大小：`0x20000`
 - 字节序：Little Endian
 - 支持的 MMIO 访问宽度：1～4 字节
 - 物理 main page：16 KiB
-- 物理 OOB：1664 B
-- Linux 可见的逻辑 OOB：128 B
+- 物理 OOB：2560 B（1 B BBM、1536 B LDPC、1023 B logical OOB tail）
+- Linux 可见的逻辑 OOB：1024 B
 - ECC step：1024 B
 - ECC 强度：40 bit/step
 - LDPC 数据：96 B/step，共 16 step
 
 物理地址寄存器使用 16 KiB main page 作为寻址步长，而不是使用
-`16 KiB + 1664 B` 的后端物理槽位大小。
+`16 KiB + 2560 B` 的后端物理槽位大小。
 
 - 页操作要求地址按 16 KiB 对齐。
 - 块操作要求地址按 erase block 对齐。
@@ -68,19 +68,33 @@
 | `0x00b0` | `Q3N_REG_STAT_LDPC_CORRECTED` | RO | 累计纠正 bit 数 |
 | `0x00b4` | `Q3N_REG_STAT_LDPC_UNCORRECTABLE` | RO | 累计不可纠正页数 |
 | `0x00b8` | `Q3N_REG_STAT_LDPC_FAILED_STEPS` | RO | 累计不可纠正 step 数 |
+| `0x00bc` | `Q3N_REG_READ_FLAGS` | RW | bit0 为 raw read 标志 |
+| `0x00c0` | `Q3N_REG_RETRY_MODE` | RW | 读重试模式，范围 0..3 |
+| `0x00c4` | `Q3N_REG_MP_DIE` | RW | four-plane group 的 die，范围 0..1 |
+| `0x00c8` | `Q3N_REG_MP_BLOCK` | RW | 每 plane block，范围 0..207 |
+| `0x00cc` | `Q3N_REG_MP_PAGE` | RW | 每 block page，范围 0..1599 |
+| `0x00d0` | `Q3N_REG_MP_DONE_MASK` | RO | 成功 plane bitmap |
+| `0x00d4` | `Q3N_REG_MP_FAIL_MASK` | RO | 失败 plane bitmap |
+| `0x00d8` | `Q3N_REG_MP_ECC_SELECT` | RW | 选择返回 ECC 的 plane，范围 0..3 |
+| `0x00dc` | `Q3N_REG_MP_ECC_STATUS` | RO | selected plane 的 ECC 状态 |
+| `0x00e0` | `Q3N_REG_MP_ECC_MAX_BITFLIPS` | RO | selected plane 的最大纠错 bitflip |
+| `0x00e4` | `Q3N_REG_MP_ECC_CORRECTED_BITS` | RO | selected plane 的累计纠错 bit 数 |
+| `0x00e8` | `Q3N_REG_MP_ECC_FAILED_STEP` | RO | selected plane 的第一个失败 ECC step |
 | `0x1000` | `Q3N_REG_DATA` | RW | 流式 PIO 数据窗口 |
 
 未定义的寄存器偏移读取返回 0，写入被忽略。
 
 ## 3. 控制器能力
 
-`Q3N_REG_CAP` 当前固定返回 `0x00000007`。
+`Q3N_REG_CAP` 当前固定返回 `0x0000001f`。
 
 | 位 | 定义 | 说明 |
 | ---: | --- | --- |
 | 0 | `Q3N_CAP_BASIC_FLASH` | 支持基础 NAND 读、写、擦除 |
 | 1 | `Q3N_CAP_PERSISTENT_MEDIA` | 支持持久化 NAND 后端镜像 |
 | 2 | `Q3N_CAP_BAD_BLOCK_MARKER` | 支持物理坏块标记 |
+| 3 | `Q3N_CAP_READ_RETRY` | 支持四档 read-retry 选择 |
+| 4 | `Q3N_CAP_MULTIPLANE` | 支持固定 four-plane group 命令 |
 
 ## 4. 状态寄存器
 
@@ -93,8 +107,9 @@
 | 2 | `Q3N_STATUS_ECC_UNCORRECTABLE` | 最近一次页读取存在不可纠正 LDPC 错误 |
 
 开始执行命令时，控制器清除 `READY` 和普通 `ERROR`。命令完成后重新置
-`READY`。新的 main 页读取或 RESET 会清除上一笔 ECC 结果；OOB-only
-读取不改变 ECC 结果。
+`READY`。非 raw `READ_PAGE` 会清除并以本次结果替换 scalar ECC；raw
+`READ_PAGE` 保留此前的 scalar ECC。RESET 清除 scalar ECC，OOB-only 读取
+不改变它。
 
 不可纠正 LDPC 错误使用 `Q3N_STATUS_ECC_UNCORRECTABLE` 和 ECC 结果寄存器
 报告，不等同于底层介质 I/O 失败。
@@ -111,16 +126,21 @@
 | 3 | `Q3N_CMD_PROGRAM_PAGE` | 编程 main，由 QEMU 自动生成 LDPC |
 | 4 | `Q3N_CMD_ERASE_BLOCK` | 擦除物理块及其 bitflip overlay |
 | 5 | `Q3N_CMD_RESET` | 复位命令、PIO、IRQ、ECC 和一次性 PROGRAM 故障状态 |
-| 6 | `Q3N_CMD_READ_PAGE_OOB` | 只读取 128 B logical OOB |
-| 7 | `Q3N_CMD_PROGRAM_PAGE_OOB` | 只编程 128 B logical OOB，保留 main 和 LDPC |
+| 6 | `Q3N_CMD_READ_PAGE_OOB` | 只读取 1024 B logical OOB |
+| 7 | `Q3N_CMD_PROGRAM_PAGE_OOB` | 只编程 1024 B logical OOB，保留 main 和 LDPC |
 | 8 | `Q3N_CMD_GET_BLOCK_STATUS` | 查询目标物理块的 BBM |
+| 9 | `Q3N_CMD_MP_READ_PAGE` | 读取一个 four-plane group 的 65536 B main |
+| 10 | `Q3N_CMD_MP_PROGRAM_PAGE` | 编程一个 four-plane group 的 65536 B main |
+| 11 | `Q3N_CMD_MP_READ_OOB` | 读取一个 four-plane group 的 4096 B logical OOB |
+| 12 | `Q3N_CMD_MP_PROGRAM_OOB` | 编程一个 four-plane group 的 4096 B logical OOB |
+| 13 | `Q3N_CMD_MP_ERASE_GROUP` | 擦除同 die 的四个 physical block |
 
 ### 5.1 READ_ID 返回值
 
 `READ_ID` 在 PIO buffer 中返回：
 
 ```text
-2c d7 90 a6 51 33 4e 44
+9c d7 98 a6 51 33 4e 44
 ```
 
 后四个字节的 ASCII 表示为 `Q3ND`。
@@ -142,6 +162,8 @@ RESET 会：
 - 清空 PIO buffer 游标和有效长度；
 - 清除 IRQ 状态并拉低 IRQ；
 - 清除最近一次 ECC 结果；
+- 清除 multi-plane 地址、DONE/FAIL mask、ECC selector、per-plane ECC
+  结果和 PIO staging 状态；
 - 产生一次新的命令完成状态。
 
 RESET 不清零累计统计寄存器。
@@ -178,17 +200,44 @@ page          = physical_page % 1600
 | --- | ---: |
 | `PROGRAM_PAGE` | 16384 B |
 
-### 6.3 OOB_LEN
+### 6.3 Fixed four-plane group
+
+multi-plane 命令不使用 `ADDR_HI:ADDR_LO`；它们使用 `MP_DIE`、`MP_BLOCK`
+和 `MP_PAGE`，一次请求固定覆盖同一 die 的 plane0、plane1、plane2、plane3。
+main 的 `LEN` 必须为 `65536`，OOB 的 `OOB_LEN` 必须为 `4096`，并且 DATA
+按 plane0、plane1、plane2、plane3 的连续 slice 顺序流动：每个 main slice
+为 16384 B，每个 OOB slice 为 1024 B。ERASE 不携带 main 或 OOB 数据。
+
+控制器会在接触介质前验证 die、block、page 和精确传输长度。预验证失败时
+`MP_DONE_MASK == 0` 且 `MP_FAIL_MASK == 0`，不会改变介质。已完成的合法
+group 命令必须满足：
+
+```text
+done_mask | fail_mask == 0x0f
+done_mask & fail_mask == 0
+```
+
+单个 plane 的 media 失败不会阻止后续 plane 执行。它由 FAIL mask 和普通
+`STATUS.ERROR` 可见；已成功的成员不会回滚。ECC 不可纠正是独立的
+per-plane ECC 状态，不会设置 FAIL mask。Linux 以 `MP_ECC_SELECT=0..3`
+读取四条结果，汇总时 corrected bits 为四 plane 之和、max bitflips 为四者
+最大值，并对每个 retry mode 重读完整 group。
+
+每个合法 group 命令在四个成员都终态后只产生一次 READY 和一次完成 IRQ。
+这是功能性的 group ABI；模型并不模拟真实 NAND 总线时序或四 plane 的并行
+性能。
+
+### 6.4 OOB_LEN
 
 独立 logical OOB 命令要求：
 
 ```text
-Q3N_REG_OOB_LEN = 128
+Q3N_REG_OOB_LEN = 1024
 ```
 
 写 `OOB_LEN` 也会把 PIO `data_pos` 和 `data_count` 复位为 0。随后命令 6
-返回恰好 128 B，命令 7 至少需要 128 B 有效 PIO 数据；两者均不读取或写入
-main，也不生成、解码或清除 LDPC/ECC 结果。长度不为 128 时命令返回
+返回恰好 1024 B，命令 7 至少需要 1024 B 有效 PIO 数据；两者均不读取或写入
+main，也不生成、解码或清除 LDPC/ECC 结果。长度不为 1024 时命令返回
 `STATUS.ERROR`。
 
 ## 7. 几何寄存器
@@ -203,13 +252,13 @@ bits [31:16] = logical OOB size
 当前值：
 
 ```text
-Q3N_REG_GEOM0 = 0x00804000
+Q3N_REG_GEOM0 = 0x04004000
 ```
 
 表示：
 
 - page size：`0x4000` = 16384 B；
-- logical OOB：`0x80` = 128 B。
+- logical OOB：高 16 位为 `0x0400` = 1024 B。
 
 ### 7.2 GEOM1
 
@@ -308,10 +357,18 @@ Q3N_REG_POOL1 = 0x00040003
 当前 QEMU 不维护每页是否已经编程的状态，所以块状态只反映 BBM，不反映
 “块是否擦除”。
 
-Linux `_block_markbad` 不使用专用控制器命令。它构造 128 B logical OOB
-（全部为 `0xff`，byte 0 为 `0x00`），并对块首页执行
-`PROGRAM_PAGE_OOB`。因此标坏与普通 OOB 编程共享同一条 NAND
-bytewise-AND 路径；重复标坏是幂等操作，main 和 LDPC 保持不变。
+坏块接口由 NAND Core 管理，不存在驱动私有 `_block_markbad` 或专用
+控制器标坏命令。legacy single-page 模式的 OOB PROGRAM 使用物理 BBM。
+four-plane 模式将 logical OOB 切为 plane0..3 四个 1024 B slice；首页的
+BBM 位置是 `0/1024/2048/3072`。读取时 logical byte 0 为四个 BBM 的按位
+AND；写首页 OOB 时驱动先按位 AND 再复制至四个位置，因此任一 plane bad
+都会使整个 logical group bad。
+
+NAND Core 的 `nand_block_markbad_lowlevel()` 在写 BBM、更新 RAM BBT 前会
+擦除该 logical block。因此 multi-plane 的 `MEMSETBADBLOCK` 后，四个 BBM
+和重扫后的 BBT 可见，而物理 group main 已处于擦除态；这不等同于普通
+OOB-only PROGRAM 的 main/LDPC 保留语义。416 个 logical block 的 RAM BBT
+使用 104 B，且没有驱动维护的第二份 BBT。
 
 ## 12. ECC/LDPC 几何
 
@@ -350,7 +407,8 @@ Q3N_REG_ECC_GEOM1 = 0x00100060
 
 ## 13. ECC 读取结果
 
-每次 `READ_PAGE` 开始前，控制器清除旧 ECC 结果，读取完成后锁存：
+非 raw `READ_PAGE` 开始前清除旧 scalar ECC，读取完成后以本次结果锁存；
+raw `READ_PAGE` 保留先前的 scalar ECC 寄存器值：
 
 | 寄存器 | 说明 |
 | --- | --- |
@@ -366,6 +424,9 @@ Q3N_REG_ECC_GEOM1 = 0x00100060
 | 0 | `Q3N_ECC_STATUS_CLEAN` |
 | bit0 | `Q3N_ECC_STATUS_CORRECTED` |
 | bit1 | `Q3N_ECC_STATUS_UNCORRECTABLE` |
+
+这一规则只针对 single-page scalar ECC。multi-plane raw read 会清零其四个
+per-plane ECC array，但不会清除 single-page scalar/global 最近 ECC 寄存器。
 
 没有失败 step 时：
 
@@ -445,19 +506,19 @@ bitflip 保存在持久 overlay 中。对同一范围再次 XOR 注入会恢复�
 PIO 数据窗口范围：
 
 ```text
-0x1000 ～ 0x507f
+0x1000 ～ 0x10fff
 ```
 
 MMIO 窗口容量：
 
 ```text
-16512 B
+65536 B
 ```
 
 尽管窗口在 MMIO 中占据连续地址区间，当前实现使用内部 `data_pos` 顺序
 读写，不会用本次 MMIO offset 作为 buffer 下标。因此驱动可以反复访问
-`Q3N_REG_DATA`。单个命令不会组合 main 与 OOB：main 命令传 16384 B，
-OOB 命令传 128 B。
+`Q3N_REG_DATA`。单个命令不会组合 main 与 OOB：single-page main/OOB
+命令分别传 16384/1024 B，multi-plane main/OOB 命令分别传 65536/4096 B。
 
 行为：
 
@@ -474,20 +535,24 @@ OOB 命令传 128 B。
 | `READ_ID` | 8 B |
 | `READ_PAGE` | 16384 B |
 | `PROGRAM_PAGE` | 至少 16384 B |
-| `READ_PAGE_OOB` | 128 B |
-| `PROGRAM_PAGE_OOB` | 至少 128 B |
+| `READ_PAGE_OOB` | 1024 B |
+| `PROGRAM_PAGE_OOB` | 至少 1024 B |
+| `MP_READ_PAGE` | 65536 B |
+| `MP_PROGRAM_PAGE` | 至少 65536 B |
+| `MP_READ_OOB` | 4096 B |
+| `MP_PROGRAM_OOB` | 至少 4096 B |
 
 物理 OOB 中的 1536 B LDPC 不会出现在 PIO 窗口中。
 
 ## 16. 物理 OOB 与逻辑 OOB 映射
 
-物理 page 的后端槽位总长为 `0x4680`，布局：
+物理 page 的后端槽位总长为 `0x4a00`，布局：
 
 ```text
 0x0000..0x3fff main
 0x4000         OOB head / BBM / logical OOB[0]
 0x4001..0x4600 LDPC
-0x4601..0x467f OOB tail / logical OOB[1..127]
+0x4601..0x49ff OOB tail / logical OOB[1..1023]
 ```
 
 物理范围：
@@ -496,14 +561,14 @@ OOB 命令传 128 B。
 | --- | ---: | --- |
 | `0x4000` | 1 B | OOB head / BBM |
 | `0x4001..0x4600` | 1536 B | 16 份 LDPC，每份 96 B |
-| `0x4601..0x467f` | 127 B | OOB tail / 软件 metadata |
+| `0x4601..0x49ff` | 1023 B | OOB tail / 软件 metadata |
 
 逻辑 OOB：
 
 | 逻辑 OOB 范围 | 映射 |
 | --- | --- |
 | byte 0 | 物理 `0x4000`，即 BBM |
-| bytes 1～127 | 物理 `0x4601..0x467f` |
+| bytes 1～1023 | 物理 `0x4601..0x49ff` |
 
 因此：
 
@@ -511,7 +576,7 @@ OOB 命令传 128 B。
 - 软件写逻辑 OOB 第一个字节可以标记坏块；
 - LDPC 区域完全由 QEMU 控制器生成和检查；
 - Linux 驱动不能直接读写物理 LDPC 字节；
-- main PROGRAM 保留 `0x4000` 与 `0x4601..0x467f`；
+- main PROGRAM 保留 `0x4000` 与 `0x4601..0x49ff`；
 - OOB PROGRAM 保留 `0x0000..0x3fff` 与 `0x4001..0x4600`。
 
 ## 17. 统计寄存器说明
@@ -541,14 +606,22 @@ OOB 命令传 128 B。
 - 页可以任意、重复 PROGRAM。
 - 重复 PROGRAM 使用 NAND 的逐字节 `old & incoming` 规则。
 - 块内严格编程顺序由上层文件系统/软件保证。
-- QEMU 不保存 RAID stripe、parity generation 或运行时 unprotected 状态。
-- RAID 布局、parity 调度和恢复策略属于 Linux 驱动。
-- 当前阶段不恢复 VM 重启前的 RAID 运行时状态。
+- 当选择 Page RAID 时，当前 NAND Core 驱动实现同步 Page RAID layout、parity
+  PROGRAM 和单页恢复；该模式的对象在链接时按配置加入。
+- 已移除的是迁移前的异步 scheduler、其 debugfs counter/fault ABI，以及
+  runtime parity queue/unprotected-state 统计；这些不应被当作当前接口或
+  跨 VM 恢复状态。
+- multi-plane group 会在控制器内部按 plane0..3 完成功能性处理；它不是
+  timing-accurate 的 ONFI 命令周期或性能模型，也不声明真实并行吞吐。
+- group PROGRAM/ERASE 可以部分成功；控制器报告 mask，但不回滚、不自动
+  markbad，且不提供掉电原子性或恢复协议。
 
 ## 19. 对应源码
 
 - QEMU 寄存器与位定义：`qemu/include/hw/mtd/q3n-nand.h`
 - QEMU MMIO 实现：`qemu/hw/mtd/q3n-nand.c`
 - QEMU 持久介质实现：`qemu/hw/mtd/q3n-media.c`
-- Linux 驱动寄存器定义：`linux/drivers/mtd/nand/raw/qemu_3dnand.h`
-- Linux MTD 驱动实现：`linux/drivers/mtd/nand/raw/qemu_3dnand_main.c`
+- Linux 驱动寄存器定义：`linux/drivers/mtd/nand/raw/qemu_3dnand_regs.h`
+- Linux multi-plane MMIO 与逻辑操作：
+  `linux/drivers/mtd/nand/raw/qemu_3dnand_hw_multiplane.c`、
+  `linux/drivers/mtd/nand/raw/qemu_3dnand_multiplane.c`
