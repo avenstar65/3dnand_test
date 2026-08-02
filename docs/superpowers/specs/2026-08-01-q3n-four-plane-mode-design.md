@@ -631,6 +631,11 @@ per-plane program/erase failure 和 deterministic ECC retry 至少由 host/QEMU
 模型测试覆盖；若后续增加 guest fault-injection 入口，再补 guest 用例，首期
 不虚假声明已完成 guest 故障注入。
 
+NAND-Core 迁移前的 `q3n-serial-smoke` 依赖已移除的 scheduler/debugfs
+counter，不是当前 Page RAID 回归。当前实现以 `q3n-page-raid-smoke` 作为
+RAID4 guest 验收：它使用专用 fresh image，验证当前逻辑几何与 raw
+main/OOB round-trip，且不触碰 legacy image。
+
 ## 14. 风险与约束
 
 - QEMU media API 顺序执行四次只能证明功能性 group 语义，不能证明并行

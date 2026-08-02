@@ -59,10 +59,13 @@ legacy callbacks 处理 RESET、READID、STATUS 和 ERASE，使用
 `chip->ecc.*` 处理 page/OOB/raw 数据，并通过 `setup_read_retry()` 接入
 NAND Core 的 read retry；不注册 controller `exec_op()`。
 
-配置并编译内核：
+配置并编译内核。默认是 identity；也可显式选择 identity、Page RAID 2:1/4:1/8:1
+或 fixed four-plane：
 
 ```sh
 ./scripts/configure-kernel.sh
+./scripts/configure-kernel.sh --q3n-mode page-raid-4
+./scripts/configure-kernel.sh --q3n-mode multiplane
 ./scripts/build-kernel.sh
 ```
 
@@ -84,7 +87,7 @@ NAND Core 的 read retry；不注册 controller `exec_op()`。
 ./scripts/run-qemu.sh
 ```
 
-`run-qemu.sh` 默认复用 `work/media/q3n-nand.raw`，因此物理 NAND 的 main、
+`run-qemu.sh` 默认以 identity mode 复用 `work/media/q3n-nand.raw`，因此物理 NAND 的 main、
 OOB、坏块标记和 bitflip overlay 会在 QEMU 正常退出后保留。需要全新擦除态介质
 时使用：
 
@@ -94,6 +97,20 @@ OOB、坏块标记和 bitflip overlay 会在 QEMU 正常退出后保留。需要
 
 也可以用 `--nand-image PATH` 选择独立镜像。镜像是约 51 GiB 的固定布局 sparse
 raw 文件，实际只为 header、已写物理页和 overlay 分配空间。
+
+four-plane mode 必须配合 multi-plane 内核配置，默认使用独立的
+`work/media/q3n-nand-multiplane.raw`，不会迁移、删除或复用旧镜像：
+
+```sh
+./scripts/run-qemu.sh --nand-mode multiplane
+./scripts/run-qemu.sh --nand-mode multiplane --fresh-nand
+./scripts/run-qemu.sh --nand-mode page-raid
+```
+
+`--nand-mode` 只接受 `identity`、`page-raid` 或 `multiplane`；启动前会检查
+已构建内核的匹配 Kconfig。multi-plane 向 NAND Core 注册 65536 B page、4096 B
+OOB、104857600 B eraseblock 和 416 logical blocks。它一次提交固定 plane0..3
+group；这是功能性接口，不代表真实 NAND 并行性能、回滚或掉电原子性。
 
 每个 `0x4a00` B 物理页的精确布局为：
 
@@ -105,9 +122,10 @@ raw 文件，实际只为 header、已写物理页和 overlay 分配空间。
 ```
 
 命令 6/7 各自只传输 1024 B logical OOB，不携带 main，也不向 guest 暴露
-LDPC。Linux 标坏通过普通 OOB PROGRAM 将 logical OOB byte 0 编程为 `00`；
-没有专用 mark-bad 命令。OOB PROGRAM 保留 main 与 LDPC，main PROGRAM
-保留 OOB head/tail。
+LDPC。没有专用 mark-bad 命令。普通 OOB PROGRAM 保留 main 与 LDPC，main
+PROGRAM 保留 OOB head/tail。NAND Core 的 `MEMSETBADBLOCK` 路径会在 BBM/BBT
+更新前先擦除 block：four-plane 验收因此检查四个 BBM、BBT 重扫和擦除态，而
+不把 markbad 后 main 保持作为契约。
 
 原始介质跨重启持久性验收命令为：
 
@@ -230,6 +248,23 @@ Q3N NAND Core 的 guest 持久化与坏块验收可直接运行：
 编程和 NAND Core 标坏；第二轮复用介质并验证 BBT、BBM、主区摘要以及坏块
 写擦拒绝。基础结构、补丁、地址换算、ID 白名单、控制器、ECC/read retry
 契约可运行 `./scripts/smoke-test.sh` 验证。
+
+four-plane 的一次 guest 验收和两次启动的持久化验收分别为：
+
+```sh
+./scripts/shell.sh ./scripts/configure-kernel.sh --q3n-mode multiplane
+./scripts/shell.sh ./scripts/build-kernel.sh
+./scripts/shell.sh ./scripts/build-rootfs.sh
+./scripts/q3n-multiplane-smoke.sh
+./scripts/q3n-multiplane-persistence-smoke.sh
+```
+
+五种 Linux 存储配置的独立构建契约可运行
+`./scripts/q3n-kernel-matrix.sh`。旧 Page RAID 的串行 guest 冒烟仍使用
+`./scripts/q3n-serial-smoke.sh`，但它是 NAND-Core 迁移前的 scheduler/debugfs
+验收，保留作历史工具而不适用于当前驱动。当前 Page RAID 4:1 回归使用
+`./scripts/q3n-page-raid-smoke.sh`；它选择 page-raid mode 和专用
+`q3n-page-raid4-smoke.raw`，不会改动 `q3n-nand.raw`。
 
 ## 常见问题
 

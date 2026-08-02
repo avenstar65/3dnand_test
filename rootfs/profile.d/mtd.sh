@@ -57,6 +57,7 @@ mtd_find_q3n() {
 mtd_smoke_command_for() {
   case "${1:-}" in
     q3n-serial-smoke) printf '%s\n' mtd_q3n_serial_smoke ;;
+    q3n-page-raid-smoke) printf '%s\n' mtd_q3n_page_raid_smoke ;;
     q3n-multiplane-smoke) printf '%s\n' mtd_q3n_multiplane_smoke ;;
     q3n-multiplane-persist-prepare) printf '%s\n' mtd_q3n_multiplane_persist_prepare ;;
     q3n-multiplane-persist-verify) printf '%s\n' mtd_q3n_multiplane_persist_verify ;;
@@ -66,6 +67,43 @@ mtd_smoke_command_for() {
     1) printf '%s\n' mtd_smoke ;;
     *) return 1 ;;
   esac
+}
+
+mtd_q3n_page_raid_expect() {
+  [ "$1" = "$2" ] || {
+    echo "q3n page RAID smoke: $3=$1, expected $2"
+    return 1
+  }
+}
+
+mtd_q3n_page_raid_smoke() {
+  mtd_load_q3n || return 1
+  raid_num=$(mtd_find_q3n)
+  [ -n "$raid_num" ] || return 1
+  raid_dev="/dev/mtd${raid_num}"
+  raid_sys="/sys/class/mtd/mtd${raid_num}"
+  raid_writesize=$(cat "$raid_sys/writesize") || return 1
+  raid_oobsize=$(cat "$raid_sys/oobsize") || return 1
+  raid_oobavail=$(cat "$raid_sys/oobavail") || return 1
+  raid_erasesize=$(cat "$raid_sys/erasesize") || return 1
+  raid_size=$(cat "$raid_sys/size") || return 1
+  mtd_q3n_page_raid_expect "$raid_writesize" 65536 writesize || return 1
+  mtd_q3n_page_raid_expect "$raid_oobsize" 4096 oobsize || return 1
+  mtd_q3n_page_raid_expect "$raid_oobavail" 4095 oobavail || return 1
+  mtd_q3n_page_raid_expect "$raid_erasesize" 20971520 erasesize || return 1
+  mtd_q3n_page_raid_expect "$raid_size" 34896609280 size || return 1
+  mtd_q3n_page_raid_expect "$((raid_size / raid_erasesize))" 1664 blocks || return 1
+
+  flash_erase -q "$raid_dev" 0 2 || return 1
+  mtd_badblock page-pattern-write raw "$raid_dev" 0 0x71 0xa5 || return 1
+  mtd_badblock page-pattern-read raw "$raid_dev" 0 0x71 0xa5 || return 1
+  # Exercise the final page of block 0 and the first page of block 1.
+  raid_boundary=$((raid_erasesize - raid_writesize))
+  mtd_badblock page-pattern-write raw "$raid_dev" "$raid_boundary" 0x72 0xa6 || return 1
+  mtd_badblock page-pattern-read raw "$raid_dev" "$raid_boundary" 0x72 0xa6 || return 1
+  mtd_badblock page-pattern-write raw "$raid_dev" "$raid_erasesize" 0x73 0xa7 || return 1
+  mtd_badblock page-pattern-read raw "$raid_dev" "$raid_erasesize" 0x73 0xa7 || return 1
+  echo "q3n page RAID guest complete writesize=$raid_writesize oobsize=$raid_oobsize oobavail=$raid_oobavail erasesize=$raid_erasesize size=$raid_size blocks=$((raid_size / raid_erasesize))"
 }
 
 mtd_q3n_multiplane_cleanup() {
