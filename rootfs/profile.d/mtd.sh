@@ -58,6 +58,8 @@ mtd_smoke_command_for() {
   case "${1:-}" in
     q3n-serial-smoke) printf '%s\n' mtd_q3n_serial_smoke ;;
     q3n-multiplane-smoke) printf '%s\n' mtd_q3n_multiplane_smoke ;;
+    q3n-multiplane-persist-prepare) printf '%s\n' mtd_q3n_multiplane_persist_prepare ;;
+    q3n-multiplane-persist-verify) printf '%s\n' mtd_q3n_multiplane_persist_verify ;;
     q3n-persist-prepare) printf '%s\n' mtd_q3n_persist_prepare ;;
     q3n-persist-verify) printf '%s\n' mtd_q3n_persist_verify ;;
     ubifs) printf '%s\n' mtd_ubifs ;;
@@ -188,6 +190,99 @@ mtd_q3n_multiplane_smoke() {
   [ "$(mtd_badblock get "$mtd_dev" "$markbad_offset")" = 1 ] || return 1
 
   echo "q3n multi-plane guest complete logical_block=3 die=1 block_in_plane=1 page=0 main_digest=$markbad_digest_before"
+}
+
+mtd_q3n_multiplane_persist_geometry() {
+  mp_persist_num=$(mtd_find_q3n)
+  [ -n "$mp_persist_num" ] || return 1
+  mtd_dev="/dev/mtd${mp_persist_num}"
+  mp_persist_sys="/sys/class/mtd/mtd${mp_persist_num}"
+  writesize=$(cat "$mp_persist_sys/writesize") || return 1
+  oobsize=$(cat "$mp_persist_sys/oobsize") || return 1
+  oobavail=$(cat "$mp_persist_sys/oobavail") || return 1
+  erasesize=$(cat "$mp_persist_sys/erasesize") || return 1
+  mtd_size=$(cat "$mp_persist_sys/size") || return 1
+  mtd_q3n_multiplane_expect "$writesize" 65536 writesize || return 1
+  mtd_q3n_multiplane_expect "$oobsize" 4096 oobsize || return 1
+  mtd_q3n_multiplane_expect "$oobavail" 4092 oobavail || return 1
+  mtd_q3n_multiplane_expect "$erasesize" 104857600 erasesize || return 1
+  mtd_q3n_multiplane_expect "$mtd_size" 43620761600 size || return 1
+  mtd_q3n_multiplane_expect "$((mtd_size / erasesize))" 416 blocks || return 1
+}
+
+mtd_q3n_multiplane_persist_digests() {
+  mtd_badblock page-pattern-read raw "$mtd_dev" 0 0x5a 0xb1 || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-multiplane-persist-main.bin \
+    bs="$writesize" count=1 2>/dev/null || return 1
+  mtd_badblock oob-dump raw "$mtd_dev" 0 0 4096 \
+    >/tmp/q3n-multiplane-persist-oob.bin || return 1
+  mp_persist_main_digest=$(sha256sum /tmp/q3n-multiplane-persist-main.bin | \
+    awk '{print $1}') || return 1
+  mp_persist_oob_digest=$(sha256sum /tmp/q3n-multiplane-persist-oob.bin | \
+    awk '{print $1}') || return 1
+  [ "$mp_persist_main_digest" = \
+    944044fe482bc4e91085c15c5a923a1b9e02eac98d3bce04997d6dbecd2a5b8d ] || return 1
+  [ "$mp_persist_oob_digest" = \
+    f0f9ce8608610d597e3416195182a2d1f47d53cf00f1e72e3824a5bc3bfa7ce8 ] || return 1
+}
+
+mtd_q3n_multiplane_persist_reject_bad_reads() {
+  mp_persist_bad_offset=$1
+  if mtd_badblock page-pattern-read place "$mtd_dev" "$mp_persist_bad_offset" \
+       0x69 0xb9 >/tmp/q3n-multiplane-persist-normal.err 2>&1; then
+    echo "q3n multi-plane persistence: normal MEMREAD unexpectedly read marked block"
+    return 1
+  fi
+  if mtd_badblock page-pattern-read raw "$mtd_dev" "$mp_persist_bad_offset" \
+       0x69 0xb9 >/tmp/q3n-multiplane-persist-raw.err 2>&1; then
+    echo "q3n multi-plane persistence: raw MEMREAD unexpectedly read marked block"
+    return 1
+  fi
+}
+
+mtd_q3n_multiplane_persist_prepare() {
+  mtd_load_q3n || return 1
+  mtd_q3n_multiplane_persist_geometry || return 1
+  mp_persist_bad_offset=$erasesize
+
+  flash_erase -q "$mtd_dev" 0 1 || return 1
+  mtd_badblock page-pattern-write raw "$mtd_dev" 0 0x5a 0xb1 || return 1
+  mtd_q3n_multiplane_persist_digests || return 1
+
+  # NAND Core erases block 1 before programming its BBMs; block-1 payload
+  # preservation is deliberately not part of this persistence contract.
+  flash_erase -q "$mtd_dev" "$mp_persist_bad_offset" 1 || return 1
+  mtd_badblock page-pattern-write raw "$mtd_dev" "$mp_persist_bad_offset" \
+    0x69 0xb9 || return 1
+  mtd_badblock page-pattern-read raw "$mtd_dev" "$mp_persist_bad_offset" \
+    0x69 0xb9 || return 1
+  mtd_badblock set "$mtd_dev" "$mp_persist_bad_offset" >/dev/null || return 1
+  mtd_q3n_multiplane_all_bbm_zero "$mp_persist_bad_offset" || return 1
+  [ "$(mtd_badblock get "$mtd_dev" "$mp_persist_bad_offset")" = 1 ] || return 1
+  mtd_q3n_multiplane_persist_reject_bad_reads "$mp_persist_bad_offset" || return 1
+
+  sync
+  echo "q3n multi-plane persistence expected main_digest=$mp_persist_main_digest oob_digest=$mp_persist_oob_digest bbm=00000000"
+  echo "q3n multi-plane persistence prepare passed"
+}
+
+mtd_q3n_multiplane_persist_verify() {
+  mtd_load_q3n || return 1
+  mtd_q3n_multiplane_persist_geometry || return 1
+  mp_persist_bad_offset=$erasesize
+  mtd_q3n_multiplane_persist_digests || return 1
+  [ "$(mtd_badblock get "$mtd_dev" "$mp_persist_bad_offset")" = 1 ] || return 1
+  mtd_q3n_multiplane_all_bbm_zero "$mp_persist_bad_offset" || return 1
+  mtd_q3n_multiplane_persist_reject_bad_reads "$mp_persist_bad_offset" || return 1
+
+  modprobe -r qemu_3dnand || return 1
+  mtd_load_q3n || return 1
+  mtd_q3n_multiplane_persist_geometry || return 1
+  [ "$(mtd_badblock get "$mtd_dev" "$mp_persist_bad_offset")" = 1 ] || return 1
+  mtd_q3n_multiplane_all_bbm_zero "$mp_persist_bad_offset" || return 1
+
+  echo "q3n multi-plane persistence verified main_digest=$mp_persist_main_digest oob_digest=$mp_persist_oob_digest bbm=00000000"
+  echo "q3n multi-plane persistence verify passed"
 }
 
 mtd_q3n_serial_cleanup() {

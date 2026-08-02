@@ -487,3 +487,215 @@ grep -Fqx 'page-pattern-read raw /dev/mtd0 314572800 0x35 0xa5' "$guest_log" ||
 	fail "multiplane guest did not reject raw MEMREAD after markbad"
 
 printf 'ok: Q3N Linux/QEMU overlays and isolated storage-mode matrix verified\n'
+
+# Task 11: exercise the two-boot persistence wrapper at its QEMU boundary.
+persist_repo="$test_dir/multiplane-persistence-wrapper"
+persist_log="$persist_repo/run-qemu.log"
+persist_old="$persist_repo/work/media/q3n-nand.raw"
+mkdir -p "$persist_repo/scripts/lib" "$persist_repo/work/media"
+cp "$repo_root/scripts/lib/common.sh" "$persist_repo/scripts/lib/common.sh"
+[ -f "$repo_root/scripts/q3n-multiplane-persistence-smoke.sh" ] ||
+	fail "multi-plane persistence host wrapper is missing"
+cp "$repo_root/scripts/q3n-multiplane-persistence-smoke.sh" \
+	"$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh"
+cat >"$persist_repo/scripts/run-qemu.sh" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+stage= fresh=0 mode= image=
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--nand-mode) shift; mode=$1 ;;
+		--nand-image) shift; image=$1 ;;
+		--fresh-nand) fresh=1 ;;
+		--append) shift; stage=${1#MTD_SMOKE=} ;;
+	esac
+	shift
+done
+printf 'stage=%s fresh=%s mode=%s image=%s\n' "$stage" "$fresh" "$mode" "$image" >>"$Q3N_TEST_PERSIST_LOG"
+image_path=$image
+case "$image_path" in
+	/*) ;;
+	*) image_path="$(dirname -- "$0")/../$image_path" ;;
+esac
+case "$stage" in
+	q3n-multiplane-persist-prepare)
+		[ "$fresh" = 1 ] || exit 91
+		mkdir -p "$(dirname "$image_path")"
+		printf Q3NMEDIA >"$image_path"
+		dd if=/dev/zero of="$image_path" bs=1 count=1 seek=67108863 2>/dev/null
+		kind=expected
+		;;
+	q3n-multiplane-persist-verify)
+		[ "$fresh" = 0 ] || exit 92
+		[ -f "$image_path" ] || exit 93
+		kind=verified
+		;;
+	*) exit 94 ;;
+esac
+main=${Q3N_TEST_PERSIST_MAIN:-944044fe482bc4e91085c15c5a923a1b9e02eac98d3bce04997d6dbecd2a5b8d}
+oob=${Q3N_TEST_PERSIST_OOB:-f0f9ce8608610d597e3416195182a2d1f47d53cf00f1e72e3824a5bc3bfa7ce8}
+bbm=${Q3N_TEST_PERSIST_BBM:-00000000}
+[ "$kind" = verified ] || main=${Q3N_TEST_PERSIST_PREPARE_MAIN:-$main}
+[ "$kind" = verified ] || oob=${Q3N_TEST_PERSIST_PREPARE_OOB:-$oob}
+[ "$kind" = verified ] || bbm=${Q3N_TEST_PERSIST_PREPARE_BBM:-$bbm}
+[ "$kind" = expected ] || main=${Q3N_TEST_PERSIST_VERIFY_MAIN:-$main}
+[ "$kind" = expected ] || oob=${Q3N_TEST_PERSIST_VERIFY_OOB:-$oob}
+[ "$kind" = expected ] || bbm=${Q3N_TEST_PERSIST_VERIFY_BBM:-$bbm}
+printf 'q3n multi-plane persistence %s main_digest=%s oob_digest=%s bbm=%s\n' "$kind" "$main" "$oob" "$bbm"
+[ "${Q3N_TEST_PERSIST_DUPLICATE:-}" != "$kind" ] ||
+	printf 'q3n multi-plane persistence %s main_digest=%s oob_digest=%s bbm=%s\n' "$kind" "$main" "$oob" "$bbm"
+[ "${Q3N_TEST_PERSIST_MALFORMED:-}" != "$kind" ] ||
+	printf 'q3n multi-plane persistence %s main_digest=%s oob_digest=%s bbm=%s injected\n' "$kind" "$main" "$oob" "$bbm"
+if [ "$kind" = expected ]; then
+	stage_name=prepare
+else
+	stage_name=verify
+fi
+printf 'q3n multi-plane persistence %s passed\n' "$stage_name"
+printf '%s\n' 'MTD smoke 测试通过，关闭虚拟机'
+[ "${Q3N_TEST_PERSIST_NO_POWERDOWN:-0}" = 0 ] &&
+	printf '%s\n' '[    3.433730] reboot: Power down'
+EOF
+chmod +x "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" \
+	"$persist_repo/scripts/run-qemu.sh"
+printf 'legacy-image-must-survive\n' >"$persist_old"
+persist_old_before=$(stat -f '%i:%z:%m:%b' "$persist_old" 2>/dev/null ||
+	stat -c '%i:%s:%Y:%b' "$persist_old")
+Q3N_TEST_PERSIST_LOG="$persist_log" WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null
+persist_image_arg="$persist_repo/work/media/q3n-nand-multiplane.raw"
+if [ "$(uname -s)" = Darwin ]; then
+	persist_image_arg=work/media/q3n-nand-multiplane.raw
+fi
+grep -Fqx "stage=q3n-multiplane-persist-prepare fresh=1 mode=multiplane image=$persist_image_arg" "$persist_log" ||
+	fail "persistence prepare did not use fresh dedicated multi-plane media"
+grep -Fqx "stage=q3n-multiplane-persist-verify fresh=0 mode=multiplane image=$persist_image_arg" "$persist_log" ||
+	fail "persistence verify did not reuse dedicated multi-plane media"
+persist_old_after=$(stat -f '%i:%z:%m:%b' "$persist_old" 2>/dev/null ||
+	stat -c '%i:%s:%Y:%b' "$persist_old")
+[ "$persist_old_before" = "$persist_old_after" ] ||
+	fail "persistence wrapper changed the legacy image"
+if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_MAIN=bad \
+	WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted mismatched main metadata"
+fi
+if Q3N_TEST_PERSIST_LOG="$persist_log" \
+	Q3N_TEST_PERSIST_VERIFY_MAIN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+	WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted unequal well-formed main digests"
+fi
+if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_OOB=bad \
+	WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted mismatched OOB metadata"
+fi
+if Q3N_TEST_PERSIST_LOG="$persist_log" \
+	Q3N_TEST_PERSIST_VERIFY_OOB=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+	WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted unequal well-formed OOB digests"
+fi
+if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_BBM=ffffffff \
+	WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted mismatched BBM metadata"
+fi
+if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_VERIFY_BBM=ffffffff \
+	WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted unequal well-formed BBM values"
+fi
+if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_DUPLICATE=expected \
+	WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted duplicate expected metadata"
+fi
+if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_MALFORMED=verified \
+	WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted malformed verified metadata"
+fi
+if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_NO_POWERDOWN=1 \
+	WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted missing powerdown record"
+fi
+
+persist_prepare_command=$(mtd_smoke_command_for q3n-multiplane-persist-prepare) ||
+	fail "multi-plane persistence prepare guest stage did not resolve"
+persist_verify_command=$(mtd_smoke_command_for q3n-multiplane-persist-verify) ||
+	fail "multi-plane persistence verify guest stage did not resolve"
+[ "$persist_prepare_command" = mtd_q3n_multiplane_persist_prepare ] ||
+	fail "multi-plane persistence prepare stage resolved the wrong command"
+[ "$persist_verify_command" = mtd_q3n_multiplane_persist_verify ] ||
+	fail "multi-plane persistence verify stage resolved the wrong command"
+if mtd_smoke_command_for q3n-multiplane-persist-restart >/dev/null 2>&1; then
+	fail "multi-plane persistence resolver accepted an unknown stage"
+fi
+
+# Exercise both guest stages through their command boundary.  The fake helper
+# makes a marked block reject PLACE and RAW reads and records full-width OOB
+# operations; no production source is inspected.
+persist_guest_fixture="$test_dir/multiplane-persistence-guest-fixture.sh"
+persist_guest_log="$test_dir/multiplane-persistence-guest.argv"
+cat >"$persist_guest_fixture" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+. "$1"
+mtd_load_q3n() { :; }
+mtd_find_q3n() { printf '%s\n' 0; }
+cat() {
+	case "$1" in
+		*/writesize) printf '%s\n' 65536 ;;
+		*/oobsize) printf '%s\n' 4096 ;;
+		*/oobavail) printf '%s\n' 4092 ;;
+		*/erasesize) printf '%s\n' 104857600 ;;
+		*/size) printf '%s\n' 43620761600 ;;
+		*) command cat "$1" ;;
+	esac
+}
+flash_erase() { printf 'erase %s\n' "$*" >>"$Q3N_TEST_PERSIST_GUEST_LOG"; }
+modprobe() { printf 'modprobe %s\n' "$*" >>"$Q3N_TEST_PERSIST_GUEST_LOG"; }
+sync() { printf 'sync\n' >>"$Q3N_TEST_PERSIST_GUEST_LOG"; }
+dd() { :; }
+sha256sum() {
+	case "$1" in
+		*main*) printf '%s  %s\n' 944044fe482bc4e91085c15c5a923a1b9e02eac98d3bce04997d6dbecd2a5b8d "$1" ;;
+		*oob*) printf '%s  %s\n' f0f9ce8608610d597e3416195182a2d1f47d53cf00f1e72e3824a5bc3bfa7ce8 "$1" ;;
+		esac
+}
+mtd_badblock() {
+	printf '%s\n' "$*" >>"$Q3N_TEST_PERSIST_GUEST_LOG"
+	case "$1" in
+		set) guest_bad=1 ;;
+		get) printf '%s\n' "${guest_bad:-0}" ;;
+		oob-read) printf '%s\n' 00 ;;
+		oob-dump) printf x ;;
+		page-pattern-read)
+			[ "${guest_bad:-0}" = 1 ] && [ "$4" = 104857600 ] && return 1
+			;;
+	esac
+	return 0
+}
+mtd_q3n_multiplane_persist_prepare
+mtd_q3n_multiplane_persist_verify
+EOF
+chmod +x "$persist_guest_fixture"
+: >"$persist_guest_log"
+Q3N_TEST_PERSIST_GUEST_LOG="$persist_guest_log" \
+	sh "$persist_guest_fixture" "$repo_root/rootfs/profile.d/mtd.sh" >/dev/null ||
+	fail "multi-plane persistence guest stages did not complete"
+grep -Fqx 'page-pattern-write raw /dev/mtd0 0 0x5a 0xb1' "$persist_guest_log" ||
+	fail "persistence prepare did not program block 0 full raw main/OOB pattern"
+grep -Fqx 'page-pattern-read raw /dev/mtd0 0 0x5a 0xb1' "$persist_guest_log" ||
+	fail "persistence verify did not validate block 0 full raw main/OOB pattern"
+grep -Fqx 'oob-dump raw /dev/mtd0 0 0 4096' "$persist_guest_log" ||
+	fail "persistence stages did not digest all 4096 raw OOB bytes"
+grep -Fqx 'page-pattern-read place /dev/mtd0 104857600 0x69 0xb9' "$persist_guest_log" ||
+	fail "persistence stages did not reject normal reads from the marked block"
+grep -Fqx 'page-pattern-read raw /dev/mtd0 104857600 0x69 0xb9' "$persist_guest_log" ||
+	fail "persistence stages did not reject raw reads from the marked block"
+grep -Fqx sync "$persist_guest_log" ||
+	fail "persistence prepare did not synchronize media before powerdown"
