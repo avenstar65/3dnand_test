@@ -4,6 +4,8 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 build_root=${BUILD_DIR:-"$repo_root/work/build"}
 kernel_build=${Q3N_KERNEL_BUILD_DIR:-}
+strict=${Q3N_REQUIRE_KERNEL_BUILD:-0}
+expected_mode=${Q3N_EXPECTED_MODE:-}
 
 fail()
 {
@@ -12,7 +14,7 @@ fail()
 }
 
 if [ -z "$kernel_build" ]; then
-	if [ "${Q3N_REQUIRE_KERNEL_BUILD:-0}" = 1 ]; then
+	if [ "$strict" = 1 ]; then
 		fail "Q3N_REQUIRE_KERNEL_BUILD requires Q3N_KERNEL_BUILD_DIR"
 	fi
 	printf 'ok: NAND Core compiled contract skipped (no explicit kernel build)\n'
@@ -20,7 +22,7 @@ if [ -z "$kernel_build" ]; then
 fi
 
 if [ ! -f "$kernel_build/drivers/mtd/nand/raw/qemu_3dnand.ko" ]; then
-	if [ "${Q3N_REQUIRE_KERNEL_BUILD:-0}" = 1 ]; then
+	if [ "$strict" = 1 ]; then
 		fail "compiled Q3N kernel module is unavailable"
 	fi
 	printf 'ok: NAND Core compiled contract skipped (no kernel build)\n'
@@ -30,6 +32,96 @@ fi
 module="$kernel_build/drivers/mtd/nand/raw/qemu_3dnand.ko"
 nand_base="$kernel_build/drivers/mtd/nand/raw/nand_base.o"
 nand_bbt="$kernel_build/drivers/mtd/nand/raw/nand_bbt.o"
+raw_dir="$kernel_build/drivers/mtd/nand/raw"
+config="$kernel_build/.config"
+
+require_fresh_object()
+{
+	object=$1
+	description=$2
+
+	[ -f "$object" ] || fail "compiled $description is unavailable"
+	if [ "$module" -ot "$object" ]; then
+		fail "Q3N module is older than $description"
+	fi
+}
+
+config_has()
+{
+	grep -Fqx "$1" "$config"
+}
+
+config_lacks()
+{
+	if grep -Fqx "$1" "$config"; then
+		fail "kernel config unexpectedly contains: $1"
+	fi
+}
+
+if [ "$strict" = 1 ]; then
+	[ -r "$config" ] || fail "strict contract requires readable kernel .config"
+	case "$expected_mode" in
+		identity|raid4|raid8|multiplane) ;;
+		*) fail "strict contract requires Q3N_EXPECTED_MODE=identity|raid4|raid8|multiplane" ;;
+	esac
+	grep -Eq '^CONFIG_MTD_NAND_QEMU_3DNAND=[my]$' "$config" ||
+		fail "kernel config does not enable Q3N"
+	if [ "$module" -ot "$config" ]; then
+		fail "Q3N module is older than kernel .config"
+	fi
+	require_fresh_object "$raw_dir/qemu_3dnand.o" "Q3N linked object"
+	require_fresh_object "$raw_dir/qemu_3dnand_page.o" "common page object"
+
+	case "$expected_mode" in
+		identity)
+			config_has 'CONFIG_MTD_NAND_QEMU_3DNAND_IDENTITY=y' ||
+				fail "kernel config is not identity mode"
+			config_has '# CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID is not set' ||
+				fail "identity config enables Page RAID"
+			config_has '# CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE is not set' ||
+				fail "identity config enables multi-plane"
+			config_lacks 'CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID=y'
+			config_lacks 'CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE=y'
+			if grep -Eq '^CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES=' "$config"; then
+				fail "identity config retains a RAID ratio"
+			fi
+			;;
+		raid4|raid8)
+			ratio=${expected_mode#raid}
+			config_has '# CONFIG_MTD_NAND_QEMU_3DNAND_IDENTITY is not set' ||
+				fail "RAID config enables identity"
+			config_has 'CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID=y' ||
+				fail "kernel config is not Page RAID mode"
+			config_has '# CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE is not set' ||
+				fail "RAID config enables multi-plane"
+			config_lacks 'CONFIG_MTD_NAND_QEMU_3DNAND_IDENTITY=y'
+			config_lacks 'CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE=y'
+			config_has "CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES=$ratio" ||
+				fail "RAID config does not select ratio $ratio"
+			ratio_lines=$(awk '/^CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES=/{ count++ } END { print count + 0 }' "$config")
+			[ "$ratio_lines" -eq 1 ] || fail "RAID config has an ambiguous ratio"
+			require_fresh_object "$raw_dir/qemu_3dnand_page_raid.o" \
+				"Page RAID object"
+			;;
+		multiplane)
+			config_has '# CONFIG_MTD_NAND_QEMU_3DNAND_IDENTITY is not set' ||
+				fail "multi-plane config enables identity"
+			config_has '# CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID is not set' ||
+				fail "multi-plane config enables Page RAID"
+			config_has 'CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE=y' ||
+				fail "kernel config is not multi-plane mode"
+			config_lacks 'CONFIG_MTD_NAND_QEMU_3DNAND_IDENTITY=y'
+			config_lacks 'CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID=y'
+			if grep -Eq '^CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES=' "$config"; then
+				fail "multi-plane config retains a RAID ratio"
+			fi
+			for object in qemu_3dnand_multiplane_layout.o \
+				qemu_3dnand_hw_multiplane.o qemu_3dnand_multiplane.o; do
+				require_fresh_object "$raw_dir/$object" "multi-plane object $object"
+			done
+			;;
+	esac
+fi
 
 command -v nm >/dev/null 2>&1 || fail "nm is unavailable"
 command -v strings >/dev/null 2>&1 || fail "strings is unavailable"
@@ -89,17 +181,13 @@ elif printf '%s\n' "$defined" |
 	fail "RAID-disabled Q3N module includes q3n_raid_page_ops"
 fi
 
-if printf '%s\n' "$undefined" |
-   grep -Eq '[[:space:]]U[[:space:]]+q3n_multiplane_oob_free_region$'; then
-	fail "Q3N module imports an unresolved MP-only OOB layout provider"
+if [ "$strict" = 1 ] && printf '%s\n' "$undefined" |
+   grep -Eq '[[:space:]]U[[:space:]]+q3n_[[:alnum:]_]+$'; then
+	fail "Q3N module imports an unresolved private symbol"
 fi
 
 if ! grep -q '^CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE=y$' \
      "$kernel_build/.config"; then
-	if printf '%s\n' "$undefined" |
-	   grep -Eq '[[:space:]]U[[:space:]]+q3n_multiplane_oob_free_region$'; then
-		fail "non-multi-plane Q3N module imports MP-only OOB layout provider"
-	fi
 	if printf '%s\n' "$defined" |
 	   grep -Eq '[[:space:]][tT][[:space:]]+q3n_multiplane_oob_free_region$'; then
 		fail "non-multi-plane Q3N module defines MP-only OOB layout provider"

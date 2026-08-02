@@ -26,6 +26,7 @@ sh "$repo_root/tests/test_q3n_hw_multiplane.sh"
 sh "$repo_root/tests/test_q3n_ecc.sh"
 sh "$repo_root/tests/test_q3n_legacy.sh"
 sh "$repo_root/tests/test_q3n_nand_core_contract.sh"
+sh "$repo_root/tests/test_q3n_nand_core_contract_strict.sh"
 
 for script in "$repo_root"/scripts/*.sh; do
   sh -n "$script"

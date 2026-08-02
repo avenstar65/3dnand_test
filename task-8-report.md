@@ -96,3 +96,29 @@ output trees do not contain `vmlinux.o`; therefore direct module linking uses
 compiled contract strictly reject the Q3N MP-only unresolved provider. A full
 isolated `make modules` is not a useful Q3N signal here because it additionally
 modposts unrelated UBIFS/core modules without vmlinux symbols.
+
+## Round 2: strict artifact identity and private-symbol contract
+
+### RED
+
+A behavior fixture supplied the four expected NAND Core imports plus an
+otherwise unrelated `U q3n_unresolved_nonprovider`. The previous strict
+contract accepted that module because it only rejected the one known MP OOB
+provider reference.
+
+### GREEN
+
+With `Q3N_REQUIRE_KERNEL_BUILD=1`, the contract now requires an explicit
+`Q3N_EXPECTED_MODE` (`identity`, `raid4`, `raid8`, or `multiplane`) and a
+readable `.config`. It validates the exact mutually-exclusive storage-mode
+state and RAID ratio, rejects any undefined private `q3n_*` module symbol,
+and verifies the module is no older than `.config`, `qemu_3dnand.o`, and the
+mode-relevant object files. It requires Page RAID's object for RAID profiles
+and all three MP objects for multi-plane.
+
+`tests/test_q3n_nand_core_contract_strict.sh` is an artifact-only fixture: it
+proves failures for a different private unresolved symbol, omitted expected
+mode, missing config, stale/wrong mode, RAID4-versus-RAID8 mismatch, a module
+older than its unchanged config, and a missing required mode object. It does
+not inspect driver source. The real isolated identity, RAID4, RAID8, and
+multi-plane build artifacts all pass the explicit strict contract.
