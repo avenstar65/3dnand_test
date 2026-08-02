@@ -49,11 +49,25 @@ require_one()
 	[ "$(line_count "$log" "$exact")" = 1 ] &&
 		[ "$(line_count "$log" "$prefix")" = 1 ] ||
 		die "$description must appear exactly once"
+	[ "$(line_count "$log" "${prefix#^}")" = 1 ] ||
+		die "$description must not have prefixed or suffixed variants"
+}
+
+require_none()
+{
+	log=$1 pattern=$2 description=$3
+	[ "$(line_count "$log" "$pattern")" = 0 ] ||
+		die "$description must not appear"
 }
 
 run_stage()
 {
 	stage=$1 log=$2 fresh=$3 record=$4 completion=$5
+	case "$record:$completion" in
+		expected:prepare) other_record=verified; other_completion=verify ;;
+		verified:verify) other_record=expected; other_completion=prepare ;;
+		*) die "invalid persistence stage contract: $record/$completion" ;;
+	esac
 	if [ "$fresh" = 1 ]; then
 		"$repo_root/scripts/run-qemu.sh" --nand-mode multiplane \
 			--nand-image "$qemu_nand_image" --fresh-nand \
@@ -79,6 +93,10 @@ run_stage()
 		"^q3n multi-plane persistence $completion passed$" \
 		"^q3n multi-plane persistence $completion" \
 		"q3n multi-plane persistence stage success"
+	require_none "$log" "q3n multi-plane persistence $other_record" \
+		"q3n multi-plane persistence $other_record record"
+	require_none "$log" "q3n multi-plane persistence $other_completion passed" \
+		"q3n multi-plane persistence $other_completion stage success"
 	require_one "$log" '^MTD smoke 测试通过，关闭虚拟机$' '^MTD smoke' \
 		"q3n multi-plane guest success"
 	require_one "$log" \
@@ -103,8 +121,23 @@ metadata_field()
 	return 1
 }
 
+legacy_nand_image="$work_dir/media/q3n-nand.raw"
+[ -f "$legacy_nand_image" ] ||
+	die "legacy q3n NAND image is missing: $legacy_nand_image"
+legacy_dir=$(CDPATH= cd -- "$(dirname -- "$legacy_nand_image")" && pwd -P)
+legacy_nand_image="$legacy_dir/$(basename -- "$legacy_nand_image")"
+legacy_nand_before="$legacy_nand_image:$(image_fingerprint "$legacy_nand_image")" ||
+	die "legacy q3n NAND image stat failed before prepare"
+
 run_stage q3n-multiplane-persist-prepare "$prepare_log" 1 expected prepare
 run_stage q3n-multiplane-persist-verify "$verify_log" 0 verified verify
+
+[ -f "$legacy_nand_image" ] ||
+	die "legacy q3n NAND image is missing after verify"
+legacy_nand_after="$legacy_nand_image:$(image_fingerprint "$legacy_nand_image")" ||
+	die "legacy q3n NAND image stat failed after verify"
+[ "$legacy_nand_after" = "$legacy_nand_before" ] ||
+	die "legacy q3n NAND image changed during persistence smoke"
 
 prepare_line=$(sed 's/\r$//' "$prepare_log" | grep -E \
 	'^q3n multi-plane persistence expected main_digest=[0-9a-f]{64} oob_digest=[0-9a-f]{64} bbm=[0-9a-f]{8}$')

@@ -552,12 +552,36 @@ else
 	stage_name=verify
 fi
 printf 'q3n multi-plane persistence %s passed\n' "$stage_name"
+[ "${Q3N_TEST_PERSIST_CROSS_RECORD:-}" != "$kind" ] || {
+	if [ "$kind" = expected ]; then other_kind=verified; else other_kind=expected; fi
+	printf 'q3n multi-plane persistence %s main_digest=%s oob_digest=%s bbm=%s\n' "$other_kind" "$main" "$oob" "$bbm"
+}
+[ "${Q3N_TEST_PERSIST_CROSS_STAGE:-}" != "$kind" ] || {
+	if [ "$kind" = expected ]; then other_stage=verify; else other_stage=prepare; fi
+	printf 'q3n multi-plane persistence %s passed\n' "$other_stage"
+}
+[ "${Q3N_TEST_PERSIST_PREFIXED:-}" != "$kind" ] ||
+	printf 'injected q3n multi-plane persistence %s main_digest=%s oob_digest=%s bbm=%s\n' "$kind" "$main" "$oob" "$bbm"
+if [ "${Q3N_TEST_PERSIST_LEGACY_STAGE:-}" = "$kind" ]; then
+	case "${Q3N_TEST_PERSIST_LEGACY_ACTION:-}" in
+		mutate) printf x >>"$Q3N_TEST_PERSIST_OLD" ;;
+		remove) rm -f -- "$Q3N_TEST_PERSIST_OLD" ;;
+		replace)
+			mv "$Q3N_TEST_PERSIST_OLD" "$Q3N_TEST_PERSIST_OLD.replaced"
+			printf replacement >"$Q3N_TEST_PERSIST_OLD"
+			;;
+	esac
+fi
 printf '%s\n' 'MTD smoke 测试通过，关闭虚拟机'
 [ "${Q3N_TEST_PERSIST_NO_POWERDOWN:-0}" = 0 ] &&
 	printf '%s\n' '[    3.433730] reboot: Power down'
 EOF
 chmod +x "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" \
 	"$persist_repo/scripts/run-qemu.sh"
+if Q3N_TEST_PERSIST_LOG="$persist_log" WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted a missing legacy image"
+fi
 printf 'legacy-image-must-survive\n' >"$persist_old"
 persist_old_before=$(stat -f '%i:%z:%m:%b' "$persist_old" 2>/dev/null ||
 	stat -c '%i:%s:%Y:%b' "$persist_old")
@@ -575,6 +599,56 @@ persist_old_after=$(stat -f '%i:%z:%m:%b' "$persist_old" 2>/dev/null ||
 	stat -c '%i:%s:%Y:%b' "$persist_old")
 [ "$persist_old_before" = "$persist_old_after" ] ||
 	fail "persistence wrapper changed the legacy image"
+if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_CROSS_RECORD=expected \
+	WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted a verified record during prepare"
+fi
+if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_CROSS_RECORD=verified \
+	WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted an expected record during verify"
+fi
+if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_CROSS_STAGE=expected \
+	WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted a verify success stage during prepare"
+fi
+if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_CROSS_STAGE=verified \
+	WORK_DIR="$persist_repo/work" \
+	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+	fail "persistence wrapper accepted a prepare success stage during verify"
+fi
+for persist_phase in expected verified; do
+	if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_DUPLICATE="$persist_phase" \
+		WORK_DIR="$persist_repo/work" \
+		sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+		fail "persistence wrapper accepted duplicate $persist_phase metadata"
+	fi
+	if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_MALFORMED="$persist_phase" \
+		WORK_DIR="$persist_repo/work" \
+		sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+		fail "persistence wrapper accepted malformed $persist_phase metadata"
+	fi
+	if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_PREFIXED="$persist_phase" \
+		WORK_DIR="$persist_repo/work" \
+		sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+		fail "persistence wrapper accepted prefixed $persist_phase metadata"
+	fi
+done
+for persist_action in mutate remove replace; do
+	for persist_phase in expected verified; do
+		printf 'legacy-image-must-survive\n' >"$persist_old"
+		if Q3N_TEST_PERSIST_LOG="$persist_log" \
+			Q3N_TEST_PERSIST_OLD="$persist_old" \
+			Q3N_TEST_PERSIST_LEGACY_ACTION="$persist_action" \
+			Q3N_TEST_PERSIST_LEGACY_STAGE="$persist_phase" \
+			WORK_DIR="$persist_repo/work" \
+			sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then
+			fail "persistence wrapper accepted legacy image $persist_action during $persist_phase"
+		fi
+	done
+done
 if Q3N_TEST_PERSIST_LOG="$persist_log" Q3N_TEST_PERSIST_MAIN=bad \
 	WORK_DIR="$persist_repo/work" \
 	sh "$persist_repo/scripts/q3n-multiplane-persistence-smoke.sh" >/dev/null 2>&1; then

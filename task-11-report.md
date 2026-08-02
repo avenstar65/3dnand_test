@@ -68,3 +68,30 @@ unchanged before and after:
 
 The stale, explicitly identified `linux-mtd-qemu-dev-97337` qtest container
 was stopped and is no longer present; no active QEMU process remains.
+
+## Review round 1 — legacy isolation and stage exclusivity
+
+- The host wrapper now requires the canonical legacy
+  `work/media/q3n-nand.raw` path to exist before prepare, records
+  `path:inode:size:mtime:allocated-blocks`, and requires the identical
+  fingerprint after verify.  The legacy path remains separate from the only
+  `--nand-image` argument, which is the multi-plane image.
+- Each boot now requires exactly one of its own record and completion lines
+  while rejecting any occurrence (including malformed, prefixed, or suffixed
+  variants) of the other phase's record or completion line.
+- RED: the previous wrapper accepted a well-formed `verified` record injected
+  into prepare.  GREEN behavior coverage now rejects cross-record and
+  cross-completion injections in both directions, duplicate (for both
+  phases)/malformed/
+  prefixed records, a missing legacy image, and each legacy mutation,
+  removal, and replacement during either boot.
+- Fresh real run after rebuilding rootfs:
+
+```text
+legacy_before=/Users/yangyu/Documents/3dnand-nand-core-ecc-read-retry-worktree/work/media/q3n-nand.raw:82254988:116549226496:1785342127:345728
+q3n multi-plane persistence expected main_digest=944044fe482bc4e91085c15c5a923a1b9e02eac98d3bce04997d6dbecd2a5b8d oob_digest=f0f9ce8608610d597e3416195182a2d1f47d53cf00f1e72e3824a5bc3bfa7ce8 bbm=00000000
+[    2.384788] reboot: Power down
+q3n multi-plane persistence verified main_digest=944044fe482bc4e91085c15c5a923a1b9e02eac98d3bce04997d6dbecd2a5b8d oob_digest=f0f9ce8608610d597e3416195182a2d1f47d53cf00f1e72e3824a5bc3bfa7ce8 bbm=00000000
+[    2.219763] reboot: Power down
+legacy_after=/Users/yangyu/Documents/3dnand-nand-core-ecc-read-retry-worktree/work/media/q3n-nand.raw:82254988:116549226496:1785342127:345728
+```
