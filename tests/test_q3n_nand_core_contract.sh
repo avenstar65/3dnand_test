@@ -182,7 +182,7 @@ elif printf '%s\n' "$defined" |
 fi
 
 if [ "$strict" = 1 ] && printf '%s\n' "$undefined" |
-   grep -Eq '[[:space:]]U[[:space:]]+q3n_[[:alnum:]_]+$'; then
+   grep -Eq '[[:space:]]U[[:space:]]+q3n_[^[:space:]]*$'; then
 	fail "Q3N module imports an unresolved private symbol"
 fi
 

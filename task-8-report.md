@@ -122,3 +122,20 @@ mode, missing config, stale/wrong mode, RAID4-versus-RAID8 mismatch, a module
 older than its unchanged config, and a missing required mode object. It does
 not inspect driver source. The real isolated identity, RAID4, RAID8, and
 multi-plane build artifacts all pass the explicit strict contract.
+
+## Round 3: private ELF symbol suffixes
+
+### RED
+
+The strict fixture injected
+`U q3n_unresolved_nonprovider.isra.0`. The earlier private-symbol expression
+only allowed alphanumeric characters and underscores after `q3n_`, so it
+incorrectly accepted this valid ELF-style suffixed symbol.
+
+### GREEN
+
+Strict parsing now requires an undefined-symbol (`U`) field followed by a
+token beginning `q3n_` and continuing through any non-whitespace characters.
+This rejects compiler-generated suffixes such as `.isra.0` without matching
+defined symbols. The strict fixture, all four explicit real artifact
+contracts, shell syntax checks, and the full host smoke test pass.

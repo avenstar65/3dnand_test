@@ -29,7 +29,8 @@ case "$*" in
                  U mtd_device_unregister
 SYMS
       if [ "${FIXTURE_PRIVATE_UNDEFINED:-0}" = 1 ]; then
-        printf '                 U q3n_unresolved_nonprovider\n'
+        printf '                 U %s\n' \
+          "${FIXTURE_PRIVATE_SYMBOL:-q3n_unresolved_nonprovider}"
       fi
     elif [ "$1" = --defined-only ]; then
       cat <<'SYMS'
@@ -180,6 +181,13 @@ run_contract "$multiplane" multiplane env
 
 expect_fail private-undefined \
 	env FIXTURE_PRIVATE_UNDEFINED=1 FIXTURE_MODE=identity PATH="$fake_bin:$PATH" \
+	Q3N_REQUIRE_KERNEL_BUILD=1 Q3N_KERNEL_BUILD_DIR="$identity" \
+	Q3N_EXPECTED_MODE=identity sh "$contract"
+
+expect_fail private-undefined-suffixed \
+	env FIXTURE_PRIVATE_UNDEFINED=1 \
+	FIXTURE_PRIVATE_SYMBOL=q3n_unresolved_nonprovider.isra.0 \
+	FIXTURE_MODE=identity PATH="$fake_bin:$PATH" \
 	Q3N_REQUIRE_KERNEL_BUILD=1 Q3N_KERNEL_BUILD_DIR="$identity" \
 	Q3N_EXPECTED_MODE=identity sh "$contract"
 
