@@ -69,3 +69,30 @@ All listed checks passed after the GREEN changes.
 Task 9 must add the six Task 7 MP files to the normal Linux overlay before a
 non-fixture multi-plane build is expected to work. Task 10 remains responsible
 for guest runtime verification of the exact initialization log and geometry.
+
+## Round 1: mode-exclusive OOB provider link fix
+
+### RED
+
+The common `qemu_3dnand_ecc.o` initially emitted an undefined reference to
+`q3n_multiplane_oob_free_region`. A fresh identity artifact built from the
+isolated `work/task8-link/identity` configuration showed that exact undefined
+symbol in `nm -u qemu_3dnand.ko`; the provider object is intentionally not
+linked outside multi-plane mode.
+
+### GREEN
+
+The MP-only OOB layout header, callback, ops table, and `q3n_ecc_init()`
+selection branch are now compiled only with
+`CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE`. The compiled-contract regression
+checks every non-MP module has neither a definition nor an unresolved import
+of the MP-only provider, and requires the MP module to define it.
+
+Fresh isolated builds passed for identity, Page RAID 4:1, Page RAID 8:1, and
+multi-plane. Each ran the raw-NAND target followed by the direct
+`drivers/mtd/nand/raw/qemu_3dnand.ko` target and artifact contract. Isolated
+output trees do not contain `vmlinux.o`; therefore direct module linking uses
+`KBUILD_MODPOST_WARN=1` for unrelated kernel-core imports, while `nm` and the
+compiled contract strictly reject the Q3N MP-only unresolved provider. A full
+isolated `make modules` is not a useful Q3N signal here because it additionally
+modposts unrelated UBIFS/core modules without vmlinux symbols.

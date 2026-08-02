@@ -58,7 +58,8 @@ done
 if grep -q '^CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE=y$' \
    "$kernel_build/.config"; then
 	for symbol in q3n_multiplane_get_ops q3n_multiplane_layout_build \
-		q3n_hw_mp_read_page q3n_hw_mp_program_page q3n_hw_mp_erase_group; do
+		q3n_multiplane_oob_free_region q3n_hw_mp_read_page \
+		q3n_hw_mp_program_page q3n_hw_mp_erase_group; do
 		printf '%s\n' "$defined" |
 			grep -Eq "[[:space:]][tT][[:space:]]+$symbol$" ||
 			fail "multi-plane Q3N module omits $symbol"
@@ -86,6 +87,23 @@ elif grep -q '^CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID=y$' \
 elif printf '%s\n' "$defined" |
      grep -Eq '[[:space:]][dDrR][[:space:]]+q3n_raid_page_ops$'; then
 	fail "RAID-disabled Q3N module includes q3n_raid_page_ops"
+fi
+
+if printf '%s\n' "$undefined" |
+   grep -Eq '[[:space:]]U[[:space:]]+q3n_multiplane_oob_free_region$'; then
+	fail "Q3N module imports an unresolved MP-only OOB layout provider"
+fi
+
+if ! grep -q '^CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE=y$' \
+     "$kernel_build/.config"; then
+	if printf '%s\n' "$undefined" |
+	   grep -Eq '[[:space:]]U[[:space:]]+q3n_multiplane_oob_free_region$'; then
+		fail "non-multi-plane Q3N module imports MP-only OOB layout provider"
+	fi
+	if printf '%s\n' "$defined" |
+	   grep -Eq '[[:space:]][tT][[:space:]]+q3n_multiplane_oob_free_region$'; then
+		fail "non-multi-plane Q3N module defines MP-only OOB layout provider"
+	fi
 fi
 
 if printf '%s\n' "$defined" |

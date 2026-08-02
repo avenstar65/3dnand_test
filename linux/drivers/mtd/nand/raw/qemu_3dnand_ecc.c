@@ -9,7 +9,9 @@
 
 #include "qemu_3dnand_ecc.h"
 #include "qemu_3dnand_hw.h"
+#ifdef CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE
 #include "qemu_3dnand_multiplane_layout.h"
+#endif
 #include "qemu_3dnand_page.h"
 #include "qemu_3dnand_regs.h"
 
@@ -63,6 +65,7 @@ static const struct mtd_ooblayout_ops q3n_ooblayout_ops = {
 	.free = q3n_ooblayout_free,
 };
 
+#ifdef CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE
 static int q3n_multiplane_ooblayout_free(struct mtd_info *mtd, int section,
 					 struct mtd_oob_region *region)
 {
@@ -85,6 +88,7 @@ static const struct mtd_ooblayout_ops q3n_multiplane_ooblayout_ops = {
 	.ecc = q3n_ooblayout_ecc,
 	.free = q3n_multiplane_ooblayout_free,
 };
+#endif
 
 int q3n_ecc_read_page(struct nand_chip *chip, u8 *buf,
 		      int oob_required, int page)
@@ -198,10 +202,14 @@ int q3n_ecc_init(struct q3n *q3n)
 	    mtd->writesize % Q3N_ECC_STEP_SIZE)
 		return -EINVAL;
 
+#ifdef CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE
 	if (q3n->storage_mode == Q3N_MODE_MULTIPLANE)
 		mtd_set_ooblayout(mtd, &q3n_multiplane_ooblayout_ops);
 	else
 		mtd_set_ooblayout(mtd, &q3n_ooblayout_ops);
+#else
+	mtd_set_ooblayout(mtd, &q3n_ooblayout_ops);
+#endif
 
 	chip->ecc.engine_type = NAND_ECC_ENGINE_TYPE_ON_HOST;
 	chip->ecc.placement = NAND_ECC_PLACEMENT_OOB;
