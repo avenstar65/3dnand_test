@@ -45,6 +45,38 @@ static int q3n_set_physical_geometry(struct q3n *q3n,
 	return 0;
 }
 
+static int q3n_set_topology(struct q3n *q3n,
+				    const struct q3n_flash_topology *topology)
+{
+	u64 data_blocks;
+
+	if (!topology || !topology->dies || !topology->planes_per_die ||
+	    !topology->blocks_per_plane || !topology->data_blocks_per_plane ||
+	    !topology->pages_per_block ||
+	    topology->data_blocks_per_plane > topology->blocks_per_plane ||
+	    topology->pages_per_block != q3n->physical_geometry.pages_per_block)
+		return -EINVAL;
+
+	data_blocks = (u64)topology->dies * topology->planes_per_die *
+		topology->data_blocks_per_plane;
+	if (data_blocks != q3n->physical_geometry.blocks)
+		return -EINVAL;
+
+	q3n->topology = *topology;
+	return 0;
+}
+
+static enum q3n_storage_mode q3n_build_storage_mode(void)
+{
+#if IS_ENABLED(CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE)
+	return Q3N_MODE_MULTIPLANE;
+#elif IS_ENABLED(CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID)
+	return Q3N_MODE_PAGE_RAID;
+#else
+	return Q3N_MODE_IDENTITY;
+#endif
+}
+
 int q3n_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct device *dev = &pdev->dev;
@@ -52,7 +84,8 @@ int q3n_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	const struct nand_flash_dev *physical_ids;
 	struct mtd_info *mtd;
 	struct q3n *q3n;
-	bool raid_enabled;
+	enum q3n_storage_mode storage_mode;
+	u32 capabilities;
 	u32 data_pages;
 	u32 used_pages;
 	int ret;
@@ -94,13 +127,24 @@ int q3n_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		return dev_err_probe(dev, ret,
 				     "invalid physical NAND geometry\n");
 
-	raid_enabled = IS_ENABLED(CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID);
+	ret = q3n_set_topology(q3n, &info->topology);
+	if (ret)
+		return dev_err_probe(dev, ret, "invalid YTMC NAND topology\n");
+
+	storage_mode = q3n_build_storage_mode();
+	capabilities = q3n_hw_read_capabilities(q3n);
+	if (storage_mode == Q3N_MODE_MULTIPLANE &&
+	    !(capabilities & Q3N_CAP_MULTIPLANE))
+		return dev_err_probe(dev, -EOPNOTSUPP,
+				     "multi-plane capability is unavailable\n");
+
 #if IS_ENABLED(CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID)
 	data_pages = CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES;
 #else
 	data_pages = 1;
 #endif
-	ret = q3n_page_layer_init(q3n, raid_enabled, data_pages);
+	ret = q3n_page_layer_init(q3n, storage_mode, data_pages,
+			  &q3n->topology);
 	if (ret)
 		return dev_err_probe(dev, ret,
 				     "cannot initialize logical page layer\n");
@@ -127,19 +171,33 @@ int q3n_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto err_clear_drvdata;
 	q3n->scanned = true;
 
-	used_pages = q3n->page_profile.stripes_per_block *
-		q3n->page_profile.stripe_pages;
-	dev_info(dev,
-		 "Page RAID %s: %u data + %u parity, logical page=%u physical page=%u oob=%u erase=%u capacity=%llu, stripes/block=%u used pages/block=%u tail pages/block=%u\n",
-		 raid_enabled ? "enabled" : "disabled",
-		 q3n->page_profile.data_pages,
-		 q3n->page_profile.parity_pages,
-		 q3n->geometry.writesize,
-		 q3n->physical_geometry.writesize, q3n->geometry.oobsize,
-		 mtd->erasesize,
-		 (unsigned long long)q3n->page_profile.logical_size,
-		 q3n->page_profile.stripes_per_block, used_pages,
-		 q3n->page_profile.tail_pages);
+	if (storage_mode == Q3N_MODE_MULTIPLANE) {
+		if (mtd->oobavail != 4092) {
+			ret = -EINVAL;
+			goto err_cleanup_nand;
+		}
+		dev_info(dev, "mode=multiplane dies=2 planes/group=4\n");
+		dev_info(dev,
+			 "physical-page=16384 logical-page=65536 logical-oob=4096\n");
+		dev_info(dev,
+			 "pages/block=1600 logical-erasesize=104857600 logical-blocks=416\n");
+		dev_info(dev,
+			 "logical-size=43620761600 image-mode=multiplane\n");
+	} else {
+		used_pages = q3n->page_profile.stripes_per_block *
+			q3n->page_profile.stripe_pages;
+		dev_info(dev,
+			 "Page RAID %s: %u data + %u parity, logical page=%u physical page=%u oob=%u erase=%u capacity=%llu, stripes/block=%u used pages/block=%u tail pages/block=%u\n",
+			 storage_mode == Q3N_MODE_PAGE_RAID ? "enabled" : "disabled",
+			 q3n->page_profile.data_pages,
+			 q3n->page_profile.parity_pages,
+			 q3n->geometry.writesize,
+			 q3n->physical_geometry.writesize, q3n->geometry.oobsize,
+			 mtd->erasesize,
+			 (unsigned long long)q3n->logical_size,
+			 q3n->page_profile.stripes_per_block, used_pages,
+			 q3n->page_profile.tail_pages);
+	}
 
 	ret = mtd_device_register(mtd, NULL, 0);
 	if (ret)

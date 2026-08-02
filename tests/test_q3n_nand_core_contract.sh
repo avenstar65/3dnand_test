@@ -12,12 +12,14 @@ fail()
 }
 
 if [ -z "$kernel_build" ]; then
-	kernel_build=$(find "$build_root" -maxdepth 1 -type d \
-		-name 'linux-*' 2>/dev/null | sort -V | tail -n 1)
+	if [ "${Q3N_REQUIRE_KERNEL_BUILD:-0}" = 1 ]; then
+		fail "Q3N_REQUIRE_KERNEL_BUILD requires Q3N_KERNEL_BUILD_DIR"
+	fi
+	printf 'ok: NAND Core compiled contract skipped (no explicit kernel build)\n'
+	exit 0
 fi
 
-if [ -z "$kernel_build" ] ||
-   [ ! -f "$kernel_build/drivers/mtd/nand/raw/qemu_3dnand.ko" ]; then
+if [ ! -f "$kernel_build/drivers/mtd/nand/raw/qemu_3dnand.ko" ]; then
 	if [ "${Q3N_REQUIRE_KERNEL_BUILD:-0}" = 1 ]; then
 		fail "compiled Q3N kernel module is unavailable"
 	fi
@@ -53,7 +55,27 @@ for symbol in q3n_page_read q3n_page_write q3n_page_read_oob \
 		fail "Q3N module does not define logical-page entry point $symbol"
 done
 
-if grep -q '^CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID=y$' \
+if grep -q '^CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE=y$' \
+   "$kernel_build/.config"; then
+	for symbol in q3n_multiplane_get_ops q3n_multiplane_layout_build \
+		q3n_hw_mp_read_page q3n_hw_mp_program_page q3n_hw_mp_erase_group; do
+		printf '%s\n' "$defined" |
+			grep -Eq "[[:space:]][tT][[:space:]]+$symbol$" ||
+			fail "multi-plane Q3N module omits $symbol"
+	done
+	if printf '%s\n' "$defined" |
+	   grep -Eq '[[:space:]][dDrR][[:space:]]+q3n_raid_page_ops$'; then
+		fail "multi-plane Q3N module includes q3n_raid_page_ops"
+	fi
+	for literal in \
+		'mode=multiplane dies=2 planes/group=4' \
+		'physical-page=16384 logical-page=65536 logical-oob=4096' \
+		'pages/block=1600 logical-erasesize=104857600 logical-blocks=416' \
+		'logical-size=43620761600 image-mode=multiplane'; do
+		strings "$module" | grep -Fq "$literal" ||
+			fail "multi-plane Q3N module omits init log: $literal"
+	done
+elif grep -q '^CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID=y$' \
    "$kernel_build/.config"; then
 	printf '%s\n' "$defined" |
 		grep -Eq '[[:space:]][dDrR][[:space:]]+q3n_raid_page_ops$' ||

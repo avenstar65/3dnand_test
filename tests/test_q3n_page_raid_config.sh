@@ -34,19 +34,28 @@ EOF
 check_profile()
 {
 	raid=$1
-	data_pages=$2
-	want_raid_object=$3
+	multiplane=$2
+	data_pages=$3
+	want_raid_object=$4
+	want_multiplane_objects=$5
 	objects=$(make -s -f "$tmp_dir/Makefile" objects \
 		CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID="$raid" \
+		CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE="$multiplane" \
 		CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID_DATA_PAGES="$data_pages")
 
 	contains_word "$objects" qemu_3dnand_page.o ||
 		fail "PAGE_RAID=$raid N=$data_pages omitted qemu_3dnand_page.o"
 	contains_word "$objects" qemu_3dnand_layout.o ||
 		fail "PAGE_RAID=$raid N=$data_pages omitted qemu_3dnand_layout.o"
-	if contains_word "$objects" qemu_3dnand_multiplane_layout.o; then
-		fail "PAGE_RAID=$raid N=$data_pages unexpectedly linked qemu_3dnand_multiplane_layout.o"
-	fi
+	for object in qemu_3dnand_multiplane_layout.o \
+		qemu_3dnand_hw_multiplane.o qemu_3dnand_multiplane.o; do
+		if [ "$want_multiplane_objects" = yes ]; then
+			contains_word "$objects" "$object" ||
+				fail "PAGE_RAID=$raid MP=$multiplane N=$data_pages omitted $object"
+		elif contains_word "$objects" "$object"; then
+			fail "PAGE_RAID=$raid MP=$multiplane N=$data_pages unexpectedly linked $object"
+		fi
+	done
 
 	if [ "$want_raid_object" = yes ]; then
 		contains_word "$objects" qemu_3dnand_page_raid.o ||
@@ -56,9 +65,10 @@ check_profile()
 	fi
 }
 
-check_profile n 4 no
-check_profile y 2 yes
-check_profile y 4 yes
-check_profile y 8 yes
+check_profile n n 4 no no
+check_profile y n 2 yes no
+check_profile y n 4 yes no
+check_profile y n 8 yes no
+check_profile n y 4 no yes
 
-printf 'ok: disabled, 2:1, 4:1 and 8:1 Page RAID object composition verified\n'
+printf 'ok: identity, Page RAID, and multi-plane object composition verified\n'

@@ -9,6 +9,7 @@
 
 #include "qemu_3dnand_ecc.h"
 #include "qemu_3dnand_hw.h"
+#include "qemu_3dnand_multiplane_layout.h"
 #include "qemu_3dnand_page.h"
 #include "qemu_3dnand_regs.h"
 
@@ -21,7 +22,7 @@ int q3n_ecc_account_page_result(const struct q3n_page_result *result,
 	if (!result || !stats)
 		return -EINVAL;
 
-	if (result->failed_data_pages) {
+	if (result->failed_plane_mask || result->failed_data_pages) {
 		stats->failed++;
 		return Q3N_ECC_STRENGTH;
 	}
@@ -60,6 +61,29 @@ static int q3n_ooblayout_free(struct mtd_info *mtd, int section,
 static const struct mtd_ooblayout_ops q3n_ooblayout_ops = {
 	.ecc = q3n_ooblayout_ecc,
 	.free = q3n_ooblayout_free,
+};
+
+static int q3n_multiplane_ooblayout_free(struct mtd_info *mtd, int section,
+					 struct mtd_oob_region *region)
+{
+	u32 offset;
+	u32 length;
+	int ret;
+
+	ret = q3n_multiplane_oob_free_region(section, &offset, &length);
+	if (ret)
+		return ret;
+	if (offset + length > mtd->oobsize)
+		return -ERANGE;
+
+	region->offset = offset;
+	region->length = length;
+	return 0;
+}
+
+static const struct mtd_ooblayout_ops q3n_multiplane_ooblayout_ops = {
+	.ecc = q3n_ooblayout_ecc,
+	.free = q3n_multiplane_ooblayout_free,
 };
 
 int q3n_ecc_read_page(struct nand_chip *chip, u8 *buf,
@@ -170,11 +194,14 @@ int q3n_ecc_init(struct q3n *q3n)
 	if (mtd->writesize != q3n->geometry.writesize ||
 	    mtd->oobsize != q3n->geometry.oobsize ||
 	    mtd->erasesize != erasesize ||
-	    mtd->size != q3n->page_profile.logical_size ||
+	    mtd->size != q3n->logical_size ||
 	    mtd->writesize % Q3N_ECC_STEP_SIZE)
 		return -EINVAL;
 
-	mtd_set_ooblayout(mtd, &q3n_ooblayout_ops);
+	if (q3n->storage_mode == Q3N_MODE_MULTIPLANE)
+		mtd_set_ooblayout(mtd, &q3n_multiplane_ooblayout_ops);
+	else
+		mtd_set_ooblayout(mtd, &q3n_ooblayout_ops);
 
 	chip->ecc.engine_type = NAND_ECC_ENGINE_TYPE_ON_HOST;
 	chip->ecc.placement = NAND_ECC_PLACEMENT_OOB;

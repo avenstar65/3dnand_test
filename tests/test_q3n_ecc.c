@@ -42,11 +42,11 @@ int main(void)
 	expect("uncorrectable increments failed", stats.failed, 1);
 
 	result = (struct q3n_page_result) {
-		.failed_data_pages = 2,
+		.failed_plane_mask = 0x0a,
 	};
 	ret = q3n_ecc_account_page_result(&result, 3, &stats);
-	expect("two failed data pages return threshold", ret, Q3N_ECC_STRENGTH);
-	expect("two failed data pages count one logical failure", stats.failed, 2);
+	expect("two failed planes return threshold", ret, Q3N_ECC_STRENGTH);
+	expect("two failed planes count one logical failure", stats.failed, 2);
 
 	result = (struct q3n_page_result) {
 		.max_bitflips = Q3N_ECC_STRENGTH,

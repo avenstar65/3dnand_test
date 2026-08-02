@@ -6,3 +6,6 @@ qemu_3dnand-y := qemu_3dnand_module.o qemu_3dnand_init.o \
 		 qemu_3dnand_page.o qemu_3dnand_layout.o
 qemu_3dnand-$(CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID) += \
 		 qemu_3dnand_page_raid.o
+qemu_3dnand-$(CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE) += \
+		 qemu_3dnand_multiplane_layout.o \
+		 qemu_3dnand_hw_multiplane.o qemu_3dnand_multiplane.o
