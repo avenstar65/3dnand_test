@@ -41,3 +41,14 @@ Real marker:
 ```text
 q3n page RAID smoke passed
 ```
+
+## Review fix round 1
+
+Added `mtd_smoke_poweroff_on_failure(stage)` and made `rootfs/init` use it.
+It returns true for every automated smoke stage, including current Page RAID,
+and false for interactive/unknown selections.  The executable resolver test
+first failed because the helper was absent, then passed after the minimal
+helper/init change.  Rootfs rebuild, focused test, shell syntax and host smoke
+were run.  README/register reference now distinguish synchronous current Page
+RAID (layout, parity program and one-page recovery) from the removed async
+scheduler/debugfs ABI.

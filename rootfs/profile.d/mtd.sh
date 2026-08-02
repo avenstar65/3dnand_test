@@ -69,6 +69,18 @@ mtd_smoke_command_for() {
   esac
 }
 
+# Batch guest stages must power off on failure so their host wrappers cannot
+# remain blocked in an interactive shell. Interactive and unknown selections
+# deliberately return false.
+mtd_smoke_poweroff_on_failure() {
+  case "${1:-}" in
+    1|q3n-serial-smoke|q3n-page-raid-smoke|q3n-multiplane-smoke|\
+    q3n-multiplane-persist-prepare|q3n-multiplane-persist-verify|\
+    q3n-persist-prepare|q3n-persist-verify) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 mtd_q3n_page_raid_expect() {
   [ "$1" = "$2" ] || {
     echo "q3n page RAID smoke: $3=$1, expected $2"

@@ -134,8 +134,10 @@ PROGRAM 保留 OOB head/tail。NAND Core 的 `MEMSETBADBLOCK` 路径会在 BBM/B
 ```
 
 脚本执行两轮 guest，验证 NAND Core 标坏产生的 OOB byte 0、标坏时擦除后的
-main 摘要和 block-isbad 状态跨重启保留，并验证坏块写擦拒绝。本分支不链接、
-不注册、也不保留任何 Page RAID 数据结构、调度器或调试接口。
+main 摘要和 block-isbad 状态跨重启保留，并验证坏块写擦拒绝。identity 路径
+不链接 Page RAID 对象；可选 Page RAID 模式会条件链接同步
+`qemu_3dnand_page_raid.o`。NAND-Core 迁移前的异步 scheduler/debugfs ABI
+已移除。
 
 read retry 由 NAND Core 调度，共 4 个模式。QEMU 模型按模式提供
 `0/8/16/24` bit 的纠错增益；普通读更新 ECC 结果，raw read 返回原始受损数据

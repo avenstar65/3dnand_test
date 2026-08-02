@@ -601,10 +601,11 @@ MMIO 窗口容量：
 - 页可以任意、重复 PROGRAM。
 - 重复 PROGRAM 使用 NAND 的逐字节 `old & incoming` 规则。
 - 块内严格编程顺序由上层文件系统/软件保证。
-- QEMU 不保存 RAID stripe、parity generation 或运行时 unprotected 状态。
-- 当前 NAND Core 分支的 Linux 驱动不实现 RAID 布局、parity 调度或恢复。
-- QEMU 中保留的 parity operation tag 仅是旧版统计 ABI，不构成 Page RAID
-  实现，也没有需要跨 VM 重启恢复的 RAID 运行时状态。
+- 当选择 Page RAID 时，当前 NAND Core 驱动实现同步 Page RAID layout、parity
+  PROGRAM 和单页恢复；该模式的对象在链接时按配置加入。
+- 已移除的是迁移前的异步 scheduler、其 debugfs counter/fault ABI，以及
+  runtime parity queue/unprotected-state 统计；这些不应被当作当前接口或
+  跨 VM 恢复状态。
 - multi-plane group 会在控制器内部按 plane0..3 完成功能性处理；它不是
   timing-accurate 的 ONFI 命令周期或性能模型，也不声明真实并行吞吐。
 - group PROGRAM/ERASE 可以部分成功；控制器报告 mask，但不回滚、不自动

@@ -19,4 +19,19 @@ command=$(mtd_smoke_command_for q3n-page-raid-smoke) || {
   exit 1
 }
 
+for stage in q3n-page-raid-smoke q3n-serial-smoke q3n-multiplane-smoke \
+  q3n-multiplane-persist-prepare q3n-multiplane-persist-verify \
+  q3n-persist-prepare q3n-persist-verify 1; do
+  mtd_smoke_poweroff_on_failure "$stage" || {
+    echo "FAIL: auto-smoke failure stage did not request poweroff: $stage" >&2
+    exit 1
+  }
+done
+for stage in 0 ubifs unknown; do
+  if mtd_smoke_poweroff_on_failure "$stage"; then
+    echo "FAIL: interactive/unknown stage requested poweroff: $stage" >&2
+    exit 1
+  fi
+done
+
 echo 'ok: current NAND Core Page RAID guest acceptance resolves'

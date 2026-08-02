@@ -31,9 +31,9 @@ if [ -n "$mtd_test" ]; then
   fi
 
   echo "MTD smoke 测试失败，进入 shell"
-  case "${MTD_SMOKE:-0}" in
-    q3n-serial-smoke|q3n-multiplane-smoke|q3n-multiplane-persist-*|q3n-persist-*) poweroff -f ;;
-  esac
+  if mtd_smoke_poweroff_on_failure "${MTD_SMOKE:-0}"; then
+    poweroff -f
+  fi
 fi
 
 exec /bin/sh
