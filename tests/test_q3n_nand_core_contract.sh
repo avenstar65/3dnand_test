@@ -61,8 +61,8 @@ config_lacks()
 if [ "$strict" = 1 ]; then
 	[ -r "$config" ] || fail "strict contract requires readable kernel .config"
 	case "$expected_mode" in
-		identity|raid4|raid8|multiplane) ;;
-		*) fail "strict contract requires Q3N_EXPECTED_MODE=identity|raid4|raid8|multiplane" ;;
+		identity|raid2|raid4|raid8|multiplane) ;;
+		*) fail "strict contract requires Q3N_EXPECTED_MODE=identity|raid2|raid4|raid8|multiplane" ;;
 	esac
 	grep -Eq '^CONFIG_MTD_NAND_QEMU_3DNAND=[my]$' "$config" ||
 		fail "kernel config does not enable Q3N"
@@ -86,7 +86,7 @@ if [ "$strict" = 1 ]; then
 				fail "identity config retains a RAID ratio"
 			fi
 			;;
-		raid4|raid8)
+		raid2|raid4|raid8)
 			ratio=${expected_mode#raid}
 			config_has '# CONFIG_MTD_NAND_QEMU_3DNAND_IDENTITY is not set' ||
 				fail "RAID config enables identity"

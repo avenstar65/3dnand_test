@@ -42,6 +42,12 @@ for file in \
   qemu_3dnand_page.h \
   qemu_3dnand_page_raid.c \
   qemu_3dnand_page_raid.h \
+  qemu_3dnand_multiplane_layout.c \
+  qemu_3dnand_multiplane_layout.h \
+  qemu_3dnand_hw_multiplane.c \
+  qemu_3dnand_hw_multiplane.h \
+  qemu_3dnand_multiplane.c \
+  qemu_3dnand_multiplane.h \
   qemu_3dnand_hw.c \
   qemu_3dnand_hw.h \
   qemu_3dnand_regs.h \

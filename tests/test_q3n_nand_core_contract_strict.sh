@@ -48,7 +48,7 @@ SYMS
 00000000 t q3n_page_erase_block
 SYMS
       case "${FIXTURE_MODE:?}" in
-        raid4|raid8) printf '00000000 r q3n_raid_page_ops\n' ;;
+        raid2|raid4|raid8) printf '00000000 r q3n_raid_page_ops\n' ;;
         multiplane)
           cat <<'SYMS'
 00000000 t q3n_multiplane_get_ops
@@ -92,7 +92,7 @@ pages/block=1600 logical-erasesize=104857600 logical-blocks=416
 logical-size=43620761600 image-mode=multiplane
 STRINGS
     ;;
-  raid4|raid8)
+  raid2|raid4|raid8)
     printf '%s\n' 'logical page=%u physical page=%u oob=%u'
     ;;
 esac
@@ -119,7 +119,7 @@ CONFIG_MTD_NAND_QEMU_3DNAND_IDENTITY=y
 # CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE is not set
 EOF
 			;;
-		raid4|raid8)
+		raid2|raid4|raid8)
 			ratio=${mode#raid}
 			: >"$raw/qemu_3dnand_page_raid.o"
 			cat >"$fixture/.config" <<EOF
@@ -171,10 +171,12 @@ expect_fail()
 
 identity=$(make_fixture identity)
 raid4=$(make_fixture raid4)
+raid2=$(make_fixture raid2)
 raid8=$(make_fixture raid8)
 multiplane=$(make_fixture multiplane)
 
 run_contract "$identity" identity env
+run_contract "$raid2" raid2 env
 run_contract "$raid4" raid4 env
 run_contract "$raid8" raid8 env
 run_contract "$multiplane" multiplane env
@@ -213,6 +215,11 @@ expect_fail raid-ratio \
 	env FIXTURE_MODE=raid8 PATH="$fake_bin:$PATH" \
 	Q3N_REQUIRE_KERNEL_BUILD=1 Q3N_KERNEL_BUILD_DIR="$raid4" \
 	Q3N_EXPECTED_MODE=raid8 sh "$contract"
+
+expect_fail raid2-ratio \
+	env FIXTURE_MODE=raid4 PATH="$fake_bin:$PATH" \
+	Q3N_REQUIRE_KERNEL_BUILD=1 Q3N_KERNEL_BUILD_DIR="$raid4" \
+	Q3N_EXPECTED_MODE=raid2 sh "$contract"
 
 stale="$tmp_dir/stale-artifact"
 cp -R "$identity" "$stale"
