@@ -195,3 +195,33 @@ int q3n_multiplane_physical_block(const struct q3n_multiplane_profile *profile,
 	*physical_block = block;
 	return 0;
 }
+
+u8 q3n_multiplane_bbm_fold(const u8 oob[4096])
+{
+	return oob[0] & oob[1024] & oob[2048] & oob[3072];
+}
+
+void q3n_multiplane_bbm_normalize(u8 oob[4096])
+{
+	u8 bbm = q3n_multiplane_bbm_fold(oob);
+
+	oob[0] = bbm;
+	oob[1024] = bbm;
+	oob[2048] = bbm;
+	oob[3072] = bbm;
+}
+
+int q3n_multiplane_oob_free_region(unsigned int section, u32 *offset,
+				  u32 *length)
+{
+	static const u32 offsets[] = { 1, 1025, 2049, 3073 };
+
+	if (!offset || !length)
+		return -EINVAL;
+	if (section >= Q3N_MP_PLANES)
+		return -ERANGE;
+
+	*offset = offsets[section];
+	*length = 1023;
+	return 0;
+}

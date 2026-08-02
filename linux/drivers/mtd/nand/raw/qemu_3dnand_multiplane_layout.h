@@ -5,6 +5,10 @@
 #include "qemu_3dnand_addr.h"
 #include "ytmc_nand.h"
 
+#ifdef Q3N_HOST_TEST
+typedef uint8_t u8;
+#endif
+
 #define Q3N_MP_PLANES 4U
 
 struct q3n_multiplane_profile {
@@ -33,5 +37,9 @@ int q3n_multiplane_map_block(const struct q3n_multiplane_profile *profile,
 		u32 logical_block, struct q3n_mp_addr *addr);
 int q3n_multiplane_physical_block(const struct q3n_multiplane_profile *profile,
 		const struct q3n_mp_addr *addr, u32 plane, u32 *physical_block);
+u8 q3n_multiplane_bbm_fold(const u8 oob[4096]);
+void q3n_multiplane_bbm_normalize(u8 oob[4096]);
+int q3n_multiplane_oob_free_region(unsigned int section,
+				  u32 *offset, u32 *length);
 
 #endif

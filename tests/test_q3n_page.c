@@ -247,10 +247,42 @@ static struct q3n make_q3n(bool raid_enabled)
 	};
 	int ret;
 
-	ret = q3n_page_layer_init(&q3n, raid_enabled, 4);
+	ret = q3n_page_layer_init(&q3n,
+		raid_enabled ? Q3N_MODE_PAGE_RAID : Q3N_MODE_IDENTITY, 4, NULL);
 	expect_u64("page layer init", ret, 0);
 	return q3n;
 }
+
+#ifdef Q3N_TEST_MULTIPLANE
+static void test_multiplane_layer_mode(void)
+{
+	const struct q3n_flash_topology topology = {
+		.dies = 2,
+		.planes_per_die = 4,
+		.blocks_per_plane = 247,
+		.data_blocks_per_plane = 208,
+		.pages_per_block = 1600,
+	};
+	struct q3n q3n = {
+		.physical_geometry = {
+			.writesize = 16384,
+			.oobsize = 1024,
+			.pages_per_block = 1600,
+			.blocks = 1976,
+		},
+	};
+	int ret;
+
+	ret = q3n_page_layer_init(&q3n, Q3N_MODE_MULTIPLANE, 0, &topology);
+	expect_u64("MP page layer init", ret, 0);
+	expect_u64("MP mode stored", q3n.storage_mode, Q3N_MODE_MULTIPLANE);
+	expect_u64("MP logical writesize", q3n.geometry.writesize, 65536);
+	expect_u64("MP logical OOB", q3n.geometry.oobsize, 4096);
+	expect_u64("MP scratch exists", q3n.multiplane_oob_scratch != NULL, true);
+	q3n_page_layer_cleanup(&q3n);
+	expect_u64("MP cleanup clears ops", (uintptr_t)q3n.page_ops, 0);
+}
+#endif
 
 static void test_identity_path(void)
 {
@@ -776,6 +808,9 @@ int main(void)
 	printf("ok: Q3N identity and synchronous page RAID behavior verified\n");
 #else
 	printf("ok: Q3N identity page layer links without page RAID\n");
+#endif
+#ifdef Q3N_TEST_MULTIPLANE
+	test_multiplane_layer_mode();
 #endif
 	return 0;
 }

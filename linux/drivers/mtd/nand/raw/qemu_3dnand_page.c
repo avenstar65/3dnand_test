@@ -17,6 +17,10 @@
 #include "qemu_3dnand_page_raid.h"
 #endif
 
+#ifdef CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE
+#include "qemu_3dnand_multiplane.h"
+#endif
+
 bool q3n_page_buffer_erased(const void *buffer, size_t length)
 {
 	const u8 *bytes = buffer;
@@ -101,13 +105,14 @@ static const struct q3n_page_ops q3n_identity_page_ops = {
 	.erase_block = q3n_identity_erase_block,
 };
 
-#ifdef CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID
-static void *q3n_page_scratch_alloc(void)
+#if defined(CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID) || \
+	defined(CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE)
+static void *q3n_page_scratch_alloc(size_t length)
 {
 #ifdef Q3N_HOST_TEST
-	return malloc(Q3N_PAGE_SIZE);
+	return malloc(length);
 #else
-	return kmalloc(Q3N_PAGE_SIZE, GFP_KERNEL);
+	return kmalloc(length, GFP_KERNEL);
 #endif
 }
 #endif
@@ -121,7 +126,9 @@ static void q3n_page_scratch_free(void *scratch)
 #endif
 }
 
-int q3n_page_layer_init(struct q3n *q3n, bool raid_enabled, u32 data_pages)
+int q3n_page_layer_init(struct q3n *q3n, enum q3n_storage_mode mode,
+			u32 raid_data_pages,
+			const struct q3n_flash_topology *topology)
 {
 	struct q3n_page_profile profile;
 	int ret;
@@ -129,33 +136,79 @@ int q3n_page_layer_init(struct q3n *q3n, bool raid_enabled, u32 data_pages)
 	if (!q3n)
 		return -EINVAL;
 
-	ret = q3n_layout_build(&profile, &q3n->physical_geometry,
-			       raid_enabled, data_pages);
-	if (ret)
-		return ret;
-
-	q3n->page_profile = profile;
-	q3n->geometry = profile.logical;
-	q3n->parity_scratch = NULL;
+	q3n_page_layer_cleanup(q3n);
+	q3n->storage_mode = Q3N_MODE_IDENTITY;
+	q3n->logical_size = 0;
 	q3n->raid_recovered_pages = 0;
+	(void)raid_data_pages;
+	(void)topology;
 
-	if (!raid_enabled) {
+	if (mode == Q3N_MODE_IDENTITY) {
+		ret = q3n_layout_build(&profile, &q3n->physical_geometry, false, 1);
+		if (ret)
+			goto err_clear;
+		q3n->page_profile = profile;
+		q3n->geometry = profile.logical;
+		q3n->logical_size = profile.logical_size;
+		q3n->storage_mode = mode;
 		q3n->page_ops = &q3n_identity_page_ops;
 		return 0;
 	}
 
+	if (mode == Q3N_MODE_PAGE_RAID) {
 #ifndef CONFIG_MTD_NAND_QEMU_3DNAND_PAGE_RAID
-	q3n->page_ops = NULL;
-	return -EOPNOTSUPP;
+		ret = -EOPNOTSUPP;
+		goto err_clear;
 #else
-	q3n->parity_scratch = q3n_page_scratch_alloc();
-	if (!q3n->parity_scratch) {
-		q3n->page_ops = NULL;
-		return -ENOMEM;
+		ret = q3n_layout_build(&profile, &q3n->physical_geometry, true,
+				       raid_data_pages);
+		if (ret)
+			goto err_clear;
+		q3n->parity_scratch = q3n_page_scratch_alloc(Q3N_PAGE_SIZE);
+		if (!q3n->parity_scratch) {
+			ret = -ENOMEM;
+			goto err_clear;
+		}
+		q3n->page_profile = profile;
+		q3n->geometry = profile.logical;
+		q3n->logical_size = profile.logical_size;
+		q3n->storage_mode = mode;
+		q3n->page_ops = q3n_page_raid_get_ops();
+		return 0;
+#endif
 	}
-	q3n->page_ops = q3n_page_raid_get_ops();
+
+	if (mode != Q3N_MODE_MULTIPLANE) {
+		ret = -EINVAL;
+		goto err_clear;
+	}
+#ifndef CONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE
+	ret = -EOPNOTSUPP;
+	goto err_clear;
+#else
+	struct q3n_multiplane_profile multiplane_profile;
+
+	ret = q3n_multiplane_layout_build(&multiplane_profile,
+					&q3n->physical_geometry, topology);
+	if (ret)
+		goto err_clear;
+	q3n->multiplane_oob_scratch = q3n_page_scratch_alloc(4096);
+	if (!q3n->multiplane_oob_scratch) {
+		ret = -ENOMEM;
+		goto err_clear;
+	}
+	q3n->multiplane_profile = multiplane_profile;
+	q3n->topology = *topology;
+	q3n->geometry = multiplane_profile.logical;
+	q3n->logical_size = multiplane_profile.logical_size;
+	q3n->storage_mode = mode;
+	q3n->page_ops = q3n_multiplane_get_ops();
 	return 0;
 #endif
+
+err_clear:
+	q3n_page_layer_cleanup(q3n);
+	return ret;
 }
 
 void q3n_page_layer_cleanup(struct q3n *q3n)
@@ -164,8 +217,12 @@ void q3n_page_layer_cleanup(struct q3n *q3n)
 		return;
 
 	q3n_page_scratch_free(q3n->parity_scratch);
+	q3n_page_scratch_free(q3n->multiplane_oob_scratch);
 	q3n->parity_scratch = NULL;
+	q3n->multiplane_oob_scratch = NULL;
 	q3n->page_ops = NULL;
+	q3n->storage_mode = Q3N_MODE_IDENTITY;
+	q3n->logical_size = 0;
 }
 
 static int q3n_page_in_range(const struct q3n *q3n, u32 logical_page)

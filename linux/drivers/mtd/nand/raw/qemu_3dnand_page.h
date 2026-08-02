@@ -8,6 +8,7 @@ struct q3n_page_result {
 	u32 max_bitflips;
 	u32 corrected_bits;
 	u32 failed_data_pages;
+	u8 failed_plane_mask;
 	bool parity_failed;
 	bool recovered;
 };
@@ -25,7 +26,9 @@ struct q3n_page_ops {
 };
 
 bool q3n_page_buffer_erased(const void *buffer, size_t length);
-int q3n_page_layer_init(struct q3n *q3n, bool raid_enabled, u32 data_pages);
+int q3n_page_layer_init(struct q3n *q3n, enum q3n_storage_mode mode,
+			u32 raid_data_pages,
+			const struct q3n_flash_topology *topology);
 void q3n_page_layer_cleanup(struct q3n *q3n);
 int q3n_page_read(struct q3n *q3n, u32 logical_page,
 		  void *data, void *oob, bool raw,

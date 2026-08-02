@@ -26,3 +26,15 @@ include_flags="-I$repo_root/linux/drivers/mtd/nand/raw"
 	-o "$test_dir/test_q3n_page_raid"
 
 "$test_dir/test_q3n_page_raid"
+
+"$cc" $common_flags $include_flags \
+	-DCONFIG_MTD_NAND_QEMU_3DNAND_MULTIPLANE -DQ3N_TEST_MULTIPLANE \
+	"$repo_root/tests/test_q3n_page.c" \
+	"$repo_root/linux/drivers/mtd/nand/raw/qemu_3dnand_page.c" \
+	"$repo_root/linux/drivers/mtd/nand/raw/qemu_3dnand_multiplane.c" \
+	"$repo_root/linux/drivers/mtd/nand/raw/qemu_3dnand_layout.c" \
+	"$repo_root/linux/drivers/mtd/nand/raw/qemu_3dnand_multiplane_layout.c" \
+	"$repo_root/tests/q3n_multiplane_page_stubs.c" \
+	-o "$test_dir/test_q3n_page_multiplane"
+
+"$test_dir/test_q3n_page_multiplane"

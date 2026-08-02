@@ -18,8 +18,16 @@ typedef uint64_t u64;
 
 #include "qemu_3dnand_addr.h"
 #include "qemu_3dnand_layout.h"
+#include "qemu_3dnand_multiplane_layout.h"
+#include "ytmc_nand.h"
 
 struct q3n_page_ops;
+
+enum q3n_storage_mode {
+	Q3N_MODE_IDENTITY,
+	Q3N_MODE_PAGE_RAID,
+	Q3N_MODE_MULTIPLANE,
+};
 
 struct q3n_ecc_result {
 	u32 status;
@@ -59,8 +67,13 @@ struct q3n {
 	struct q3n_geometry physical_geometry;
 	struct q3n_geometry geometry;
 	struct q3n_page_profile page_profile;
+	struct q3n_flash_topology topology;
+	struct q3n_multiplane_profile multiplane_profile;
+	enum q3n_storage_mode storage_mode;
 	const struct q3n_page_ops *page_ops;
 	u8 *parity_scratch;
+	u8 *multiplane_oob_scratch;
+	u64 logical_size;
 	u64 raid_recovered_pages;
 #ifndef Q3N_HOST_TEST
 	struct nand_flash_dev scan_ids[2];
