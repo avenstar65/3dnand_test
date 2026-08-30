@@ -193,6 +193,11 @@ RAID1 和 RAID5 共用新的 v2 manifest。其内容必须能放入 128 B logica
 - RAID5 parity CRC；
 - header CRC。
 
+OOB byte 0 始终保留为 BBM，manifest 从 byte 1 开始。启用 RAID1/RAID5
+profile 后，manifest 覆盖的 OOB 字节属于驱动私有提交区域，不作为 MTD user
+OOB 暴露；MTD main data 直接通过 `_read/_write` 回调传输。QEMU 的独立 OOB
+命令仍保留，用于 manifest、BBM 和控制器级回归测试。
+
 同一 RAID group 的 enabled 成员保存字节完全相同的 manifest。manifest 不依赖成员自身 OOB 中的隐式 slot 顺序，成员角色由 manifest 和物理 plane 共同推导。运行期和重启扫描建立的 committed index 保存从任一有效成员取得的权威 manifest；metadata-degraded 时，普通读取不要求目标 data page 自己也持有 manifest。
 
 ### 8.2 写入顺序
