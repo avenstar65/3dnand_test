@@ -74,8 +74,8 @@ void q3n_open_stripe_complete_parity(struct q3n_open_stripe *stripe, bool ok)
 	stripe->state = ok ? Q3N_STRIPE_PROTECTED : Q3N_STRIPE_UNPROTECTED;
 }
 
-int q3n_build_manifest(const struct q3n_open_stripe *stripe,
-		       struct q3n_parity_manifest *manifest)
+int q3n_build_legacy_manifest(const struct q3n_open_stripe *stripe,
+			      struct q3n_parity_manifest *manifest)
 {
 	u8 lane;
 
@@ -86,7 +86,7 @@ int q3n_build_manifest(const struct q3n_open_stripe *stripe,
 
 	memset(manifest, 0, sizeof(*manifest));
 	manifest->magic = cpu_to_le16(Q3N_RAID_META_MAGIC);
-	manifest->version = Q3N_RAID_META_VERSION;
+	manifest->version = Q3N_LEGACY_META_VERSION;
 	manifest->data_pages = stripe->data_pages;
 	manifest->stripe_id = cpu_to_le64(stripe->stripe_id);
 	manifest->member_bitmap = cpu_to_le16(stripe->member_bitmap);
@@ -101,7 +101,7 @@ int q3n_build_manifest(const struct q3n_open_stripe *stripe,
 int q3n_validate_manifest(const struct q3n_parity_manifest *manifest)
 {
 	if (!manifest || le16_to_cpu(manifest->magic) != Q3N_RAID_META_MAGIC ||
-	    manifest->version != Q3N_RAID_META_VERSION ||
+	    manifest->version != Q3N_LEGACY_META_VERSION ||
 	    manifest->data_pages == 0 ||
 	    manifest->data_pages > Q3N_RAID_MAX_DATA_PAGES ||
 	    le16_to_cpu(manifest->member_bitmap) !=
@@ -123,7 +123,7 @@ int q3n_pack_data_oob(u8 *logical_oob, size_t oob_len,
 
 	encoded = *meta;
 	encoded.magic = cpu_to_le16(Q3N_RAID_META_MAGIC);
-	encoded.version = Q3N_RAID_META_VERSION;
+	encoded.version = Q3N_LEGACY_META_VERSION;
 	encoded.header_crc = cpu_to_le32(q3n_data_meta_header_crc(&encoded));
 	memset(logical_oob, 0xff, Q3N_LOGICAL_OOB_SIZE);
 	memcpy(logical_oob + 1, &encoded, sizeof(encoded));
@@ -138,7 +138,7 @@ int q3n_unpack_data_oob(const u8 *logical_oob, size_t oob_len,
 
 	memcpy(meta, logical_oob + 1, sizeof(*meta));
 	if (le16_to_cpu(meta->magic) != Q3N_RAID_META_MAGIC ||
-	    meta->version != Q3N_RAID_META_VERSION ||
+	    meta->version != Q3N_LEGACY_META_VERSION ||
 	    le32_to_cpu(meta->header_crc) != q3n_data_meta_header_crc(meta))
 		return -EBADMSG;
 
@@ -189,6 +189,120 @@ int q3n_recover_page(u8 *out, const u8 *parity, const u8 * const *members,
 		q3n_xor_page(out, members[slot], len);
 	}
 
+	return 0;
+}
+
+static u32 q3n_raid_manifest_crc(const struct q3n_raid_manifest *manifest)
+{
+	struct q3n_raid_manifest copy = *manifest;
+
+	copy.header_crc = 0;
+	return crc32_le(~0, (const u8 *)&copy, sizeof(copy));
+}
+
+static int q3n_validate_raid_manifest(
+		const struct q3n_raid_manifest *manifest,
+		const struct q3n_raid_group *expected)
+{
+	u8 expected_level;
+
+	if (!manifest || !expected)
+		return -EINVAL;
+	expected_level = expected->data_pages == 1 ? Q3N_RAID1 : Q3N_RAID5;
+	if (le16_to_cpu(manifest->magic) != Q3N_RAID_META_MAGIC ||
+	    manifest->version != Q3N_RAID_META_VERSION ||
+	    manifest->raid_level != expected_level ||
+	    !le32_to_cpu(manifest->generation) ||
+	    manifest->die != expected->die ||
+	    manifest->member_bitmap != expected->member_mask ||
+	    manifest->parity_plane != expected->parity_plane ||
+	    manifest->data_pages != expected->data_pages ||
+	    le64_to_cpu(manifest->stripe_id) != expected->stripe_id ||
+	    le32_to_cpu(manifest->header_crc) !=
+		q3n_raid_manifest_crc(manifest))
+		return -EBADMSG;
+	if (manifest->raid_level == Q3N_RAID1 &&
+	    ((manifest->member_bitmap != 0x03 &&
+	      manifest->member_bitmap != 0x0c) ||
+	     manifest->parity_plane != Q3N_RAID_NO_PARITY ||
+	     manifest->data_pages != 1))
+		return -EBADMSG;
+	if (manifest->raid_level == Q3N_RAID5 &&
+	    (manifest->member_bitmap != 0x0f ||
+	     manifest->parity_plane >= 4 || manifest->data_pages != 3))
+		return -EBADMSG;
+	return 0;
+}
+
+int q3n_build_manifest(const struct q3n_raid_group *group, u32 generation,
+		       const u32 data_crc[3], u32 parity_crc,
+		       struct q3n_raid_manifest *out)
+{
+	u8 level;
+	u8 i;
+
+	BUILD_BUG_ON(sizeof(struct q3n_raid_manifest) >
+		     Q3N_LOGICAL_OOB_SIZE - 1);
+	if (!group || !generation || !data_crc || !out ||
+	    (group->data_pages != 1 && group->data_pages != 3))
+		return -EINVAL;
+	level = group->data_pages == 1 ? Q3N_RAID1 : Q3N_RAID5;
+	if ((level == Q3N_RAID1 &&
+	     ((group->member_mask != 0x03 && group->member_mask != 0x0c) ||
+	      group->parity_plane != Q3N_RAID_NO_PARITY)) ||
+	    (level == Q3N_RAID5 &&
+	     (group->member_mask != 0x0f || group->parity_plane >= 4)))
+		return -EINVAL;
+
+	memset(out, 0, sizeof(*out));
+	out->magic = cpu_to_le16(Q3N_RAID_META_MAGIC);
+	out->version = Q3N_RAID_META_VERSION;
+	out->raid_level = level;
+	out->die = group->die;
+	out->member_bitmap = group->member_mask;
+	out->parity_plane = group->parity_plane;
+	out->data_pages = group->data_pages;
+	out->stripe_id = cpu_to_le64(group->stripe_id);
+	out->generation = cpu_to_le32(generation);
+	for (i = 0; i < group->data_pages; i++)
+		out->data_crc[i] = cpu_to_le32(data_crc[i]);
+	out->parity_crc = cpu_to_le32(parity_crc);
+	out->header_crc = cpu_to_le32(q3n_raid_manifest_crc(out));
+	return 0;
+}
+
+int q3n_pack_manifest_oob(u8 *oob,
+			  const struct q3n_raid_manifest *manifest)
+{
+	u8 bbm;
+
+	if (!oob || !manifest)
+		return -EINVAL;
+	bbm = oob[0];
+	memset(oob, 0xff, Q3N_LOGICAL_OOB_SIZE);
+	oob[0] = bbm;
+	memcpy(oob + 1, manifest, sizeof(*manifest));
+	return 0;
+}
+
+int q3n_unpack_manifest_oob(const u8 *oob,
+			    const struct q3n_raid_group *expected,
+			    struct q3n_raid_manifest *out)
+{
+	if (!oob || !expected || !out)
+		return -EINVAL;
+	memcpy(out, oob + 1, sizeof(*out));
+	return q3n_validate_raid_manifest(out, expected);
+}
+
+int q3n_raid5_recover(u8 *out, const u8 *parity, const u8 *other0,
+		      const u8 *other1, size_t len)
+{
+	if (!out || !parity || !other0 || !other1 || !len)
+		return -EINVAL;
+	memcpy(out, parity, len);
+	q3n_xor_page(out, other0, len);
+	q3n_xor_page(out, other1, len);
 	return 0;
 }
 

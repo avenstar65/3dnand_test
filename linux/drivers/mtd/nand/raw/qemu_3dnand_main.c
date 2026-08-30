@@ -490,7 +490,7 @@ static int qemu_3dnand_commit_parity_locked(struct qemu_3dnand *q3n,
 	int ret;
 
 	memcpy(open_stripe.data_crc, data_crc, sizeof(open_stripe.data_crc));
-	ret = q3n_build_manifest(&open_stripe, &manifest);
+	ret = q3n_build_legacy_manifest(&open_stripe, &manifest);
 	if (ret)
 		return ret;
 	ret = q3n_pack_parity_oob(logical_oob, sizeof(logical_oob), &manifest);
