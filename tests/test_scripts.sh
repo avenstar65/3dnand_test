@@ -366,6 +366,14 @@ for symbol in \
   assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h "$symbol"
   assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
 done
+assert_function_contains qemu/hw/mtd/q3n-nand.c q3n_mmio_read \
+  'Q3N_CAP_MULTIPLANE'
+for handler in \
+  q3n_cmd_mp_read_page q3n_cmd_mp_program_page \
+  q3n_cmd_mp_read_page_oob q3n_cmd_mp_program_page_oob \
+  q3n_cmd_mp_erase_block; do
+  assert_function_contains qemu/hw/mtd/q3n-nand.c q3n_execute_cmd "$handler"
+done
 for symbol in \
   Q3N_CAP_MULTIPLANE \
   Q3N_REG_MP_DIE Q3N_REG_MP_PLANE_MASK Q3N_REG_MP_SLOT \

@@ -89,6 +89,37 @@ static void test_multiplane_descriptor_validation(void)
     assert(!q3n_mp_validate_desc(&d, Q3N_PAGE_SIZE, false));
 }
 
+static void test_multiplane_staging_reset_is_slot_local(void)
+{
+    Q3NMultiPlaneSlotState slots[Q3N_PLANES_PER_DIE] = { 0 };
+
+    slots[0].data_pos = 11;
+    slots[0].data_count = Q3N_PAGE_SIZE;
+    slots[2].data_pos = 29;
+    slots[2].data_count = Q3N_LOGICAL_OOB_SIZE;
+
+    q3n_mp_reset_slot_staging(&slots[2]);
+
+    assert(slots[0].data_pos == 11);
+    assert(slots[0].data_count == Q3N_PAGE_SIZE);
+    assert(slots[2].data_pos == 0);
+    assert(slots[2].data_count == 0);
+}
+
+static void test_multiplane_result_keeps_successes_and_failures(void)
+{
+    uint32_t success = 0;
+    uint32_t failure = 0;
+
+    q3n_mp_record_slot_result(&success, &failure, 0, true);
+    q3n_mp_record_slot_result(&success, &failure, 1, false);
+    q3n_mp_record_slot_result(&success, &failure, 2, true);
+    q3n_mp_record_slot_result(&success, &failure, 3, true);
+
+    assert(success == 0x0d);
+    assert(failure == 0x02);
+}
+
 static void q3n_media_merge_program(uint8_t *stored,
                                     const uint8_t *incoming, size_t length)
 {
@@ -283,6 +314,8 @@ static void test_physical_page_oob_mapping_preserves_main_and_ldpc(void)
 int main(void)
 {
     test_multiplane_descriptor_validation();
+    test_multiplane_staging_reset_is_slot_local();
+    test_multiplane_result_keeps_successes_and_failures();
     test_decode_thresholds();
     test_decode_aggregates_steps();
     test_ldpc_mismatch_is_uncorrectable();
