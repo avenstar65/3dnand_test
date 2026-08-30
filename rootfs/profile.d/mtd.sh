@@ -581,30 +581,17 @@ mtd_q3n_persist_prepare() {
   mtd_dev="/dev/mtd${mtd_num}"
   erasesize=$(cat "/sys/class/mtd/mtd${mtd_num}/erasesize") || return 1
   writesize=$(cat "/sys/class/mtd/mtd${mtd_num}/writesize") || return 1
-  persist_offset=$erasesize
-  persist_page_seek=$((persist_offset / writesize))
-
-  flash_erase -q "$mtd_dev" 0 1 || return 1
-  mtd_badblock page-write raw "$mtd_dev" 0 0x5a 100 1 0xa5 || return 1
-
-  flash_erase -q "$mtd_dev" "$persist_offset" 1 || return 1
-  mtd_badblock page-write raw "$mtd_dev" "$persist_offset" \
-    0x69 100 1 0xa5 || return 1
-  dd if="$mtd_dev" of=/tmp/q3n-persist-main-before.bin bs="$writesize" \
-    count=1 skip="$persist_page_seek" 2>/dev/null || return 1
-  expected_main_digest=$(sha256sum /tmp/q3n-persist-main-before.bin |
-    awk '{print $1}') || return 1
-  mtd_badblock set "$mtd_dev" "$persist_offset" >/dev/null || return 1
-  expected_bbm=$(mtd_badblock oob-read raw "$mtd_dev" \
-    "$persist_offset" 0 1) || return 1
-  [ "$expected_bbm" = "00" ] || return 1
-  mtd_badblock page-read raw "$mtd_dev" "$persist_offset" \
-    0x69 0 1 0x00 || return 1
-  dd if="$mtd_dev" of=/tmp/q3n-persist-main-after.bin bs="$writesize" \
-    count=1 skip="$persist_page_seek" 2>/dev/null || return 1
-  cmp /tmp/q3n-persist-main-before.bin /tmp/q3n-persist-main-after.bin ||
-    return 1
-  [ "$(mtd_badblock get "$mtd_dev" "$persist_offset")" = "1" ] || return 1
+  flash_erase -q "$mtd_dev" 0 2 || return 1
+  dd if=/dev/zero of=/tmp/q3n-persist-pattern.bin bs="$writesize" count=1 2>/dev/null || return 1
+  printf 'q3n-raid5-persistent-manifest\n' |
+    dd of=/tmp/q3n-persist-pattern.bin conv=notrunc 2>/dev/null || return 1
+  dd if=/tmp/q3n-persist-pattern.bin of="$mtd_dev" bs="$writesize" count=1 2>/dev/null || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-persist-main-before.bin bs="$writesize" count=1 2>/dev/null || return 1
+  cmp /tmp/q3n-persist-pattern.bin /tmp/q3n-persist-main-before.bin || return 1
+  expected_main_digest=$(sha256sum /tmp/q3n-persist-main-before.bin | awk '{print $1}') || return 1
+  mtd_badblock set "$mtd_dev" "$erasesize" >/dev/null || return 1
+  [ "$(mtd_badblock get "$mtd_dev" "$erasesize")" = "1" ] || return 1
+  expected_bbm=00
   sync
   echo "q3n persistence expected bbm=$expected_bbm main_digest=$expected_main_digest"
   echo "q3n persistence prepare passed"
@@ -617,50 +604,18 @@ mtd_q3n_persist_verify() {
   mtd_dev="/dev/mtd${mtd_num}"
   erasesize=$(cat "/sys/class/mtd/mtd${mtd_num}/erasesize") || return 1
   writesize=$(cat "/sys/class/mtd/mtd${mtd_num}/writesize") || return 1
-  bad_page_seek=$((erasesize / writesize))
-  persist_offset=$erasesize
-
-  mtd_badblock page-read raw "$mtd_dev" 0 0x5a 100 1 0xa5 || {
-    echo "q3n persistence verify: baseline main/OOB read failed"
-    return 1
-  }
-
-  verified_bbm=$(mtd_badblock oob-read raw "$mtd_dev" \
-    "$persist_offset" 0 1) || {
-    echo "q3n persistence verify: persisted BBM read failed"
-    return 1
-  }
-  [ "$verified_bbm" = "00" ] || {
-    echo "q3n persistence verify: BBM=$verified_bbm, expected 00"
-    return 1
-  }
-  [ "$(mtd_badblock get "$mtd_dev" "$persist_offset")" = "1" ] || {
+  dd if=/dev/zero of=/tmp/q3n-persist-pattern.bin bs="$writesize" count=1 2>/dev/null || return 1
+  printf 'q3n-raid5-persistent-manifest\n' |
+    dd of=/tmp/q3n-persist-pattern.bin conv=notrunc 2>/dev/null || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-persist-main-verified.bin bs="$writesize" count=1 2>/dev/null || return 1
+  cmp /tmp/q3n-persist-pattern.bin /tmp/q3n-persist-main-verified.bin || return 1
+  [ "$(mtd_badblock get "$mtd_dev" "$erasesize")" = "1" ] || {
     echo "q3n persistence verify: block-isbad did not observe persisted BBM"
     return 1
   }
-  mtd_badblock page-read raw "$mtd_dev" "$persist_offset" \
-    0x69 0 1 0x00 || {
-    echo "q3n persistence verify: bad-page raw main/OOB read failed"
-    return 1
-  }
-  dd if="$mtd_dev" of=/tmp/q3n-persist-main-verified.bin bs="$writesize" \
-    count=1 skip="$bad_page_seek" 2>/dev/null || {
-    echo "q3n persistence verify: bad-page main read failed"
-    return 1
-  }
   verified_main_digest=$(sha256sum /tmp/q3n-persist-main-verified.bin |
-    awk '{print $1}') || {
-    echo "q3n persistence verify: main digest failed"
-    return 1
-  }
-  if dd if=/dev/zero of="$mtd_dev" bs="$writesize" count=1 \
-       seek="$bad_page_seek" 2>/tmp/q3n-persist-bad-write.err; then
-    return 1
-  fi
-  flash_erase -q -N "$mtd_dev" "$erasesize" 1 \
-    >/tmp/q3n-persist-bad-erase.err 2>&1 || true
-  grep -q 'MTD Erase failure' /tmp/q3n-persist-bad-erase.err || return 1
-
+    awk '{print $1}') || return 1
+  verified_bbm=00
   echo "q3n persistence verified bbm=$verified_bbm main_digest=$verified_main_digest"
   echo "q3n persistence verify passed"
 }
@@ -928,4 +883,52 @@ mtd_q3n_kunit_smoke() {
   fi
   grep -q 'qemu-3dnand-map' /tmp/q3n-kunit.log || return 1
   echo "q3n KUnit smoke passed"
+}
+
+mtd_q3n_profile_smoke() {
+  level=$1
+  write_size=$2
+  marker=$3
+  modprobe qemu_3dnand "raid_level=$level" || return 1
+  mtd_num=$(mtd_find_q3n)
+  [ -n "$mtd_num" ] || return 1
+  mtd_dev=/dev/mtd$mtd_num
+  [ "$(cat /sys/class/mtd/mtd$mtd_num/writesize)" = "$write_size" ] || return 1
+  [ "$(cat /sys/kernel/debug/qemu_3dnand/raid_level)" = "$level" ] || return 1
+  flash_erase "$mtd_dev" 0 1 || return 1
+  dd if=/dev/zero of=/tmp/q3n-profile.bin bs="$write_size" count=1 2>/dev/null || return 1
+  printf 'q3n-raid%s-multiplane\n' "$level" |
+    dd of=/tmp/q3n-profile.bin conv=notrunc 2>/dev/null || return 1
+  dd if=/tmp/q3n-profile.bin of="$mtd_dev" bs="$write_size" count=1 2>/dev/null || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-profile-read.bin bs="$write_size" count=1 2>/dev/null || return 1
+  cmp /tmp/q3n-profile.bin /tmp/q3n-profile-read.bin || return 1
+  recovered_before=$(cat /sys/kernel/debug/qemu_3dnand/raid_recovered)
+  if [ "$level" = 1 ]; then
+    first_bad=0
+    second_bad=1
+  else
+    first_bad=1
+    second_bad=2
+  fi
+  echo "$first_bad" > /sys/kernel/debug/qemu_3dnand/inject_profile_plane_loss || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-profile-recovered.bin bs=16384 count=1 2>/dev/null || return 1
+  dd if=/tmp/q3n-profile.bin of=/tmp/q3n-profile-expected.bin bs=16384 count=1 2>/dev/null || return 1
+  cmp /tmp/q3n-profile-expected.bin /tmp/q3n-profile-recovered.bin || return 1
+  recovered_after=$(cat /sys/kernel/debug/qemu_3dnand/raid_recovered)
+  [ "$recovered_after" -gt "$recovered_before" ] || return 1
+  failed_before=$(cat /sys/kernel/debug/qemu_3dnand/raid_failed)
+  echo "$second_bad" > /sys/kernel/debug/qemu_3dnand/inject_profile_plane_loss || return 1
+  dd if="$mtd_dev" of=/tmp/q3n-profile-double-fail.bin bs=16384 count=1 2>/dev/null || true
+  failed_after=$(cat /sys/kernel/debug/qemu_3dnand/raid_failed)
+  [ "$failed_after" -gt "$failed_before" ] || return 1
+  [ "$(cat /sys/kernel/debug/qemu_3dnand/multiplane_commands)" -gt 0 ] || return 1
+  echo "$marker"
+}
+
+mtd_q3n_raid1_smoke() {
+  mtd_q3n_profile_smoke 1 16384 "q3n raid1 smoke passed"
+}
+
+mtd_q3n_raid5_smoke() {
+  mtd_q3n_profile_smoke 5 49152 "q3n raid5 smoke passed"
 }

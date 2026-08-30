@@ -20,6 +20,8 @@ fi
 
 case "${MTD_SMOKE:-0}" in
   q3n-kunit-smoke) mtd_test=mtd_q3n_kunit_smoke ;;
+  q3n-raid1-smoke) mtd_test=mtd_q3n_raid1_smoke ;;
+  q3n-raid5-smoke) mtd_test=mtd_q3n_raid5_smoke ;;
   q3n-serial-smoke) mtd_test=mtd_q3n_serial_smoke ;;
   q3n-persist-prepare) mtd_test=mtd_q3n_persist_prepare ;;
   q3n-persist-verify) mtd_test=mtd_q3n_persist_verify ;;
@@ -36,7 +38,7 @@ if [ -n "$mtd_test" ]; then
 
   echo "MTD smoke 测试失败，进入 shell"
   case "${MTD_SMOKE:-0}" in
-    q3n-kunit-smoke|q3n-serial-smoke|q3n-persist-*) poweroff -f ;;
+    q3n-kunit-smoke|q3n-raid1-smoke|q3n-raid5-smoke|q3n-serial-smoke|q3n-persist-*) poweroff -f ;;
   esac
 fi
 

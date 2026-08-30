@@ -12,6 +12,8 @@
 #define Q3N_ID_VALUE                   0x314e3351U
 
 #define Q3N_PAGE_SIZE                  (16 * 1024)
+#define Q3N_DIES                       2U
+#define Q3N_PLANES_PER_DIE             4U
 #define Q3N_PHYSICAL_OOB_SIZE          1664U
 #define Q3N_LOGICAL_OOB_SIZE           128U
 #define Q3N_BBM_OOB_OFFSET             0U

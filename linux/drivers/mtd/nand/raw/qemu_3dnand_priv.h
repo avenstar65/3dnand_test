@@ -4,6 +4,7 @@
 
 #include <linux/atomic.h>
 #include <linux/errno.h>
+#include <linux/io.h>
 #include <linux/list.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
@@ -129,6 +130,25 @@ struct q3n_ecc_result {
 	bool uncorrectable;
 };
 
+struct q3n_mp_io {
+	void __iomem *regs;
+	u32 page_size;
+	u32 pages_per_block;
+};
+
+struct q3n_mp_result {
+	u8 success_mask;
+	u8 failure_mask;
+	struct q3n_ecc_result ecc[4];
+};
+
+struct q3n_mp_buffers {
+	u8 mask;
+	u8 die;
+	struct q3n_phys_addr addr[4];
+	u8 *data[4];
+};
+
 static inline void q3n_ecc_accumulate(struct q3n_ecc_result *total,
 				      const struct q3n_ecc_result *page)
 {
@@ -217,6 +237,20 @@ int q3n_unpack_manifest_oob(const u8 *oob,
 			    struct q3n_raid_manifest *out);
 int q3n_raid5_recover(u8 *out, const u8 *parity, const u8 *other0,
 		      const u8 *other1, size_t len);
+int q3n_mp_read(struct q3n_mp_io *io, const struct q3n_mp_buffers *buffers,
+		struct q3n_mp_result *result);
+int q3n_mp_program(struct q3n_mp_io *io,
+		   const struct q3n_mp_buffers *buffers,
+		   struct q3n_mp_result *result);
+int q3n_mp_read_oob(struct q3n_mp_io *io,
+		    const struct q3n_mp_buffers *buffers,
+		    struct q3n_mp_result *result);
+int q3n_mp_program_oob(struct q3n_mp_io *io,
+		       const struct q3n_mp_buffers *buffers,
+		       struct q3n_mp_result *result);
+int q3n_mp_erase(struct q3n_mp_io *io,
+		 const struct q3n_mp_buffers *buffers,
+		 struct q3n_mp_result *result);
 int q3n_rebuild_xor_one(struct q3n_parity_rebuild *rebuild,
 			const u8 *member);
 int q3n_rebuild_check_generation(const struct q3n_parity_rebuild *rebuild,

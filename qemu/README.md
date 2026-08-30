@@ -124,8 +124,16 @@ This format contains no stripe, parity, generation, MTD, UBI, or FTL semantics.
 The current durability contract covers normal QEMU shutdown; crash/kill
 recovery is not claimed.
 
-QEMU persists raw NAND bytes and bitflip overlays.  The driver does not
-restore Page-RAID runtime state after reload or VM restart in this phase.
+The controller also exposes a RAID-agnostic four-slot multi-plane ABI. Linux
+selects one die, a plane mask, and one physical page address per selected plane;
+all enabled members must have the same block-in-plane and page row. Commands
+9--13 perform main/OOB read/program and block erase, preserving independent
+success, failure, and ECC results for each selected slot. QEMU still owns no
+RAID policy.
+
+Linux uses the ABI for same-die RAID1 mirror pairs or same-die RAID5 3D+1P
+groups. The v2 commit manifest occupies logical OOB bytes 1..127; byte 0 remains
+the bad-block marker and the MTD device does not expose public user OOB.
 
 For x86_64 bring-up, use the PCI wrapper:
 
@@ -136,7 +144,7 @@ work/build/qemu-11.0.2/qemu-system-x86_64-unsigned -machine q35 -device q3n-nand
 The Linux overlay currently registers an MTD device named `qemu-3dnand`. Its
 first read/write/erase path talks to the QEMU model through the controller MMIO
 commands. The Linux driver maps MTD logical pages to the QEMU physical media and
-owns the current scheme D page-raid/parity-log policy. A raw NAND `exec_op()`
+owns the selected RAID1/RAID5 page layout. A raw NAND `exec_op()`
 controller integration remains a later phase if we want the Linux raw NAND core
 to perform NAND scan and command sequencing itself.
 

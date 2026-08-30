@@ -103,18 +103,40 @@ LDPC。Linux 标坏通过普通 OOB PROGRAM 将 logical OOB byte 0 编程为 `00
 没有专用 mark-bad 命令。OOB PROGRAM 保留 main 与 LDPC，main PROGRAM
 保留 OOB head/tail。
 
+## Multi-plane Page RAID1 / RAID5
+
+控制器固定为 2 die × 4 plane，冗余成员始终位于同一 die，不做跨 die
+备份。加载驱动时用只读参数选择 profile：
+
+```sh
+modprobe qemu_3dnand raid_level=1   # plane0/1、plane2/3 镜像，16 KiB 写对齐
+modprobe qemu_3dnand                # 默认 RAID5，3D+1P，48 KiB 写对齐
+```
+
+RAID5 的 parity plane 按 stripe ID 在 0、1、2、3 间轮转。主数据通过一次
+multi-plane PROGRAM 写入；所有主成员成功后，再用独立的 multi-plane OOB
+PROGRAM 发布 v2 manifest。OOB byte 0 仍是 BBM，manifest 从 byte 1 开始，
+这 127 B 是驱动私有区域，不作为公共 MTD OOB 暴露。旧串行 D0..D6/P 介质
+没有 v2 manifest，切换到新 profile 时应使用 `--fresh-nand`。
+
+验收命令：
+
+```sh
+./scripts/q3n-raid1-smoke.sh
+./scripts/q3n-raid5-smoke.sh
+./scripts/q3n-kunit-smoke.sh
+./scripts/q3n-persistence-smoke.sh
+```
+
 原始介质跨重启持久性验收命令为：
 
 ```sh
 ./scripts/q3n-persistence-smoke.sh
 ```
 
-脚本执行两轮 guest，验证通过 OOB PROGRAM 写入的 BBM、标坏前的 raw main
-摘要和 block-isbad 状态跨重启保留，并验证坏块写擦拒绝。QEMU 不解释
-`D0..D6,P` 布局；映射和运行期 parity 状态始终由 Linux 驱动管理。
-
-QEMU persists raw NAND bytes and bitflip overlays.  The driver does not
-restore Page-RAID runtime state after reload or VM restart in this phase.
+脚本执行两轮 guest，验证 RAID5 v2 manifest 数据和同 die 四 plane 坏块组
+状态跨重启保留。QEMU 不解释 RAID 布局；映射、manifest 和恢复策略始终由
+Linux 驱动管理。
 
 自动执行 MTD smoke 并在成功后关闭虚拟机：
 

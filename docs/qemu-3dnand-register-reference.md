@@ -562,6 +562,8 @@ OOB 命令传 128 B。
 | `STAT_LDPC_CORRECTED` | 累计纠正 bit 数 |
 | `STAT_LDPC_UNCORRECTABLE` | 累计不可纠正页数 |
 | `STAT_LDPC_FAILED_STEPS` | 累计不可纠正 step 数 |
+| `STAT_MP_COMMANDS` | 已执行的 multi-plane 命令数 |
+| `STAT_MP_SLOT_FAILURES` | multi-plane 命令中失败的 plane slot 总数 |
 
 注意：`STAT_PAGE_READ_ERRORS` 不统计普通的 LDPC 不可纠正事件。LDPC 错误
 使用独立的 `STAT_LDPC_*` 寄存器统计。
@@ -574,8 +576,8 @@ OOB 命令传 128 B。
 - 重复 PROGRAM 使用 NAND 的逐字节 `old & incoming` 规则。
 - 块内严格编程顺序由上层文件系统/软件保证。
 - QEMU 不保存 RAID stripe、parity generation 或运行时 unprotected 状态。
-- RAID 布局、parity 调度和恢复策略属于 Linux 驱动。
-- 当前阶段不恢复 VM 重启前的 RAID 运行时状态。
+- RAID 布局、manifest 和恢复策略属于 Linux 驱动。
+- Linux v2 manifest 位于逻辑 OOB byte 1..127；byte 0 始终保留为 BBM。
 
 ## 19. 对应源码
 

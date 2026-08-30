@@ -19,6 +19,7 @@ cp "$overlay_dir/qemu_3dnand_map.c" "$raw_dir/qemu_3dnand_map.c"
 cp "$overlay_dir/qemu_3dnand_raid.c" "$raw_dir/qemu_3dnand_raid.c"
 cp "$overlay_dir/qemu_3dnand_sched.c" "$raw_dir/qemu_3dnand_sched.c"
 cp "$overlay_dir/qemu_3dnand_kunit.c" "$raw_dir/qemu_3dnand_kunit.c"
+cp "$overlay_dir/qemu_3dnand_mp.c" "$raw_dir/qemu_3dnand_mp.c"
 cp "$overlay_dir/Kconfig.qemu_3dnand" "$raw_dir/Kconfig.qemu_3dnand"
 cp "$overlay_dir/Makefile.qemu_3dnand" "$raw_dir/Makefile.qemu_3dnand"
 
