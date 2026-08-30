@@ -16,6 +16,81 @@ static const struct q3n_geometry q3n_test_geometry = {
 	.parity_block_count = 2,
 };
 
+static struct q3n_geometry q3n_test_raid_geometry(enum q3n_raid_level level)
+{
+	return (struct q3n_geometry) {
+		.page_size = 16 * 1024,
+		.pages_per_block = 1600,
+		.blocks_per_plane = 247,
+		.data_blocks_per_plane = 208,
+		.dies = 2,
+		.planes_per_die = 4,
+		.raid_level = level,
+	};
+}
+
+static void q3n_raid1_plane_pair_mapping_test(struct kunit *test)
+{
+	struct q3n_geometry geometry = q3n_test_raid_geometry(Q3N_RAID1);
+	struct q3n_raid_group group;
+	static const u8 dies[] = { 0, 0, 1, 1, 0 };
+	static const u8 masks[] = { 0x03, 0x0c, 0x03, 0x0c, 0x03 };
+	u64 leb;
+
+	for (leb = 0; leb < ARRAY_SIZE(dies); leb++) {
+		KUNIT_ASSERT_EQ(test, q3n_map_raid1_page(&geometry, leb, 7,
+						       &group), 0);
+		KUNIT_EXPECT_EQ(test, group.die, dies[leb]);
+		KUNIT_EXPECT_EQ(test, group.member_mask, masks[leb]);
+		KUNIT_EXPECT_EQ(test, group.block_in_plane,
+				(u32)(leb / 4));
+	}
+}
+
+static void q3n_raid5_die_block_and_parity_rotation_test(struct kunit *test)
+{
+	struct q3n_geometry geometry = q3n_test_raid_geometry(Q3N_RAID5);
+	struct q3n_raid_group group;
+	static const u8 dies[] = { 0, 1, 0 };
+	static const u32 blocks[] = { 0, 0, 1 };
+	u64 leb;
+	u32 page;
+
+	for (leb = 0; leb < ARRAY_SIZE(dies); leb++) {
+		KUNIT_ASSERT_EQ(test, q3n_map_raid5_stripe(&geometry, leb, 0,
+							  &group), 0);
+		KUNIT_EXPECT_EQ(test, group.die, dies[leb]);
+		KUNIT_EXPECT_EQ(test, group.block_in_plane, blocks[leb]);
+		KUNIT_EXPECT_EQ(test, group.member_mask, (u8)0x0f);
+	}
+	for (page = 0; page < 4; page++) {
+		KUNIT_ASSERT_EQ(test, q3n_map_raid5_stripe(&geometry, 0, page,
+							  &group), 0);
+		KUNIT_EXPECT_EQ(test, group.parity_plane, (u8)page);
+	}
+}
+
+static void q3n_profile_geometry_values_test(struct kunit *test)
+{
+	struct q3n_geometry geometry = q3n_test_raid_geometry(Q3N_RAID1);
+	u32 writesize;
+	u32 erasesize;
+	u64 size;
+
+	KUNIT_ASSERT_EQ(test, q3n_raid_geometry_values(&geometry, &writesize,
+						       &erasesize, &size), 0);
+	KUNIT_EXPECT_EQ(test, writesize, 16384U);
+	KUNIT_EXPECT_EQ(test, erasesize, 26214400U);
+	KUNIT_EXPECT_EQ(test, size, 21810380800ULL);
+
+	geometry.raid_level = Q3N_RAID5;
+	KUNIT_ASSERT_EQ(test, q3n_raid_geometry_values(&geometry, &writesize,
+						       &erasesize, &size), 0);
+	KUNIT_EXPECT_EQ(test, writesize, 49152U);
+	KUNIT_EXPECT_EQ(test, erasesize, 78643200U);
+	KUNIT_EXPECT_EQ(test, size, 32715571200ULL);
+}
+
 static void q3n_build_bad_block_oob(u8 *logical_oob)
 {
 	memset(logical_oob, 0xff, Q3N_LOGICAL_OOB_SIZE);
@@ -637,6 +712,9 @@ static void q3n_block_barrier_terminal_put_wakes_on_drain_test(struct kunit *tes
 
 static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_bad_block_oob_marks_only_bbm_test),
+	KUNIT_CASE(q3n_raid1_plane_pair_mapping_test),
+	KUNIT_CASE(q3n_raid5_die_block_and_parity_rotation_test),
+	KUNIT_CASE(q3n_profile_geometry_values_test),
 	KUNIT_CASE(q3n_map_separate_parity_block_test),
 	KUNIT_CASE(q3n_map_non_power_of_two_geometry_test),
 	KUNIT_CASE(q3n_map_rejects_invalid_input_test),

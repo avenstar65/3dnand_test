@@ -15,17 +15,38 @@
 #define Q3N_MAX_PENDING_PARITY		32
 #define Q3N_MAX_PARITY_READ_INFLIGHT	1
 
+enum q3n_raid_level {
+	Q3N_RAID1 = 1,
+	Q3N_RAID5 = 5,
+};
+
 struct q3n_geometry {
 	u32 page_size;
 	u32 pages_per_block;
 	u32 data_pages_per_stripe;
 	u32 data_block_count;
 	u32 parity_block_count;
+	u32 blocks_per_plane;
+	u32 data_blocks_per_plane;
+	u8 dies;
+	u8 planes_per_die;
+	enum q3n_raid_level raid_level;
 };
 
 struct q3n_phys_addr {
 	u32 block;
 	u32 page;
+};
+
+struct q3n_raid_group {
+	u64 stripe_id;
+	u32 block_in_plane;
+	u32 page;
+	u8 die;
+	u8 member_mask;
+	u8 parity_plane;
+	u8 data_pages;
+	struct q3n_phys_addr member[4];
 };
 
 struct q3n_block_barrier {
@@ -145,6 +166,12 @@ int q3n_map_parity_page(const struct q3n_geometry *geometry, u64 stripe,
 			struct q3n_phys_addr *out);
 int q3n_map_serial_data_page(const struct q3n_geometry *geometry,
 			     u64 logical_page, struct q3n_phys_addr *out);
+int q3n_map_raid1_page(const struct q3n_geometry *geometry, u64 leb,
+		       u32 page, struct q3n_raid_group *out);
+int q3n_map_raid5_stripe(const struct q3n_geometry *geometry, u64 leb,
+			 u32 page, struct q3n_raid_group *out);
+int q3n_raid_geometry_values(const struct q3n_geometry *geometry,
+			     u32 *writesize, u32 *erasesize, u64 *size);
 void q3n_xor_page(u8 *parity, const u8 *data, size_t len);
 int q3n_open_stripe_update(struct q3n_open_stripe *stripe, u8 slot,
 			   const u8 *data, size_t len);

@@ -918,3 +918,14 @@ case "${1:-}" in
   ubifs) mtd_ubifs ;;
   clean) mtd_clean ;;
 esac
+mtd_q3n_kunit_smoke() {
+  before=$(dmesg | wc -l)
+  modprobe qemu_3dnand_test || return 1
+  dmesg | tail -n "+$((before + 1))" > /tmp/q3n-kunit.log
+  if grep -Eiq 'not ok|failed' /tmp/q3n-kunit.log; then
+    cat /tmp/q3n-kunit.log
+    return 1
+  fi
+  grep -q 'qemu-3dnand-map' /tmp/q3n-kunit.log || return 1
+  echo "q3n KUnit smoke passed"
+}
