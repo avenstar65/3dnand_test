@@ -28,5 +28,6 @@ docker run --rm $tty_args \
   -e JOBS \
   -e KERNEL_ARCH \
   -e CROSS_COMPILE \
+  -e Q3N_ENABLE_MULTIPLANE_RAID \
   "$image_name" \
   "$@"

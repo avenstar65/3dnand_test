@@ -12,11 +12,19 @@ out_dir="$build_dir/linux-$version"
 jobs=${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '2')}
 kernel_arch=${KERNEL_ARCH:-x86_64}
 cross_compile=${CROSS_COMPILE:-x86_64-linux-gnu-}
+q3n_multiplane_raid=${Q3N_ENABLE_MULTIPLANE_RAID:-1}
+
+case "$q3n_multiplane_raid" in
+  0|1) ;;
+  *) die "Q3N_ENABLE_MULTIPLANE_RAID 必须是 0 或 1" ;;
+esac
 
 [ -f "$out_dir/.config" ] || die "缺少 .config，请先运行 ./scripts/configure-kernel.sh"
 
-info "编译 Linux $version，jobs=$jobs"
-make -C "$linux_dir" O="$out_dir" ARCH="$kernel_arch" CROSS_COMPILE="$cross_compile" -j"$jobs"
+info "编译 Linux $version，jobs=$jobs，Q3N_ENABLE_MULTIPLANE_RAID=$q3n_multiplane_raid"
+make -C "$linux_dir" O="$out_dir" ARCH="$kernel_arch" \
+  CROSS_COMPILE="$cross_compile" \
+  Q3N_ENABLE_MULTIPLANE_RAID="$q3n_multiplane_raid" -j"$jobs"
 kernel_release=$(make -s -C "$linux_dir" O="$out_dir" ARCH="$kernel_arch" \
   CROSS_COMPILE="$cross_compile" kernelrelease)
 module_tree="$out_dir/modules/lib/modules/$kernel_release"

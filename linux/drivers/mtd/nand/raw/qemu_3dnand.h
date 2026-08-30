@@ -6,6 +6,14 @@
 #ifndef _QEMU_3DNAND_H
 #define _QEMU_3DNAND_H
 
+#ifndef Q3N_ENABLE_MULTIPLANE_RAID
+#define Q3N_ENABLE_MULTIPLANE_RAID 1
+#endif
+
+#if Q3N_ENABLE_MULTIPLANE_RAID != 0 && Q3N_ENABLE_MULTIPLANE_RAID != 1
+#error "Q3N_ENABLE_MULTIPLANE_RAID must be 0 or 1"
+#endif
+
 #define Q3N_PCI_VENDOR_ID              0x1b36
 #define Q3N_PCI_DEVICE_ID              0x003d
 

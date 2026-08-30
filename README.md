@@ -237,8 +237,17 @@ dmesg
 串行同块 `D0..D6,P` Page-RAID 的确定性端到端验收可直接运行：
 
 ```sh
+Q3N_ENABLE_MULTIPLANE_RAID=0 ./scripts/shell.sh ./scripts/configure-kernel.sh
+Q3N_ENABLE_MULTIPLANE_RAID=0 ./scripts/shell.sh ./scripts/build-kernel.sh
+./scripts/shell.sh ./scripts/build-rootfs.sh
 ./scripts/q3n-serial-smoke.sh
 ```
+
+`Q3N_ENABLE_MULTIPLANE_RAID` 是编译期宏，默认值为 `1`。默认模式使用同一
+die 内的多-plane RAID1/RAID5，并由驱动私有地占用 OOB；设为 `0` 时恢复原有
+串行 `D0..D6,P` 路径、16 KiB writesize 和 128 B 公共 OOB。切换回默认模式时
+省略该环境变量并重新执行配置、内核构建和 rootfs 构建即可。`raid_level` 仅在
+宏值为 `1` 时决定 RAID1 或 RAID5 profile。
 
 该 host wrapper 每次使用 fresh NAND，并严格要求 guest 同时输出串行验收和
 通用 MTD 成功 marker；单凭 QEMU 正常退出不会判定成功。测试逐页使用不同的

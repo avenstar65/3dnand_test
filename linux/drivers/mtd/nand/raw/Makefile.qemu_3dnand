@@ -1,4 +1,6 @@
 obj-$(CONFIG_MTD_NAND_QEMU_3DNAND) += qemu_3dnand.o
+Q3N_ENABLE_MULTIPLANE_RAID ?= 1
+CFLAGS_qemu_3dnand_main.o += -DQ3N_ENABLE_MULTIPLANE_RAID=$(Q3N_ENABLE_MULTIPLANE_RAID)
 qemu_3dnand-y := qemu_3dnand_main.o qemu_3dnand_map.o qemu_3dnand_raid.o qemu_3dnand_sched.o qemu_3dnand_mp.o
 
 obj-$(CONFIG_MTD_NAND_QEMU_3DNAND_KUNIT_TEST) += qemu_3dnand_test.o

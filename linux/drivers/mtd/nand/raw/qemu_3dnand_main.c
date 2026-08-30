@@ -1128,8 +1128,9 @@ failed:
 	return -EBADMSG;
 }
 
-static int qemu_3dnand_profile_read(struct mtd_info *mtd, loff_t from,
-				    size_t len, size_t *retlen, u_char *buf)
+static int __maybe_unused qemu_3dnand_profile_read(struct mtd_info *mtd,
+					    loff_t from, size_t len,
+					    size_t *retlen, u_char *buf)
 {
 	struct qemu_3dnand *q3n = mtd->priv;
 	size_t done = 0;
@@ -1158,9 +1159,10 @@ static int qemu_3dnand_profile_read(struct mtd_info *mtd, loff_t from,
 	return ret < 0 ? ret : max_bitflips;
 }
 
-static int qemu_3dnand_profile_write(struct mtd_info *mtd, loff_t to,
-				     size_t len, size_t *retlen,
-				     const u_char *buf)
+static int __maybe_unused qemu_3dnand_profile_write(struct mtd_info *mtd,
+					     loff_t to, size_t len,
+					     size_t *retlen,
+					     const u_char *buf)
 {
 	struct qemu_3dnand *q3n = mtd->priv;
 	size_t done = 0;
@@ -1682,8 +1684,8 @@ out_unlock:
 	return ret;
 }
 
-static int qemu_3dnand_profile_erase(struct mtd_info *mtd,
-				     struct erase_info *instr)
+static int __maybe_unused qemu_3dnand_profile_erase(struct mtd_info *mtd,
+					     struct erase_info *instr)
 {
 	struct qemu_3dnand *q3n = mtd->priv;
 	u64 done = 0;
@@ -1718,12 +1720,13 @@ static int qemu_3dnand_profile_erase(struct mtd_info *mtd,
 	return ret;
 }
 
-static void qemu_3dnand_profile_sync(struct mtd_info *mtd)
+static void __maybe_unused qemu_3dnand_profile_sync(struct mtd_info *mtd)
 {
 	(void)mtd;
 }
 
-static int qemu_3dnand_profile_isbad(struct mtd_info *mtd, loff_t ofs)
+static int __maybe_unused qemu_3dnand_profile_isbad(struct mtd_info *mtd,
+					     loff_t ofs)
 {
 	struct qemu_3dnand *q3n = mtd->priv;
 	struct q3n_mp_buffers buffers;
@@ -1759,7 +1762,8 @@ out:
 	return ret;
 }
 
-static int qemu_3dnand_profile_markbad(struct mtd_info *mtd, loff_t ofs)
+static int __maybe_unused qemu_3dnand_profile_markbad(struct mtd_info *mtd,
+					       loff_t ofs)
 {
 	struct qemu_3dnand *q3n = mtd->priv;
 	struct q3n_mp_buffers buffers;
@@ -1795,36 +1799,58 @@ out:
 static int qemu_3dnand_register_mtd(struct qemu_3dnand *q3n)
 {
 	struct mtd_info *mtd = &q3n->mtd;
+#if Q3N_ENABLE_MULTIPLANE_RAID
 	u32 writesize;
 	u32 erasesize;
 	u64 size;
 	int ret;
+#endif
 
+	mtd->name = "qemu-3dnand";
+	mtd->type = MTD_NANDFLASH;
+	mtd->flags = MTD_CAP_NANDFLASH;
+#if Q3N_ENABLE_MULTIPLANE_RAID
 	ret = q3n_raid_geometry_values(&q3n->profile_geometry, &writesize,
 				       &erasesize, &size);
 	if (ret)
 		return ret;
 
-	mtd->name = "qemu-3dnand";
-	mtd->type = MTD_NANDFLASH;
-	mtd->flags = MTD_CAP_NANDFLASH;
 	mtd->size = size;
 	mtd->erasesize = erasesize;
 	mtd->writesize = writesize;
 	mtd->writebufsize = writesize;
 	mtd->oobsize = 0;
 	mtd->oobavail = 0;
+#else
+	mtd->size = (u64)q3n->data_block_count *
+		(q3n->pages_per_block / Q3N_STRIPE_PAGES) *
+		Q3N_DATA_PAGES * q3n->page_size;
+	mtd->erasesize = (q3n->pages_per_block / Q3N_STRIPE_PAGES) *
+		Q3N_DATA_PAGES * q3n->page_size;
+	mtd->writesize = q3n->page_size;
+	mtd->writebufsize = q3n->page_size;
+	mtd->oobsize = Q3N_LOGICAL_OOB_SIZE;
+#endif
 	mtd->ecc_step_size = Q3N_ECC_STEP_SIZE;
 	mtd->ecc_strength = Q3N_ECC_STRENGTH;
 	mtd->bitflip_threshold = Q3N_ECC_STRENGTH;
 	mtd->owner = THIS_MODULE;
 	mtd->priv = q3n;
+#if Q3N_ENABLE_MULTIPLANE_RAID
 	mtd->_read = qemu_3dnand_profile_read;
 	mtd->_write = qemu_3dnand_profile_write;
 	mtd->_erase = qemu_3dnand_profile_erase;
 	mtd->_sync = qemu_3dnand_profile_sync;
 	mtd->_block_isbad = qemu_3dnand_profile_isbad;
 	mtd->_block_markbad = qemu_3dnand_profile_markbad;
+#else
+	mtd->_read_oob = qemu_3dnand_mtd_read_oob;
+	mtd->_write_oob = qemu_3dnand_mtd_write_oob;
+	mtd->_erase = qemu_3dnand_mtd_erase;
+	mtd->_sync = qemu_3dnand_mtd_sync;
+	mtd->_block_isbad = qemu_3dnand_mtd_block_isbad;
+	mtd->_block_markbad = qemu_3dnand_mtd_block_markbad;
+#endif
 	mtd->dev.parent = &q3n->pdev->dev;
 
 	return mtd_device_register(mtd, NULL, 0);
@@ -2474,12 +2500,14 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 
 	cap = qemu_3dnand_readl(q3n, Q3N_REG_CAP);
 	q3n->cap = cap;
+#if Q3N_ENABLE_MULTIPLANE_RAID
 	if (raid_level != Q3N_RAID1 && raid_level != Q3N_RAID5)
 		return dev_err_probe(dev, -EINVAL,
 				     "raid_level must be 1 or 5\n");
 	if (!(cap & Q3N_CAP_MULTIPLANE))
 		return dev_err_probe(dev, -ENODEV,
 				     "controller lacks multi-plane support\n");
+#endif
 	geom0 = qemu_3dnand_readl(q3n, Q3N_REG_GEOM0);
 	geom1 = qemu_3dnand_readl(q3n, Q3N_REG_GEOM1);
 	ecc_geom0 = qemu_3dnand_readl(q3n, Q3N_REG_ECC_GEOM0);
@@ -2584,8 +2612,10 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 		 q3n->page_size, q3n->oob_size, q3n->pages_per_block,
 		 q3n->blocks_per_plane, cap);
 	dev_info(dev,
-		 "q3n driver RAID%u: data=%u parity=%u metadata=%u reserve=%u bar=%pa size=%pa mtd=%s\n",
-		 raid_level,
+		 "q3n driver %s: data=%u parity=%u metadata=%u reserve=%u bar=%pa size=%pa mtd=%s\n",
+		 Q3N_ENABLE_MULTIPLANE_RAID ?
+			(raid_level == Q3N_RAID1 ? "multi-plane RAID1" :
+			 "multi-plane RAID5") : "serial RAID",
 		 q3n->data_blocks_per_plane, q3n->parity_blocks_per_plane,
 		 q3n->metadata_blocks_per_plane, q3n->reserve_blocks_per_plane,
 		 &bar.start, &q3n->regs_size, q3n->mtd.name);

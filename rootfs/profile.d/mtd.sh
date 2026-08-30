@@ -132,6 +132,14 @@ mtd_q3n_serial_smoke() {
   [ -n "$mtd_num" ] || return 1
   mtd_dev="/dev/mtd${mtd_num}"
   stats=/sys/kernel/debug/qemu_3dnand
+  [ "$(cat /sys/class/mtd/mtd${mtd_num}/writesize)" = "16384" ] || {
+    echo "q3n serial smoke: writesize is not 16384"
+    return 1
+  }
+  [ "$(cat /sys/class/mtd/mtd${mtd_num}/oobsize)" = "128" ] || {
+    echo "q3n serial smoke: public OOB is not 128 bytes"
+    return 1
+  }
   for counter in foreground_ops parity_reads parity_writes \
                  protected_stripes unprotected_stripes failed_stripes \
                  pending_parity reserved_parity max_pending_parity parity_paused \
