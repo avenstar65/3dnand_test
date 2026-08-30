@@ -367,6 +367,20 @@ for symbol in \
   assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
 done
 for symbol in \
+  Q3N_CAP_MULTIPLANE \
+  Q3N_REG_MP_DIE Q3N_REG_MP_PLANE_MASK Q3N_REG_MP_SLOT \
+  Q3N_REG_MP_ADDR_LO Q3N_REG_MP_ADDR_HI \
+  Q3N_REG_MP_SUCCESS_MASK Q3N_REG_MP_FAILURE_MASK \
+  Q3N_REG_MP_ECC_STATUS Q3N_REG_MP_ECC_MAX_BITFLIPS \
+  Q3N_REG_MP_ECC_CORRECTED_BITS Q3N_REG_MP_ECC_FAILED_STEP \
+  Q3N_REG_STAT_MP_COMMANDS Q3N_REG_STAT_MP_SLOT_FAILURES \
+  Q3N_CMD_MP_READ_PAGE Q3N_CMD_MP_PROGRAM_PAGE \
+  Q3N_CMD_MP_READ_PAGE_OOB Q3N_CMD_MP_PROGRAM_PAGE_OOB \
+  Q3N_CMD_MP_ERASE_BLOCK; do
+  assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h "$symbol"
+  assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
+done
+for symbol in \
   Q3N_CAP_PERSISTENT_MEDIA \
   Q3N_CAP_BAD_BLOCK_MARKER \
   Q3N_CMD_GET_BLOCK_STATUS \

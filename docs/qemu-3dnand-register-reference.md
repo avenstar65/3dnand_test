@@ -68,19 +68,34 @@
 | `0x00b0` | `Q3N_REG_STAT_LDPC_CORRECTED` | RO | 累计纠正 bit 数 |
 | `0x00b4` | `Q3N_REG_STAT_LDPC_UNCORRECTABLE` | RO | 累计不可纠正页数 |
 | `0x00b8` | `Q3N_REG_STAT_LDPC_FAILED_STEPS` | RO | 累计不可纠正 step 数 |
+| `0x00bc` | `Q3N_REG_MP_DIE` | RW | multi-plane 目标 die，取值 0 或 1 |
+| `0x00c0` | `Q3N_REG_MP_PLANE_MASK` | RW | 启用的 die 内 plane bitmap，使用低四位 |
+| `0x00c4` | `Q3N_REG_MP_SLOT` | RW | 选择 plane slot 0～3 及其 PIO/ECC 视图 |
+| `0x00c8` | `Q3N_REG_MP_ADDR_LO` | RW | 当前 slot 物理地址低 32 位 |
+| `0x00cc` | `Q3N_REG_MP_ADDR_HI` | RW | 当前 slot 物理地址高 32 位 |
+| `0x00d0` | `Q3N_REG_MP_SUCCESS_MASK` | RO | 最近 multi-plane 命令成功 slot bitmap |
+| `0x00d4` | `Q3N_REG_MP_FAILURE_MASK` | RO | 最近 multi-plane 命令失败 slot bitmap |
+| `0x00d8` | `Q3N_REG_MP_ECC_STATUS` | RO | 当前 slot 的 ECC 状态 |
+| `0x00dc` | `Q3N_REG_MP_ECC_MAX_BITFLIPS` | RO | 当前 slot 最大 bitflips |
+| `0x00e0` | `Q3N_REG_MP_ECC_CORRECTED_BITS` | RO | 当前 slot 累计纠正 bit 数 |
+| `0x00e4` | `Q3N_REG_MP_ECC_FAILED_STEP` | RO | 当前 slot 首个失败 ECC step |
+| `0x00e8` | `Q3N_REG_STAT_MP_COMMANDS` | RO | multi-plane 命令累计数 |
+| `0x00ec` | `Q3N_REG_STAT_MP_SLOT_FAILURES` | RO | multi-plane slot 失败累计数 |
 | `0x1000` | `Q3N_REG_DATA` | RW | 流式 PIO 数据窗口 |
 
 未定义的寄存器偏移读取返回 0，写入被忽略。
 
 ## 3. 控制器能力
 
-`Q3N_REG_CAP` 当前固定返回 `0x00000007`。
+`Q3N_CAP_MULTIPLANE` 置位时，驱动可以使用第 5 节定义的通用同 die
+multi-plane 命令；未置位时不得提交这些命令。
 
 | 位 | 定义 | 说明 |
 | ---: | --- | --- |
 | 0 | `Q3N_CAP_BASIC_FLASH` | 支持基础 NAND 读、写、擦除 |
 | 1 | `Q3N_CAP_PERSISTENT_MEDIA` | 支持持久化 NAND 后端镜像 |
 | 2 | `Q3N_CAP_BAD_BLOCK_MARKER` | 支持物理坏块标记 |
+| 3 | `Q3N_CAP_MULTIPLANE` | 支持四 slot 同 die multi-plane 命令与逐 slot 结果 |
 
 ## 4. 状态寄存器
 
@@ -114,8 +129,25 @@
 | 6 | `Q3N_CMD_READ_PAGE_OOB` | 只读取 128 B logical OOB |
 | 7 | `Q3N_CMD_PROGRAM_PAGE_OOB` | 只编程 128 B logical OOB，保留 main 和 LDPC |
 | 8 | `Q3N_CMD_GET_BLOCK_STATUS` | 查询目标物理块的 BBM |
+| 9 | `Q3N_CMD_MP_READ_PAGE` | 读取启用 plane 的同一 page row |
+| 10 | `Q3N_CMD_MP_PROGRAM_PAGE` | 编程启用 plane 的同一 page row main data |
+| 11 | `Q3N_CMD_MP_READ_PAGE_OOB` | 读取启用 plane 的 logical OOB |
+| 12 | `Q3N_CMD_MP_PROGRAM_PAGE_OOB` | 编程启用 plane 的 logical OOB，保留 main/LDPC |
+| 13 | `Q3N_CMD_MP_ERASE_BLOCK` | 擦除启用 plane 的对应 block |
 
-### 5.1 READ_ID 返回值
+### 5.1 Multi-plane descriptor 约束
+
+`MP_SLOT` 选择 slot 后，`MP_ADDR_LO/HI`、传输长度、PIO data window 和
+ECC 结果均指向该 slot。所有 enabled slot 必须位于 `MP_DIE` 指定的同一 die，
+slot 编号必须等于 plane 编号，并选择相同的 `block_in_plane` 和 page row。
+空 bitmap、跨 die、plane/slot 不匹配、page row 不一致或 program staging
+不完整都会使 descriptor 整体失败且不修改介质。
+
+Descriptor 有效后，介质故障仍可使部分 slot 成功、部分失败。完成后必须读取
+success/failure bitmap；全局 `STATUS.ERROR` 不清除逐 slot 结果。选择 slot 后可
+分别读取该成员的 ECC 结果。
+
+### 5.2 READ_ID 返回值
 
 `READ_ID` 在 PIO buffer 中返回：
 
@@ -125,7 +157,7 @@
 
 后四个字节的 ASCII 表示为 `Q3ND`。
 
-### 5.2 RESET
+### 5.3 RESET
 
 以下两种操作等价：
 

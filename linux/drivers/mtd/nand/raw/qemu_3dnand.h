@@ -94,12 +94,28 @@
 #define Q3N_REG_STAT_LDPC_CORRECTED     0x00b0
 #define Q3N_REG_STAT_LDPC_UNCORRECTABLE 0x00b4
 #define Q3N_REG_STAT_LDPC_FAILED_STEPS  0x00b8
+#define Q3N_REG_MP_DIE                  0x00bc
+#define Q3N_REG_MP_PLANE_MASK           0x00c0
+#define Q3N_REG_MP_SLOT                 0x00c4
+#define Q3N_REG_MP_ADDR_LO              0x00c8
+#define Q3N_REG_MP_ADDR_HI              0x00cc
+#define Q3N_REG_MP_SUCCESS_MASK         0x00d0
+#define Q3N_REG_MP_FAILURE_MASK         0x00d4
+#define Q3N_REG_MP_ECC_STATUS           0x00d8
+#define Q3N_REG_MP_ECC_MAX_BITFLIPS     0x00dc
+#define Q3N_REG_MP_ECC_CORRECTED_BITS   0x00e0
+#define Q3N_REG_MP_ECC_FAILED_STEP      0x00e4
+#define Q3N_REG_STAT_MP_COMMANDS        0x00e8
+#define Q3N_REG_STAT_MP_SLOT_FAILURES   0x00ec
 #define Q3N_REG_DATA                   0x1000
 
 #define Q3N_CAP_BASIC_FLASH            BIT(0)
 #define Q3N_CAP_SCHEME_D               Q3N_CAP_BASIC_FLASH
 #define Q3N_CAP_PERSISTENT_MEDIA       BIT(1)
 #define Q3N_CAP_BAD_BLOCK_MARKER       BIT(2)
+#define Q3N_CAP_MULTIPLANE             BIT(3)
+
+#define Q3N_MP_ALL_PLANES              0x0fU
 
 #define Q3N_BLOCK_STATUS_BAD           BIT(0)
 
@@ -122,6 +138,11 @@
 #define Q3N_CMD_READ_PAGE_OOB          6
 #define Q3N_CMD_PROGRAM_PAGE_OOB       7
 #define Q3N_CMD_GET_BLOCK_STATUS       8
+#define Q3N_CMD_MP_READ_PAGE           9
+#define Q3N_CMD_MP_PROGRAM_PAGE        10
+#define Q3N_CMD_MP_READ_PAGE_OOB       11
+#define Q3N_CMD_MP_PROGRAM_PAGE_OOB    12
+#define Q3N_CMD_MP_ERASE_BLOCK         13
 
 #define Q3N_FAULT_INJECT_DATA_LOSS     BIT(0)
 #define Q3N_FAULT_FAIL_NEXT_PROGRAM    BIT(1)

@@ -32,6 +32,63 @@ typedef struct Q3NEccResult {
     uint32_t failed_steps;
 } Q3NEccResult;
 
+typedef struct Q3NMultiPlaneDesc {
+    uint32_t die;
+    uint32_t plane_mask;
+    uint64_t addr[Q3N_PLANES_PER_DIE];
+    uint32_t staged[Q3N_PLANES_PER_DIE];
+} Q3NMultiPlaneDesc;
+
+static bool q3n_mp_validate_desc(const Q3NMultiPlaneDesc *desc,
+                                 uint32_t required_staged, bool erase)
+{
+    uint32_t expected_block = 0;
+    uint32_t expected_page = 0;
+    bool have_member = false;
+
+    if (!desc || desc->die >= Q3N_DIES || !desc->plane_mask ||
+        (desc->plane_mask & ~Q3N_MP_ALL_PLANES)) {
+        return false;
+    }
+
+    for (uint32_t plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
+        uint64_t physical_page;
+        uint64_t physical_block;
+        uint32_t block_in_plane;
+        uint32_t page;
+        uint32_t lane;
+
+        if (!(desc->plane_mask & (1U << plane))) {
+            continue;
+        }
+        if (desc->addr[plane] % Q3N_PAGE_SIZE ||
+            (required_staged &&
+             desc->staged[plane] != required_staged)) {
+            return false;
+        }
+
+        physical_page = desc->addr[plane] / Q3N_PAGE_SIZE;
+        physical_block = physical_page / Q3N_PAGES_PER_BLOCK;
+        page = physical_page % Q3N_PAGES_PER_BLOCK;
+        lane = physical_block / Q3N_BLOCKS_PER_PLANE;
+        block_in_plane = physical_block % Q3N_BLOCKS_PER_PLANE;
+
+        if (lane != desc->die * Q3N_PLANES_PER_DIE + plane ||
+            (erase && page != 0)) {
+            return false;
+        }
+        if (have_member &&
+            (block_in_plane != expected_block || page != expected_page)) {
+            return false;
+        }
+        expected_block = block_in_plane;
+        expected_page = page;
+        have_member = true;
+    }
+
+    return have_member;
+}
+
 static void q3n_generate_ldpc_step(uint64_t page_key, uint32_t step,
                                    const uint8_t *data, uint8_t *ldpc)
 {

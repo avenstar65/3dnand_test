@@ -22,6 +22,11 @@
 #define Q3N_ECC_STEP_SIZE          1024U
 #define Q3N_ECC_STRENGTH           40U
 #define Q3N_ECC_NO_FAILED_STEP     UINT32_MAX
+#define Q3N_DIES                   2U
+#define Q3N_PLANES_PER_DIE         4U
+#define Q3N_BLOCKS_PER_PLANE       247U
+#define Q3N_PAGES_PER_BLOCK        1600U
+#define Q3N_MP_ALL_PLANES          0x0fU
 
 #define cpu_to_le32(value) (value)
 #define cpu_to_le64(value) (value)
@@ -47,6 +52,42 @@ static uint32_t crc32c(uint32_t crc, const uint8_t *data,
 }
 
 #include "q3n-controller-helpers.inc"
+
+static void test_multiplane_descriptor_validation(void)
+{
+    Q3NMultiPlaneDesc d = {
+        .die = 0,
+        .plane_mask = 0x0f,
+        .addr = {
+            3ULL * Q3N_PAGE_SIZE,
+            ((uint64_t)Q3N_BLOCKS_PER_PLANE * Q3N_PAGES_PER_BLOCK + 3) *
+                Q3N_PAGE_SIZE,
+            ((uint64_t)2 * Q3N_BLOCKS_PER_PLANE * Q3N_PAGES_PER_BLOCK + 3) *
+                Q3N_PAGE_SIZE,
+            ((uint64_t)3 * Q3N_BLOCKS_PER_PLANE * Q3N_PAGES_PER_BLOCK + 3) *
+                Q3N_PAGE_SIZE,
+        },
+        .staged = {
+            Q3N_PAGE_SIZE,
+            Q3N_PAGE_SIZE,
+            Q3N_PAGE_SIZE,
+            Q3N_PAGE_SIZE,
+        },
+    };
+
+    assert(q3n_mp_validate_desc(&d, Q3N_PAGE_SIZE, false));
+
+    d.addr[3] += Q3N_PAGE_SIZE;
+    assert(!q3n_mp_validate_desc(&d, Q3N_PAGE_SIZE, false));
+    d.addr[3] -= Q3N_PAGE_SIZE;
+
+    d.die = 1;
+    assert(!q3n_mp_validate_desc(&d, Q3N_PAGE_SIZE, false));
+    d.die = 0;
+
+    d.plane_mask = 0;
+    assert(!q3n_mp_validate_desc(&d, Q3N_PAGE_SIZE, false));
+}
 
 static void q3n_media_merge_program(uint8_t *stored,
                                     const uint8_t *incoming, size_t length)
@@ -241,6 +282,7 @@ static void test_physical_page_oob_mapping_preserves_main_and_ldpc(void)
 
 int main(void)
 {
+    test_multiplane_descriptor_validation();
     test_decode_thresholds();
     test_decode_aggregates_steps();
     test_ldpc_mismatch_is_uncorrectable();
