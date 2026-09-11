@@ -105,6 +105,13 @@ LDPC。Linux 标坏通过普通 OOB PROGRAM 将 logical OOB byte 0 编程为 `00
 
 ## Multi-plane Page RAID1 / RAID5
 
+设计更新（2026-09-11）：后续拟迁移至 NAND core 的 `nand_chip.ecc.*`
+接口，并取消 RAID manifest，改用代码固定计算 parity / mirror 位置。
+无持久化提交证据时，重启后不自动恢复不可纠数据；完整限制见
+[ECC 与固定页映射设计](docs/superpowers/specs/2026-08-30-multiplane-page-raid1-raid5-design.md)
+及 [迁移任务清单](docs/superpowers/plans/2026-08-30-multiplane-page-raid1-raid5-implementation.md)。
+目前仅更新设计，当前代码仍使用 direct MTD 回调和 manifest；以下说明描述现有实现。
+
 控制器固定为 2 die × 4 plane，冗余成员始终位于同一 die，不做跨 die
 备份。加载驱动时用只读参数选择 profile：
 
