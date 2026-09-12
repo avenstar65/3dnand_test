@@ -40,9 +40,9 @@ Implemented base functions:
 | Parity log GC | Not implemented in QEMU |
 | Page-RAID runtime-state replay | Not implemented in this phase |
 | Linux PCI probe driver | Implemented |
-| Linux MTD registration | Implemented in the Linux overlay |
+| Linux NAND scan / MTD registration | Implemented through `nand_scan_with_ids()` |
 | Linux driver-owned scheme D page-raid | Implemented in the Linux overlay |
-| Linux raw NAND `exec_op()` integration | Not implemented |
+| Linux raw NAND command integration | Implemented with legacy `cmdfunc` / `waitfunc`; no `exec_op()` |
 | Machine/DT wiring | PCI path used first; DT path not implemented |
 
 The MMIO interface is intentionally simple for the first bring-up:
@@ -94,9 +94,9 @@ slots. Each physical page is exactly `0x4680` bytes:
 ```
 
 The first physical page of every block reserves `0x4000` as the
-Linux-compatible bad-block marker. Linux `_block_markbad` constructs a 128 B
-logical OOB buffer with byte 0 cleared and submits the ordinary OOB PROGRAM
-command; there is no dedicated mark-bad command.
+Linux-compatible bad-block marker. The Linux NAND callbacks construct a logical
+OOB buffer with byte 0 cleared and submit the ordinary OOB PROGRAM command;
+there is no dedicated mark-bad command.
 
 The page slots are followed by sparse, fixed-size error-overlay slots. Each page
 has a 16384 B main bitmap and a 1536 B LDPC bitmap. Fault injection XORs bits in
@@ -132,8 +132,9 @@ success, failure, and ECC results for each selected slot. QEMU still owns no
 RAID policy.
 
 Linux uses the ABI for same-die RAID1 mirror pairs or same-die RAID5 3D+1P
-groups. The v2 commit manifest occupies logical OOB bytes 1..127; byte 0 remains
-the bad-block marker and the MTD device does not expose public user OOB.
+groups. Mirror/parity placement is computed from fixed page formulas; no RAID manifest is stored in OOB. Byte 0 remains the bad-block marker; in the
+multi-plane profiles this is the only logical OOB byte exposed to NAND core and
+there are no user-writable free OOB bytes.
 
 For x86_64 bring-up, use the PCI wrapper:
 
@@ -141,15 +142,15 @@ For x86_64 bring-up, use the PCI wrapper:
 work/build/qemu-11.0.2/qemu-system-x86_64-unsigned -machine q35 -device q3n-nand-pci ...
 ```
 
-The Linux overlay currently registers an MTD device named `qemu-3dnand`. Its
-first read/write/erase path talks to the QEMU model through the controller MMIO
-commands. The Linux driver maps MTD logical pages to the QEMU physical media and
-owns the selected RAID1/RAID5 page layout. A raw NAND `exec_op()`
-controller integration remains a later phase if we want the Linux raw NAND core
-to perform NAND scan and command sequencing itself.
+The Linux overlay registers an MTD device named `qemu-3dnand` through
+`nand_scan_with_ids()`, so NAND core creates and owns the RAM bad-block table.
+Page data and BBM OOB flow through `nand_chip.ecc.*`; erase sequencing uses the
+legacy `cmdfunc` / `waitfunc` callbacks. The driver maps logical pages to the
+QEMU physical media and owns the selected RAID1/RAID5 layout without providing
+an `exec_op()` implementation.
 
 In the guest, `mtd.sh q3n-stats` reads debugfs counters and
 `mtd.sh q3n-inject-loss <logical-byte-address>` injects a single data page loss
 through the QEMU fault registers. QEMU only reports the physical read failure;
 the Linux driver decides whether the missing page can be rebuilt from its
-driver-owned page-raid metadata.
+current-boot RAM recovery state and fixed page-raid layout.

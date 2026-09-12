@@ -21,6 +21,8 @@ esac
 
 [ -f "$out_dir/.config" ] || die "缺少 .config，请先运行 ./scripts/configure-kernel.sh"
 
+"$repo_root/scripts/apply-linux-overlay.sh"
+
 info "编译 Linux $version，jobs=$jobs，Q3N_ENABLE_MULTIPLANE_RAID=$q3n_multiplane_raid"
 make -C "$linux_dir" O="$out_dir" ARCH="$kernel_arch" \
   CROSS_COMPILE="$cross_compile" \

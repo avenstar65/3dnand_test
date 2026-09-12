@@ -8,11 +8,11 @@
  */
 
 #include <linux/bitops.h>
-#include <linux/crc32.h>
 #include <linux/debugfs.h>
 #include <linux/io.h>
 #include <linux/ioport.h>
 #include <linux/mtd/mtd.h>
+#include <linux/mtd/rawnand.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
@@ -41,8 +41,6 @@ struct qemu_3dnand_parity_entry {
 	u32 physical_block;
 	u32 page;
 	u32 data_block_generation[Q3N_RAID_LANES];
-	u32 data_crc[Q3N_RAID_LANES];
-	u32 parity_crc;
 	u32 parity_version;
 	u64 sequence;
 	bool valid;
@@ -68,13 +66,26 @@ struct qemu_3dnand {
 	bool parity_pause_enable;
 	bool parity_continuation_pause_enable;
 	struct dentry *debugfs_dir;
-	struct mtd_info mtd;
+	struct nand_controller controller;
+	struct nand_chip chip;
+	struct mtd_info *mtd;
+	struct nand_flash_dev scan_ids[2];
+	bool scanned;
+	struct {
+		u8 data[8];
+		u8 len;
+		u8 pos;
+		u32 erase_page;
+		int error;
+		bool erase_pending;
+	} legacy;
+	bool core_markbad;
 
 	u8 *page_buf;
 	u8 *raid_buf;
 	u8 *mp_buf[Q3N_PLANES_PER_DIE];
 	u8 *mp_oob[Q3N_PLANES_PER_DIE];
-	u32 *profile_generation;
+	enum q3n_stripe_state *profile_state;
 	u32 profile_leb_count;
 	u8 *data_page_valid;
 	struct qemu_3dnand_data_block_meta *data_meta;
@@ -138,6 +149,8 @@ static void qemu_3dnand_finish_parity_work(
 
 static void qemu_3dnand_free_metadata(struct qemu_3dnand *q3n)
 {
+	kvfree(q3n->profile_state);
+	q3n->profile_state = NULL;
 	kvfree(q3n->data_page_valid);
 	q3n->data_page_valid = NULL;
 	kvfree(q3n->parity_index);
@@ -217,7 +230,7 @@ qemu_3dnand_account_foreground_ecc(struct qemu_3dnand *q3n,
 				   struct mtd_req_stats *stats,
 				   const struct q3n_ecc_result *ecc)
 {
-	q3n->mtd.ecc_stats.corrected += ecc->corrected_bits;
+	q3n->mtd->ecc_stats.corrected += ecc->corrected_bits;
 	if (stats)
 		stats->corrected_bitflips += ecc->corrected_bits;
 }
@@ -427,27 +440,6 @@ static u64 qemu_3dnand_stripe_id(struct qemu_3dnand *q3n, u32 block,
 	return (u64)block * q3n->pages_per_block + stripe;
 }
 
-static int qemu_3dnand_validate_data_metadata(
-		const u8 *data, size_t data_len, const u8 *logical_oob,
-		u64 stripe_id, u8 slot, u32 *data_crc)
-{
-	struct q3n_data_meta meta;
-	u32 crc;
-	int ret;
-
-	ret = q3n_unpack_data_oob(logical_oob, Q3N_LOGICAL_OOB_SIZE, &meta);
-	if (ret)
-		return ret;
-	crc = crc32_le(~0, data, data_len);
-	if (le64_to_cpu(meta.stripe_id) != stripe_id || meta.slot != slot ||
-	    le32_to_cpu(meta.data_crc) != crc)
-		return -EBADMSG;
-
-	if (data_crc)
-		*data_crc = crc;
-	return 0;
-}
-
 static bool qemu_3dnand_stripe_full(struct qemu_3dnand *q3n, u32 block,
 				    u32 stripe)
 {
@@ -487,68 +479,24 @@ static void qemu_3dnand_mark_parity_stale(struct qemu_3dnand *q3n,
 static int qemu_3dnand_commit_parity_locked(struct qemu_3dnand *q3n,
 					    u32 block, u32 stripe,
 					    struct qemu_3dnand_parity_entry *entry,
-					    const u8 *parity,
-					    const u32 *data_crc)
+					    const u8 *parity)
 {
-	u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
-	struct q3n_open_stripe open_stripe = {
-		.stripe_id = qemu_3dnand_stripe_id(q3n, block, stripe),
-		.member_bitmap = GENMASK(Q3N_DATA_PAGES - 1, 0),
-		.data_pages = Q3N_DATA_PAGES,
-		.parity = (u8 *)parity,
-		.page_size = q3n->page_size,
-	};
-	struct q3n_parity_manifest manifest;
 	int ret;
 
-	memcpy(open_stripe.data_crc, data_crc, sizeof(open_stripe.data_crc));
-	ret = q3n_build_legacy_manifest(&open_stripe, &manifest);
-	if (ret)
-		return ret;
-	ret = q3n_pack_parity_oob(logical_oob, sizeof(logical_oob), &manifest);
-	if (ret)
-		return ret;
 	ret = qemu_3dnand_program_phys_page_locked(q3n, block,
 			stripe * Q3N_STRIPE_PAGES + Q3N_DATA_PAGES, parity,
 			Q3N_OP_PARITY_WRITE);
-	if (!ret)
-		ret = qemu_3dnand_program_phys_oob_locked(q3n, block,
-			stripe * Q3N_STRIPE_PAGES + Q3N_DATA_PAGES,
-			logical_oob, Q3N_OP_PARITY_WRITE);
 	if (ret)
 		return ret;
 
 	entry->physical_block = block;
 	entry->page = stripe * Q3N_STRIPE_PAGES + Q3N_DATA_PAGES;
 	entry->data_block_generation[0] = q3n->data_meta[block].generation;
-	memcpy(entry->data_crc, data_crc, sizeof(entry->data_crc));
-	entry->parity_crc = le32_to_cpu(manifest.parity_crc);
 	entry->parity_version++;
 	entry->sequence = ++q3n->parity_sequence;
 	entry->valid = true;
 	q3n->parity_written++;
 	atomic64_inc(&q3n->protected_stripes);
-	return 0;
-}
-
-static int qemu_3dnand_restore_media_locked(struct qemu_3dnand *q3n)
-{
-	u32 block;
-	int ret;
-
-	for (block = 0; block < q3n->data_block_count; block++) {
-		struct qemu_3dnand_data_block_meta *meta =
-			&q3n->data_meta[block];
-		u32 status;
-
-		ret = qemu_3dnand_get_phys_block_status_locked(q3n, block,
-							     &status);
-		if (ret)
-			return ret;
-
-		meta->bad = status & Q3N_BLOCK_STATUS_BAD;
-	}
-
 	return 0;
 }
 
@@ -619,7 +567,6 @@ again:
 	parity->request_queued = false;
 
 	if (parity->rebuild.next_slot < Q3N_DATA_PAGES) {
-		u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
 		struct q3n_ecc_result ecc;
 		u8 slot = parity->rebuild.next_slot;
 
@@ -628,19 +575,9 @@ again:
 			parity->stripe * Q3N_STRIPE_PAGES + slot,
 			parity->page_buf, Q3N_OP_PARITY_READ, &ecc);
 		if (!ret)
-			ret = qemu_3dnand_read_phys_oob_locked(parity->q3n,
-				parity->block,
-				parity->stripe * Q3N_STRIPE_PAGES + slot,
-				logical_oob, Q3N_OP_PARITY_READ);
-		if (!ret)
 			qemu_3dnand_account_background_ecc(parity->q3n, &ecc);
 		if (!ret && ecc.uncorrectable)
 			ret = -EBADMSG;
-		if (!ret)
-			ret = qemu_3dnand_validate_data_metadata(
-				parity->page_buf, parity->q3n->page_size,
-				logical_oob, parity->rebuild.stripe_id, slot,
-				&parity->rebuild.data_crc[slot]);
 		if (!ret)
 			ret = q3n_rebuild_xor_one(&parity->rebuild,
 						  parity->page_buf);
@@ -661,8 +598,7 @@ again:
 						  parity->stripe)];
 		ret = qemu_3dnand_commit_parity_locked(parity->q3n,
 			parity->block, parity->stripe, entry,
-			parity->rebuild.parity_accumulator,
-			parity->rebuild.data_crc);
+			parity->rebuild.parity_accumulator);
 	}
 	mutex_unlock(&parity->q3n->mtd_lock);
 	if (ret)
@@ -841,34 +777,23 @@ static int qemu_3dnand_read_data_page_locked(struct qemu_3dnand *q3n,
 	return ret;
 }
 
-static u8 qemu_3dnand_profile_data_plane(const struct q3n_raid_group *group,
-					 u8 data_slot)
-{
-	u8 plane;
-	u8 slot = 0;
-
-	for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
-		if (plane == group->parity_plane)
-			continue;
-		if (slot++ == data_slot)
-			return plane;
-	}
-	return Q3N_PLANES_PER_DIE;
-}
-
 static int qemu_3dnand_profile_group(struct qemu_3dnand *q3n, loff_t addr,
 				     struct q3n_raid_group *group,
 				     u64 *leb_out, u8 *data_slot,
 				     u32 *column)
 {
-	u64 leb = div64_u64(addr, q3n->mtd.erasesize);
-	u64 in_leb = addr % q3n->mtd.erasesize;
+	u64 leb = div64_u64(addr, q3n->mtd->erasesize);
+	u64 in_leb = addr % q3n->mtd->erasesize;
 	u32 page;
 
 	if (leb >= q3n->profile_leb_count)
 		return -ERANGE;
 	if (raid_level == Q3N_RAID1) {
-		page = div_u64_rem(in_leb, q3n->page_size, column);
+		u32 page_column;
+
+		page = div_u64_rem(in_leb, q3n->page_size, &page_column);
+		if (column)
+			*column = page_column;
 		if (data_slot)
 			*data_slot = 0;
 		if (leb_out)
@@ -904,82 +829,14 @@ static void qemu_3dnand_profile_buffers(struct qemu_3dnand *q3n,
 	}
 }
 
-static bool qemu_3dnand_oob_erased(const u8 *oob)
-{
-	u32 i;
-
-	for (i = 0; i < Q3N_LOGICAL_OOB_SIZE; i++)
-		if (oob[i] != 0xff)
-			return false;
-	return true;
-}
-
-static int qemu_3dnand_profile_manifest(struct qemu_3dnand *q3n,
-					const struct q3n_raid_group *group,
-					struct q3n_raid_manifest *manifest)
-{
-	struct q3n_mp_buffers buffers;
-	struct q3n_mp_result result;
-	struct q3n_raid_manifest candidate;
-	bool have_manifest = false;
-	bool all_erased = true;
-	u8 plane;
-
-	qemu_3dnand_profile_buffers(q3n, group, &buffers, true);
-	q3n_mp_read_oob(&q3n->mp, &buffers, &result);
-	for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
-		if (!(result.success_mask & BIT(plane)))
-			continue;
-		all_erased &= qemu_3dnand_oob_erased(q3n->mp_oob[plane]);
-		if (q3n_unpack_manifest_oob(q3n->mp_oob[plane], group,
-					    &candidate))
-			continue;
-		if (!have_manifest) {
-			*manifest = candidate;
-			have_manifest = true;
-		} else if (memcmp(manifest, &candidate, sizeof(*manifest))) {
-			return -EBADMSG;
-		}
-	}
-	if (have_manifest)
-		return 0;
-	return all_erased ? -ENOENT : -EBADMSG;
-}
-
-static int qemu_3dnand_profile_commit(struct qemu_3dnand *q3n,
-				      const struct q3n_raid_group *group,
-				      const struct q3n_raid_manifest *manifest)
-{
-	struct q3n_mp_buffers buffers;
-	struct q3n_mp_result result;
-	u8 plane;
-	int ret;
-
-	qemu_3dnand_profile_buffers(q3n, group, &buffers, true);
-	for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
-		if (!(group->member_mask & BIT(plane)))
-			continue;
-		memset(q3n->mp_oob[plane], 0xff, Q3N_LOGICAL_OOB_SIZE);
-		q3n_pack_manifest_oob(q3n->mp_oob[plane], manifest);
-	}
-	ret = q3n_mp_program_oob(&q3n->mp, &buffers, &result);
-	if (!result.success_mask)
-		return ret ?: -EIO;
-	if (result.success_mask != group->member_mask)
-		q3n->metadata_degraded++;
-	return 0;
-}
-
 static int qemu_3dnand_profile_write_page(struct qemu_3dnand *q3n,
 					  loff_t to, const u8 *data)
 {
-	struct q3n_raid_manifest manifest;
 	struct q3n_mp_buffers buffers;
 	struct q3n_mp_result result;
 	struct q3n_raid_group group;
-	u32 data_crc[3] = {};
-	u32 parity_crc = 0;
 	u64 leb;
+	u64 state_index;
 	u32 column;
 	u8 plane;
 	int ret;
@@ -987,12 +844,13 @@ static int qemu_3dnand_profile_write_page(struct qemu_3dnand *q3n,
 	ret = qemu_3dnand_profile_group(q3n, to, &group, &leb, NULL, &column);
 	if (ret || column)
 		return ret ?: -EINVAL;
+	state_index = leb * q3n->pages_per_block + group.page;
+	q3n_recovery_begin(&q3n->profile_state[state_index]);
 	qemu_3dnand_profile_buffers(q3n, &group, &buffers, false);
 	if (raid_level == Q3N_RAID1) {
 		for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++)
 			if (group.member_mask & BIT(plane))
 				buffers.data[plane] = (u8 *)data;
-		data_crc[0] = crc32_le(~0, data, q3n->page_size);
 	} else {
 		u8 slot = 0;
 
@@ -1003,129 +861,137 @@ static int qemu_3dnand_profile_write_page(struct qemu_3dnand *q3n,
 				continue;
 			}
 			buffers.data[plane] = (u8 *)data + slot * q3n->page_size;
-			data_crc[slot] = crc32_le(~0, buffers.data[plane],
-						 q3n->page_size);
 			q3n_xor_page(q3n->raid_buf, buffers.data[plane],
 				     q3n->page_size);
 			slot++;
 		}
-		parity_crc = crc32_le(~0, q3n->raid_buf, q3n->page_size);
 		q3n->last_parity_plane = group.parity_plane;
 	}
 
 	ret = q3n_mp_program(&q3n->mp, &buffers, &result);
-	if (ret || result.success_mask != group.member_mask)
-		return -EIO;
-	ret = q3n_build_manifest(&group, q3n->profile_generation[leb],
-				 data_crc, parity_crc, &manifest);
-	if (ret)
-		return ret;
-	return qemu_3dnand_profile_commit(q3n, &group, &manifest);
+	q3n_recovery_complete(&q3n->profile_state[state_index],
+			      !ret && result.success_mask == group.member_mask);
+	return !ret && result.success_mask == group.member_mask ? 0 : -EIO;
 }
 
 static void qemu_3dnand_profile_account_ecc(struct qemu_3dnand *q3n,
 					    const struct q3n_ecc_result *ecc)
 {
-	q3n->mtd.ecc_stats.corrected += ecc->corrected_bits;
+	q3n->mtd->ecc_stats.corrected += ecc->corrected_bits;
+}
+
+static void qemu_3dnand_profile_invalidate_leb(struct qemu_3dnand *q3n,
+					       u64 leb)
+{
+	memset(&q3n->profile_state[leb * q3n->pages_per_block], 0,
+	       q3n->pages_per_block * sizeof(*q3n->profile_state));
 }
 
 static int qemu_3dnand_profile_read_page(struct qemu_3dnand *q3n,
 					 loff_t from, u8 *out)
 {
-	struct q3n_raid_manifest manifest;
 	struct q3n_mp_buffers buffers;
 	struct q3n_mp_result result;
 	struct q3n_raid_group group;
+	u64 leb;
+	u64 state_index;
 	u32 column;
-	u8 data_slot;
-	u8 target;
+	u32 max_bitflips = 0;
 	int ret;
 
-	ret = qemu_3dnand_profile_group(q3n, from, &group, NULL,
-					&data_slot, &column);
+	ret = qemu_3dnand_profile_group(q3n, from, &group, &leb, NULL,
+					&column);
 	if (ret)
 		return ret;
-	ret = qemu_3dnand_profile_manifest(q3n, &group, &manifest);
-	if (ret == -ENOENT) {
-		memset(out, 0xff, q3n->page_size);
-		return 0;
-	}
-	if (ret)
-		return ret;
+	if (column)
+		return -EINVAL;
+	state_index = leb * q3n->pages_per_block + group.page;
 
 	qemu_3dnand_profile_buffers(q3n, &group, &buffers, false);
-	q3n_mp_read(&q3n->mp, &buffers, &result);
+	ret = q3n_mp_read(&q3n->mp, &buffers, &result);
+	if (ret && (ret != -EIO || !result.failure_mask ||
+		    !result.success_mask))
+		return ret;
 	if (raid_level == Q3N_RAID1) {
 		u8 first = (group.stripe_id & 1) ? fls(group.member_mask) - 1 :
 			__ffs(group.member_mask);
 		u8 second = first == __ffs(group.member_mask) ?
 			fls(group.member_mask) - 1 : __ffs(group.member_mask);
-		u8 choices[2] = { first, second };
-		u8 i;
+		bool first_ok = (result.success_mask & BIT(first)) &&
+			!result.ecc[first].uncorrectable;
+		bool second_ok = (result.success_mask & BIT(second)) &&
+			!result.ecc[second].uncorrectable;
 
-		for (i = 0; i < 2; i++) {
-			target = choices[i];
-			if (!(result.success_mask & BIT(target)) ||
-			    result.ecc[target].uncorrectable ||
-			    le32_to_cpu(manifest.data_crc[0]) !=
-				crc32_le(~0, q3n->mp_buf[target], q3n->page_size))
-				continue;
-			memcpy(out, q3n->mp_buf[target], q3n->page_size);
-			qemu_3dnand_profile_account_ecc(q3n, &result.ecc[target]);
-			if (i) {
-				q3n->raid_recovered++;
-				return q3n->mtd.bitflip_threshold;
-			}
-			return result.ecc[target].max_bitflips;
+		if (first_ok && second_ok &&
+		    memcmp(q3n->mp_buf[first], q3n->mp_buf[second],
+			   q3n->page_size))
+			goto failed;
+		if (first_ok) {
+			memcpy(out, q3n->mp_buf[first], q3n->page_size);
+			qemu_3dnand_profile_account_ecc(q3n, &result.ecc[first]);
+			return result.ecc[first].max_bitflips;
+		}
+		if (second_ok &&
+		    q3n_recovery_allowed(q3n->profile_state[state_index])) {
+			memcpy(out, q3n->mp_buf[second], q3n->page_size);
+			qemu_3dnand_profile_account_ecc(q3n, &result.ecc[second]);
+			q3n->raid_recovered++;
+			return max_t(u32, result.ecc[second].max_bitflips,
+				     q3n->mtd->bitflip_threshold);
 		}
 	} else {
-		u8 source[2];
-		u8 source_count = 0;
+		u8 missing = Q3N_PLANES_PER_DIE;
+		u8 failed = 0;
+		u8 slot = 0;
 		u8 plane;
 
-		target = qemu_3dnand_profile_data_plane(&group, data_slot);
-		if ((result.success_mask & BIT(target)) &&
-		    !result.ecc[target].uncorrectable &&
-		    le32_to_cpu(manifest.data_crc[data_slot]) ==
-			crc32_le(~0, q3n->mp_buf[target], q3n->page_size)) {
-			memcpy(out, q3n->mp_buf[target], q3n->page_size);
-			qemu_3dnand_profile_account_ecc(q3n, &result.ecc[target]);
-			return result.ecc[target].max_bitflips;
-		}
 		for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
-			u8 slot;
+			bool ok = (result.success_mask & BIT(plane)) &&
+				!result.ecc[plane].uncorrectable;
 
-			if (plane == target || plane == group.parity_plane)
+			if (plane == group.parity_plane)
 				continue;
-			if (!(result.success_mask & BIT(plane)) ||
-			    result.ecc[plane].uncorrectable)
-				goto failed;
-			slot = plane < group.parity_plane ? plane : plane - 1;
-			if (le32_to_cpu(manifest.data_crc[slot]) !=
-			    crc32_le(~0, q3n->mp_buf[plane], q3n->page_size))
-				goto failed;
-			source[source_count++] = plane;
+			if (!ok) {
+				failed++;
+				missing = plane;
+			} else {
+				memcpy(out + slot * q3n->page_size,
+				       q3n->mp_buf[plane], q3n->page_size);
+				qemu_3dnand_profile_account_ecc(q3n,
+							&result.ecc[plane]);
+				max_bitflips = max(max_bitflips,
+						   result.ecc[plane].max_bitflips);
+			}
+			slot++;
 		}
-		if (source_count != 2 ||
-		    !(result.success_mask & BIT(group.parity_plane)) ||
-		    result.ecc[group.parity_plane].uncorrectable ||
-		    le32_to_cpu(manifest.parity_crc) !=
-			crc32_le(~0, q3n->mp_buf[group.parity_plane],
-				 q3n->page_size) ||
-		    q3n_raid5_recover(out, q3n->mp_buf[group.parity_plane],
-				      q3n->mp_buf[source[0]],
-				      q3n->mp_buf[source[1]], q3n->page_size) ||
-		    le32_to_cpu(manifest.data_crc[data_slot]) !=
-			crc32_le(~0, out, q3n->page_size))
-			goto failed;
-		q3n->raid_recovered++;
-		return q3n->mtd.bitflip_threshold;
+		if (!failed)
+			return max_bitflips;
+		if (failed == 1 &&
+		    (result.success_mask & BIT(group.parity_plane)) &&
+		    !result.ecc[group.parity_plane].uncorrectable &&
+		    q3n_recovery_allowed(q3n->profile_state[state_index])) {
+			u8 missing_slot = missing < group.parity_plane ?
+				missing : missing - 1;
+			u8 source[2];
+			u8 count = 0;
+
+			for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++)
+				if (plane != missing && plane != group.parity_plane)
+					source[count++] = plane;
+			q3n_raid5_recover(out + missing_slot * q3n->page_size,
+				q3n->mp_buf[group.parity_plane],
+				q3n->mp_buf[source[0]], q3n->mp_buf[source[1]],
+				q3n->page_size);
+			q3n->raid_recovered++;
+			return max_t(u32, max_bitflips,
+				     q3n->mtd->bitflip_threshold);
+		}
 	}
 
 failed:
-	q3n->mtd.ecc_stats.failed++;
+	q3n->mtd->ecc_stats.failed++;
 	q3n->raid_failed++;
-	return -EBADMSG;
+	return q3n->mtd->ecc_strength;
 }
 
 static int __maybe_unused qemu_3dnand_profile_read(struct mtd_info *mtd,
@@ -1331,7 +1197,6 @@ static int qemu_3dnand_program_logical_page(struct qemu_3dnand *q3n,
 		.op = Q3N_REQ_PROGRAM,
 		.page = page,
 	};
-	struct q3n_data_meta page_meta;
 	u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
 	u32 stripe;
 	bool parity_reserved = false;
@@ -1366,20 +1231,9 @@ static int qemu_3dnand_program_logical_page(struct qemu_3dnand *q3n,
 		goto out_unlock;
 	}
 
-	if (data) {
-		memset(&page_meta, 0, sizeof(page_meta));
-		page_meta.slot = page % Q3N_STRIPE_PAGES;
-		page_meta.stripe_id = cpu_to_le64(qemu_3dnand_stripe_id(
-			q3n, block, page / Q3N_STRIPE_PAGES));
-		page_meta.data_crc = cpu_to_le32(crc32_le(~0, data,
-							       q3n->page_size));
-		ret = q3n_pack_data_oob(logical_oob, sizeof(logical_oob),
-					     &page_meta);
-	} else {
-		memset(logical_oob, 0xff, sizeof(logical_oob));
-		ret = 0;
-	}
-	if (!ret && ooblen)
+	memset(logical_oob, 0xff, sizeof(logical_oob));
+	ret = 0;
+	if (ooblen)
 		memcpy(logical_oob + ooboffs, oob, ooblen);
 	if (!ret && data) {
 		ret = qemu_3dnand_program_phys_page_locked(q3n, block, page,
@@ -1387,7 +1241,7 @@ static int qemu_3dnand_program_logical_page(struct qemu_3dnand *q3n,
 		if (!ret && data_programmed)
 			*data_programmed = true;
 	}
-	if (!ret) {
+	if (!ret && ooblen) {
 		ret = qemu_3dnand_program_phys_oob_locked(q3n, block, page,
 			logical_oob, Q3N_OP_FOREGROUND);
 		if (!ret && oob_programmed)
@@ -1712,8 +1566,8 @@ static int __maybe_unused qemu_3dnand_profile_erase(struct mtd_info *mtd,
 			instr->fail_addr = instr->addr + done;
 			break;
 		}
-		if (++q3n->profile_generation[leb] == 0)
-			q3n->profile_generation[leb] = 1;
+		memset(&q3n->profile_state[leb * q3n->pages_per_block], 0,
+		       q3n->pages_per_block * sizeof(*q3n->profile_state));
 		done += mtd->erasesize;
 	}
 	mutex_unlock(&q3n->mtd_lock);
@@ -1796,64 +1650,513 @@ out:
 	return ret;
 }
 
+static struct qemu_3dnand *qemu_3dnand_from_chip(struct nand_chip *chip)
+{
+	return nand_get_controller_data(chip);
+}
+
+static int qemu_3dnand_ooblayout_ecc(struct mtd_info *mtd, int section,
+				      struct mtd_oob_region *region)
+{
+	if (section)
+		return -ERANGE;
+	region->offset = mtd->oobsize;
+	region->length = 0;
+	return 0;
+}
+
+static int qemu_3dnand_ooblayout_free(struct mtd_info *mtd, int section,
+				       struct mtd_oob_region *region)
+{
+	if (section)
+		return -ERANGE;
+	region->offset = mtd->oobsize;
+	region->length = 0;
+	return 0;
+}
+
+static const struct mtd_ooblayout_ops qemu_3dnand_ooblayout_ops = {
+	.ecc = qemu_3dnand_ooblayout_ecc,
+	.free = qemu_3dnand_ooblayout_free,
+};
+
+static int qemu_3dnand_ecc_read_oob(struct nand_chip *chip, int page)
+{
+	struct qemu_3dnand *q3n = qemu_3dnand_from_chip(chip);
+	int ret = 0;
+
+	mutex_lock(&q3n->mtd_lock);
+#if Q3N_ENABLE_MULTIPLANE_RAID
+	{
+		struct q3n_mp_buffers buffers;
+		struct q3n_mp_result result;
+		struct q3n_raid_group group;
+		u8 plane;
+
+		ret = qemu_3dnand_profile_group(q3n,
+						 (loff_t)page * q3n->mtd->writesize,
+						 &group, NULL, NULL, NULL);
+		if (ret)
+			goto out;
+		qemu_3dnand_profile_buffers(q3n, &group, &buffers, true);
+		ret = q3n_mp_read_oob(&q3n->mp, &buffers, &result);
+		if (ret || result.success_mask != group.member_mask) {
+			ret = ret ?: -EIO;
+			goto out;
+		}
+		chip->oob_poi[0] = 0xff;
+		for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++)
+			if ((group.member_mask & BIT(plane)) &&
+			    q3n->mp_oob[plane][Q3N_BBM_OOB_OFFSET] != 0xff)
+				chip->oob_poi[0] = 0x00;
+	}
+#else
+	{
+		struct q3n_phys_addr phys;
+		u8 oob[Q3N_LOGICAL_OOB_SIZE];
+
+		ret = q3n_map_serial_data_page(&q3n->profile_geometry, page,
+					       &phys);
+		if (!ret)
+			ret = qemu_3dnand_read_phys_oob_locked(q3n, phys.block,
+							   phys.page, oob,
+							   Q3N_OP_FOREGROUND);
+		if (!ret)
+			memcpy(chip->oob_poi, oob, q3n->mtd->oobsize);
+	}
+#endif
+#if Q3N_ENABLE_MULTIPLANE_RAID
+out:
+#endif
+	mutex_unlock(&q3n->mtd_lock);
+	return ret;
+}
+
+static int qemu_3dnand_ecc_write_oob(struct nand_chip *chip, int page)
+{
+	struct qemu_3dnand *q3n = qemu_3dnand_from_chip(chip);
+	bool marker_written = false;
+	int ret = 0;
+
+	mutex_lock(&q3n->mtd_lock);
+#if Q3N_ENABLE_MULTIPLANE_RAID
+	{
+		struct q3n_mp_buffers buffers;
+		struct q3n_mp_result result;
+		struct q3n_raid_group group;
+		u64 leb;
+		u8 plane;
+
+		ret = qemu_3dnand_profile_group(q3n,
+						 (loff_t)page * q3n->mtd->writesize,
+						 &group, &leb, NULL, NULL);
+		if (ret)
+			goto out;
+		qemu_3dnand_profile_invalidate_leb(q3n, leb);
+		qemu_3dnand_profile_buffers(q3n, &group, &buffers, true);
+		for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
+			if (!(group.member_mask & BIT(plane)))
+				continue;
+			memset(q3n->mp_oob[plane], 0xff, Q3N_LOGICAL_OOB_SIZE);
+			q3n->mp_oob[plane][0] = chip->oob_poi[0];
+		}
+		ret = q3n_mp_program_oob(&q3n->mp, &buffers, &result);
+		marker_written = result.success_mask != 0;
+		if (result.success_mask != group.member_mask)
+			ret = -EIO;
+	}
+#else
+	{
+		struct q3n_phys_addr phys;
+		u8 oob[Q3N_LOGICAL_OOB_SIZE];
+
+		memset(oob, 0xff, sizeof(oob));
+		memcpy(oob, chip->oob_poi, q3n->mtd->oobsize);
+		ret = q3n_map_serial_data_page(&q3n->profile_geometry, page,
+					       &phys);
+		if (!ret)
+			ret = qemu_3dnand_program_phys_oob_locked(q3n, phys.block,
+							      phys.page, oob,
+							      Q3N_OP_FOREGROUND);
+		marker_written = !ret;
+	}
+#endif
+#if Q3N_ENABLE_MULTIPLANE_RAID
+out:
+#endif
+	mutex_unlock(&q3n->mtd_lock);
+	if (marker_written && chip->oob_poi[0] != 0xff && !q3n->core_markbad) {
+		int bbt_ret = nand_bbt_markbad_from_oob(chip, page);
+
+		if (bbt_ret && bbt_ret != -EOPNOTSUPP)
+			return bbt_ret;
+	}
+	return ret;
+}
+
+static int qemu_3dnand_ecc_read_page(struct nand_chip *chip, u8 *buf,
+				     int oob_required, int page)
+{
+	struct qemu_3dnand *q3n = qemu_3dnand_from_chip(chip);
+	int ret;
+
+	mutex_lock(&q3n->mtd_lock);
+#if Q3N_ENABLE_MULTIPLANE_RAID
+	ret = qemu_3dnand_profile_read_page(q3n,
+					   (loff_t)page * q3n->mtd->writesize,
+					   buf);
+#else
+	{
+		struct q3n_phys_addr phys;
+		struct q3n_ecc_result ecc = {};
+
+		ret = q3n_map_serial_data_page(&q3n->profile_geometry, page,
+					       &phys);
+		if (!ret)
+			ret = qemu_3dnand_read_data_page_locked(q3n, phys.block,
+							    phys.page, buf, NULL,
+							    &ecc);
+		if (!ret)
+			ret = ecc.max_bitflips;
+	}
+#endif
+	mutex_unlock(&q3n->mtd_lock);
+	if (oob_required) {
+		int oob_ret = qemu_3dnand_ecc_read_oob(chip, page);
+
+		if (oob_ret && ret >= 0)
+			ret = oob_ret;
+	}
+	if (ret == -EBADMSG) {
+		q3n->mtd->ecc_stats.failed++;
+		return q3n->mtd->ecc_strength;
+	}
+	return ret;
+}
+
+static int qemu_3dnand_ecc_write_page(struct nand_chip *chip, const u8 *buf,
+				      int oob_required, int page)
+{
+	struct qemu_3dnand *q3n = qemu_3dnand_from_chip(chip);
+	int ret;
+
+#if Q3N_ENABLE_MULTIPLANE_RAID
+	mutex_lock(&q3n->mtd_lock);
+	ret = qemu_3dnand_profile_write_page(q3n,
+					    (loff_t)page * q3n->mtd->writesize,
+					    buf);
+	mutex_unlock(&q3n->mtd_lock);
+#else
+	{
+		struct q3n_phys_addr phys;
+
+		ret = q3n_map_serial_data_page(&q3n->profile_geometry, page,
+					       &phys);
+		if (!ret)
+			ret = qemu_3dnand_program_logical_page(q3n, phys.block,
+							   phys.page, buf, NULL,
+							   0, 0, NULL, NULL);
+	}
+#endif
+	if (!ret && oob_required)
+		ret = qemu_3dnand_ecc_write_oob(chip, page);
+	return ret;
+}
+
+static int qemu_3dnand_ecc_read_page_raw(struct nand_chip *chip, u8 *buf,
+					 int oob_required, int page)
+{
+	return -EOPNOTSUPP;
+}
+
+static int qemu_3dnand_ecc_write_page_raw(struct nand_chip *chip,
+					  const u8 *buf, int oob_required,
+					  int page)
+{
+	return -EOPNOTSUPP;
+}
+
+static int qemu_3dnand_block_bad(struct nand_chip *chip, loff_t ofs)
+{
+	struct qemu_3dnand *q3n = qemu_3dnand_from_chip(chip);
+	int page = div64_u64(ofs, q3n->mtd->writesize);
+	int ret;
+
+	ret = qemu_3dnand_ecc_read_oob(chip, page);
+	return ret ?: chip->oob_poi[0] != 0xff;
+}
+
+static int qemu_3dnand_block_markbad(struct nand_chip *chip, loff_t ofs)
+{
+	struct qemu_3dnand *q3n = qemu_3dnand_from_chip(chip);
+	int page = div64_u64(ofs, q3n->mtd->writesize);
+	int ret;
+
+	memset(chip->oob_poi, 0xff, q3n->mtd->oobsize);
+	chip->oob_poi[0] = 0x00;
+	q3n->core_markbad = true;
+	ret = qemu_3dnand_ecc_write_oob(chip, page);
+	q3n->core_markbad = false;
+	return ret;
+}
+
+static int qemu_3dnand_erase_page(struct qemu_3dnand *q3n, u32 page)
+{
+#if Q3N_ENABLE_MULTIPLANE_RAID
+	struct q3n_mp_buffers buffers;
+	struct q3n_mp_result result;
+	struct q3n_raid_group group;
+	u64 leb;
+	int ret;
+
+	ret = qemu_3dnand_profile_group(q3n,
+					 (loff_t)page * q3n->mtd->writesize,
+					 &group, &leb, NULL, NULL);
+	if (ret)
+		return ret;
+	qemu_3dnand_profile_invalidate_leb(q3n, leb);
+	qemu_3dnand_profile_buffers(q3n, &group, &buffers, false);
+	ret = q3n_mp_erase(&q3n->mp, &buffers, &result);
+	if (!ret && result.success_mask != group.member_mask)
+		ret = -EIO;
+	return ret;
+#else
+	struct q3n_phys_addr phys;
+	int ret;
+
+	ret = q3n_map_serial_data_page(&q3n->profile_geometry, page, &phys);
+	if (ret)
+		return ret;
+	ret = qemu_3dnand_cancel_block_parity(q3n, phys.block);
+	if (ret)
+		return ret;
+	ret = qemu_3dnand_erase_phys_block_locked(q3n, phys.block);
+	if (!ret) {
+		memset(&q3n->data_page_valid[phys.block * q3n->pages_per_block],
+		       0, q3n->pages_per_block);
+		q3n->data_meta[phys.block].generation++;
+		if (!q3n->data_meta[phys.block].generation)
+			q3n->data_meta[phys.block].generation = 1;
+		qemu_3dnand_invalidate_block_parity(q3n, phys.block);
+	}
+	q3n_block_cancel_end(&q3n->data_meta[phys.block].parity_barrier);
+	return ret;
+#endif
+}
+
+static void qemu_3dnand_cmdfunc(struct nand_chip *chip, unsigned int command,
+				int column, int page_addr)
+{
+	struct qemu_3dnand *q3n = qemu_3dnand_from_chip(chip);
+	static const u8 id[8] = { 0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44 };
+
+	mutex_lock(&q3n->mtd_lock);
+	q3n->legacy.len = 0;
+	q3n->legacy.pos = 0;
+	switch (command) {
+	case NAND_CMD_READID:
+		if (column)
+			q3n->legacy.error = -EINVAL;
+		else {
+			memcpy(q3n->legacy.data, id, sizeof(id));
+			q3n->legacy.len = sizeof(id);
+		}
+		break;
+	case NAND_CMD_STATUS:
+		q3n->legacy.data[0] = NAND_STATUS_READY | NAND_STATUS_WP |
+			(q3n->legacy.error ? NAND_STATUS_FAIL : 0);
+		q3n->legacy.len = 1;
+		break;
+	case NAND_CMD_RESET:
+		qemu_3dnand_writel(q3n, Q3N_REG_CMD, Q3N_CMD_RESET);
+		q3n->legacy.error = qemu_3dnand_wait_ready(q3n);
+		q3n->legacy.erase_pending = false;
+		break;
+	case NAND_CMD_ERASE1:
+		if (page_addr < 0 || page_addr %
+					(q3n->mtd->erasesize / q3n->mtd->writesize))
+			q3n->legacy.error = -EINVAL;
+		else {
+			q3n->legacy.erase_page = page_addr;
+			q3n->legacy.erase_pending = true;
+		}
+		break;
+	case NAND_CMD_ERASE2:
+		if (!q3n->legacy.erase_pending)
+			q3n->legacy.error = -EINVAL;
+		else {
+			q3n->legacy.erase_pending = false;
+			q3n->legacy.error = qemu_3dnand_erase_page(q3n,
+							q3n->legacy.erase_page);
+		}
+		break;
+	case NAND_CMD_READ0:
+	case NAND_CMD_READOOB:
+	case NAND_CMD_SEQIN:
+	case NAND_CMD_PAGEPROG:
+		break;
+	default:
+		q3n->legacy.error = -EOPNOTSUPP;
+		break;
+	}
+	mutex_unlock(&q3n->mtd_lock);
+}
+
+static int qemu_3dnand_waitfunc(struct nand_chip *chip)
+{
+	struct qemu_3dnand *q3n = qemu_3dnand_from_chip(chip);
+	int ret;
+
+	mutex_lock(&q3n->mtd_lock);
+	ret = q3n->legacy.error;
+	q3n->legacy.error = 0;
+	mutex_unlock(&q3n->mtd_lock);
+	return ret ?: NAND_STATUS_READY | NAND_STATUS_WP;
+}
+
+static u8 qemu_3dnand_read_byte(struct nand_chip *chip)
+{
+	struct qemu_3dnand *q3n = qemu_3dnand_from_chip(chip);
+
+	if (q3n->legacy.pos >= q3n->legacy.len)
+		return 0xff;
+	return q3n->legacy.data[q3n->legacy.pos++];
+}
+
+static void qemu_3dnand_read_buf(struct nand_chip *chip, u8 *buf, int len)
+{
+	while (len-- > 0)
+		*buf++ = qemu_3dnand_read_byte(chip);
+}
+
+static void qemu_3dnand_write_buf(struct nand_chip *chip, const u8 *buf,
+				   int len)
+{
+	struct qemu_3dnand *q3n = qemu_3dnand_from_chip(chip);
+
+	q3n->legacy.error = -EOPNOTSUPP;
+}
+
+static void qemu_3dnand_select_chip(struct nand_chip *chip, int chipnr)
+{
+	struct qemu_3dnand *q3n = qemu_3dnand_from_chip(chip);
+
+	if (chipnr != 0 && chipnr != -1)
+		q3n->legacy.error = -EINVAL;
+}
+
+static void qemu_3dnand_sync(struct nand_chip *chip)
+{
+	struct qemu_3dnand *q3n = qemu_3dnand_from_chip(chip);
+
+	flush_workqueue(q3n->parity_wq);
+	mutex_lock(&q3n->mtd_lock);
+	q3n_sched_drain(&q3n->sched);
+	mutex_unlock(&q3n->mtd_lock);
+}
+
+static int qemu_3dnand_attach_chip(struct nand_chip *chip)
+{
+	struct mtd_info *mtd = nand_to_mtd(chip);
+
+	mtd_set_ooblayout(mtd, &qemu_3dnand_ooblayout_ops);
+	chip->ecc.engine_type = NAND_ECC_ENGINE_TYPE_ON_HOST;
+	chip->ecc.placement = NAND_ECC_PLACEMENT_OOB;
+	chip->ecc.size = Q3N_ECC_STEP_SIZE;
+	chip->ecc.strength = Q3N_ECC_STRENGTH;
+	chip->ecc.bytes = 0;
+	chip->ecc.steps = mtd->writesize / Q3N_ECC_STEP_SIZE;
+	chip->ecc.read_page = qemu_3dnand_ecc_read_page;
+	chip->ecc.write_page = qemu_3dnand_ecc_write_page;
+	chip->ecc.read_page_raw = qemu_3dnand_ecc_read_page_raw;
+	chip->ecc.write_page_raw = qemu_3dnand_ecc_write_page_raw;
+	chip->ecc.read_oob = qemu_3dnand_ecc_read_oob;
+	chip->ecc.write_oob = qemu_3dnand_ecc_write_oob;
+	chip->ecc.read_oob_raw = qemu_3dnand_ecc_read_oob;
+	chip->ecc.write_oob_raw = qemu_3dnand_ecc_write_oob;
+	if (!chip->ecc.steps)
+		return -EINVAL;
+	return 0;
+}
+
+static const struct nand_controller_ops qemu_3dnand_controller_ops = {
+	.attach_chip = qemu_3dnand_attach_chip,
+};
+
 static int qemu_3dnand_register_mtd(struct qemu_3dnand *q3n)
 {
-	struct mtd_info *mtd = &q3n->mtd;
-#if Q3N_ENABLE_MULTIPLANE_RAID
+	struct mtd_info *mtd;
 	u32 writesize;
 	u32 erasesize;
 	u64 size;
 	int ret;
-#endif
 
-	mtd->name = "qemu-3dnand";
-	mtd->type = MTD_NANDFLASH;
-	mtd->flags = MTD_CAP_NANDFLASH;
 #if Q3N_ENABLE_MULTIPLANE_RAID
 	ret = q3n_raid_geometry_values(&q3n->profile_geometry, &writesize,
 				       &erasesize, &size);
+#else
+	writesize = q3n->page_size;
+	erasesize = (q3n->pages_per_block / Q3N_STRIPE_PAGES) *
+		Q3N_DATA_PAGES * q3n->page_size;
+	size = (u64)q3n->data_block_count * erasesize;
+	ret = 0;
+#endif
+	if (ret || !writesize || !erasesize || !size || size > U64_MAX - SZ_1M)
+		return ret ?: -EINVAL;
+
+	q3n->scan_ids[0] = (struct nand_flash_dev) {
+		.name = "QEMU 3D NAND logical array",
+		.id = { 0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44 },
+		.id_len = 8,
+		.pagesize = writesize,
+		.oobsize = Q3N_ENABLE_MULTIPLANE_RAID ? 1 : Q3N_LOGICAL_OOB_SIZE,
+		.erasesize = erasesize,
+		.chipsize = DIV_ROUND_UP_ULL(size, SZ_1M),
+		.options = NAND_NO_SUBPAGE_WRITE | NAND_NON_POWER_OF_2_GEOMETRY |
+			   NAND_MARKBAD_NO_ERASE,
+		.ecc = NAND_ECC_INFO(Q3N_ECC_STRENGTH, Q3N_ECC_STEP_SIZE),
+	};
+	memset(&q3n->scan_ids[1], 0, sizeof(q3n->scan_ids[1]));
+
+	nand_controller_init(&q3n->controller);
+	q3n->controller.ops = &qemu_3dnand_controller_ops;
+	q3n->chip.controller = &q3n->controller;
+	nand_set_controller_data(&q3n->chip, q3n);
+	q3n->chip.legacy.cmdfunc = qemu_3dnand_cmdfunc;
+	q3n->chip.legacy.waitfunc = qemu_3dnand_waitfunc;
+	q3n->chip.legacy.read_byte = qemu_3dnand_read_byte;
+	q3n->chip.legacy.read_buf = qemu_3dnand_read_buf;
+	q3n->chip.legacy.write_buf = qemu_3dnand_write_buf;
+	q3n->chip.legacy.select_chip = qemu_3dnand_select_chip;
+	q3n->chip.legacy.block_bad = qemu_3dnand_block_bad;
+	q3n->chip.legacy.block_markbad = qemu_3dnand_block_markbad;
+	q3n->chip.ops.sync = qemu_3dnand_sync;
+
+	mtd = nand_to_mtd(&q3n->chip);
+	q3n->mtd = mtd;
+	mtd->name = "qemu-3dnand";
+	mtd->dev.parent = &q3n->pdev->dev;
+	mtd->owner = THIS_MODULE;
+	mtd->bitflip_threshold = Q3N_ECC_STRENGTH;
+	mtd->priv = q3n;
+
+	ret = nand_scan_with_ids(&q3n->chip, 1, q3n->scan_ids);
 	if (ret)
 		return ret;
+	q3n->scanned = true;
+	if (mtd->size != size) {
+		ret = -EINVAL;
+		goto err_cleanup;
+	}
+	ret = mtd_device_register(mtd, NULL, 0);
+	if (ret)
+		goto err_cleanup;
+	return 0;
 
-	mtd->size = size;
-	mtd->erasesize = erasesize;
-	mtd->writesize = writesize;
-	mtd->writebufsize = writesize;
-	mtd->oobsize = 0;
-	mtd->oobavail = 0;
-#else
-	mtd->size = (u64)q3n->data_block_count *
-		(q3n->pages_per_block / Q3N_STRIPE_PAGES) *
-		Q3N_DATA_PAGES * q3n->page_size;
-	mtd->erasesize = (q3n->pages_per_block / Q3N_STRIPE_PAGES) *
-		Q3N_DATA_PAGES * q3n->page_size;
-	mtd->writesize = q3n->page_size;
-	mtd->writebufsize = q3n->page_size;
-	mtd->oobsize = Q3N_LOGICAL_OOB_SIZE;
-#endif
-	mtd->ecc_step_size = Q3N_ECC_STEP_SIZE;
-	mtd->ecc_strength = Q3N_ECC_STRENGTH;
-	mtd->bitflip_threshold = Q3N_ECC_STRENGTH;
-	mtd->owner = THIS_MODULE;
-	mtd->priv = q3n;
-#if Q3N_ENABLE_MULTIPLANE_RAID
-	mtd->_read = qemu_3dnand_profile_read;
-	mtd->_write = qemu_3dnand_profile_write;
-	mtd->_erase = qemu_3dnand_profile_erase;
-	mtd->_sync = qemu_3dnand_profile_sync;
-	mtd->_block_isbad = qemu_3dnand_profile_isbad;
-	mtd->_block_markbad = qemu_3dnand_profile_markbad;
-#else
-	mtd->_read_oob = qemu_3dnand_mtd_read_oob;
-	mtd->_write_oob = qemu_3dnand_mtd_write_oob;
-	mtd->_erase = qemu_3dnand_mtd_erase;
-	mtd->_sync = qemu_3dnand_mtd_sync;
-	mtd->_block_isbad = qemu_3dnand_mtd_block_isbad;
-	mtd->_block_markbad = qemu_3dnand_mtd_block_markbad;
-#endif
-	mtd->dev.parent = &q3n->pdev->dev;
-
-	return mtd_device_register(mtd, NULL, 0);
+err_cleanup:
+	nand_cleanup(&q3n->chip);
+	q3n->scanned = false;
+	return ret;
 }
 
 static int qemu_3dnand_inject_data_loss(void *data, u64 value)
@@ -1867,6 +2170,7 @@ static int qemu_3dnand_inject_data_loss(void *data, u64 value)
 	qemu_3dnand_writel(q3n, Q3N_REG_FAULT_CTRL,
 			   Q3N_FAULT_INJECT_DATA_LOSS);
 	ret = qemu_3dnand_wait_ready(q3n);
+	q3n->chip.pagecache.page = -1;
 	mutex_unlock(&q3n->mtd_lock);
 
 	return ret;
@@ -1889,6 +2193,7 @@ static int qemu_3dnand_inject_profile_plane_loss(void *data, u64 value)
 	qemu_3dnand_writel(q3n, Q3N_REG_FAULT_CTRL,
 			   Q3N_FAULT_INJECT_DATA_LOSS);
 	ret = qemu_3dnand_wait_ready(q3n);
+	q3n->chip.pagecache.page = -1;
 	mutex_unlock(&q3n->mtd_lock);
 	return ret;
 }
@@ -1903,7 +2208,7 @@ static int qemu_3dnand_inject_parity_program_fail(void *data, u64 value)
 	loff_t phys_addr;
 	int ret;
 
-	if (value >= q3n->mtd.size)
+	if (value >= q3n->mtd->size)
 		return -ERANGE;
 	qemu_3dnand_decode_logical(q3n, value, &block, &page, &column);
 	if (column)
@@ -2549,6 +2854,9 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 	q3n->data_block_count = q3n->data_blocks_per_plane * Q3N_RAID_LANES;
 	q3n->parity_block_count = q3n->parity_blocks_per_plane * Q3N_RAID_LANES;
 	q3n->raid_group_count = q3n->data_block_count / Q3N_RAID_LANES;
+	q3n->profile_geometry.data_pages_per_stripe = Q3N_DATA_PAGES;
+	q3n->profile_geometry.data_block_count = q3n->data_block_count;
+	q3n->profile_geometry.parity_block_count = q3n->parity_block_count;
 	q3n->parity_wq = alloc_workqueue("q3n-parity", WQ_UNBOUND,
 					 Q3N_MAX_PENDING_PARITY);
 	if (!q3n->parity_wq)
@@ -2567,9 +2875,9 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 			goto err_free_metadata;
 		}
 	}
-	q3n->profile_generation = devm_kcalloc(dev, q3n->profile_leb_count,
-					       sizeof(*q3n->profile_generation),
-					       GFP_KERNEL);
+	q3n->profile_state = kvcalloc((u64)q3n->profile_leb_count *
+				       q3n->pages_per_block,
+				       sizeof(*q3n->profile_state), GFP_KERNEL);
 	/* These arrays are multi-megabyte with the 2-die x 4-plane geometry. */
 	q3n->data_page_valid = kvcalloc(q3n->data_block_count,
 					  q3n->pages_per_block,
@@ -2581,7 +2889,7 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 					      Q3N_STRIPE_PAGES),
 					     sizeof(*q3n->parity_index),
 					     GFP_KERNEL);
-	if (!q3n->page_buf || !q3n->raid_buf || !q3n->profile_generation ||
+	if (!q3n->page_buf || !q3n->raid_buf || !q3n->profile_state ||
 	    !q3n->data_page_valid ||
 	    !q3n->data_meta || !q3n->parity_index) {
 		ret = -ENOMEM;
@@ -2592,16 +2900,6 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 		q3n->data_meta[ret].generation = 1;
 		q3n_block_barrier_init(&q3n->data_meta[ret].parity_barrier);
 	}
-	for (ret = 0; ret < q3n->profile_leb_count; ret++)
-		q3n->profile_generation[ret] = 1;
-	if (q3n->cap & Q3N_CAP_PERSISTENT_MEDIA) {
-		mutex_lock(&q3n->mtd_lock);
-		ret = qemu_3dnand_restore_media_locked(q3n);
-		mutex_unlock(&q3n->mtd_lock);
-		if (ret)
-			goto err_free_metadata;
-	}
-
 	ret = qemu_3dnand_register_mtd(q3n);
 	if (ret)
 		goto err_free_metadata;
@@ -2618,7 +2916,7 @@ static int qemu_3dnand_probe(struct pci_dev *pdev,
 			 "multi-plane RAID5") : "serial RAID",
 		 q3n->data_blocks_per_plane, q3n->parity_blocks_per_plane,
 		 q3n->metadata_blocks_per_plane, q3n->reserve_blocks_per_plane,
-		 &bar.start, &q3n->regs_size, q3n->mtd.name);
+		 &bar.start, &q3n->regs_size, q3n->mtd->name);
 
 	return 0;
 
@@ -2640,8 +2938,12 @@ static void qemu_3dnand_remove(struct pci_dev *pdev)
 		WRITE_ONCE(q3n->parity_pause_enable, false);
 		WRITE_ONCE(q3n->parity_continuation_pause_enable, false);
 		wake_up_all(&q3n->parity_pause_waitq);
-		mtd_device_unregister(&q3n->mtd);
+		mtd_device_unregister(q3n->mtd);
 		flush_workqueue(q3n->parity_wq);
+		if (q3n->scanned) {
+			nand_cleanup(&q3n->chip);
+			q3n->scanned = false;
+		}
 		destroy_workqueue(q3n->parity_wq);
 		qemu_3dnand_free_metadata(q3n);
 	}

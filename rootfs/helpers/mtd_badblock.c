@@ -17,9 +17,10 @@ static int usage(const char *prog)
 		"       %s oob-read-unchecked MODE DEVICE PAGE_OFFSET OOB_OFFSET LENGTH\n"
 		"       %s oob-write MODE DEVICE PAGE_OFFSET OOB_OFFSET LENGTH BYTE\n"
 		"       %s page-read|page-write MODE DEVICE PAGE_OFFSET DATA_BYTE OOB_OFFSET OOB_LENGTH OOB_BYTE\n"
+		"       %s data-read|data-write DEVICE PAGE_OFFSET DATA_BYTE\n"
 		"       %s span-read|span-write MODE DEVICE PAGE_OFFSET PAGE_COUNT OOB_OFFSET OOB_BYTE\n"
 		"MODE is place or raw; page OOB commands never wrap to another page.\n",
-		prog, prog, prog, prog, prog, prog, prog);
+		prog, prog, prog, prog, prog, prog, prog, prog);
 	return 2;
 }
 
@@ -214,6 +215,78 @@ static int page_io(int fd, int write, uint8_t mode,
 	return ret;
 }
 
+static int data_io(int fd, int write, const struct mtd_info_user *info,
+		   uint64_t page_offset, unsigned char data_value)
+{
+	unsigned char *data;
+	int ret;
+
+	if (!info->writesize || page_offset % info->writesize) {
+		errno = EINVAL;
+		return -1;
+	}
+	data = malloc(info->writesize);
+	if (!data)
+		return -1;
+	memset(data, write ? data_value : 0, info->writesize);
+	if (write) {
+		struct mtd_write_req req = {
+			.start = page_offset,
+			.len = info->writesize,
+			.usr_data = (uintptr_t)data,
+			.mode = MTD_OPS_PLACE_OOB,
+		};
+
+		ret = ioctl(fd, MEMWRITE, &req);
+	} else {
+		struct mtd_read_req req = {
+			.start = page_offset,
+			.len = info->writesize,
+			.usr_data = (uintptr_t)data,
+			.mode = MTD_OPS_PLACE_OOB,
+		};
+
+		ret = ioctl(fd, MEMREAD, &req);
+		if (ret < 0 && errno == EUCLEAN) {
+			errno = 0;
+			ret = 0;
+		}
+		if (!ret && !bytes_are(data, info->writesize, data_value)) {
+			errno = EIO;
+			ret = -1;
+		}
+	}
+	free(data);
+	return ret;
+}
+
+static int run_data(int argc, char **argv)
+{
+	struct mtd_info_user info;
+	uint64_t page_offset;
+	unsigned char data_value;
+	int write;
+	int fd;
+	int ret;
+
+	if (argc != 5 ||
+	    (strcmp(argv[1], "data-read") && strcmp(argv[1], "data-write")) ||
+	    parse_u64(argv[3], &page_offset) || parse_byte(argv[4], &data_value))
+		return usage(argv[0]);
+	write = !strcmp(argv[1], "data-write");
+	fd = open(argv[2], O_RDWR);
+	if (fd < 0) {
+		perror("open");
+		return 1;
+	}
+	ret = get_info(fd, &info) ||
+		data_io(fd, write, &info, page_offset, data_value);
+	if (ret)
+		perror("ioctl");
+	close(fd);
+	return ret ? 1 : 0;
+}
+
 static int span_io(int fd, int write, uint8_t mode,
 		   const struct mtd_info_user *info, uint64_t page_offset,
 		   uint64_t page_count, uint64_t oob_offset,
@@ -351,6 +424,8 @@ int main(int argc, char **argv)
 	int fd;
 	int ret;
 
+	if (argc >= 2 && !strncmp(argv[1], "data-", 5))
+		return run_data(argc, argv);
 	if (argc >= 3 &&
 	    (!strncmp(argv[1], "oob-", 4) ||
 	     !strncmp(argv[1], "page-", 5) ||

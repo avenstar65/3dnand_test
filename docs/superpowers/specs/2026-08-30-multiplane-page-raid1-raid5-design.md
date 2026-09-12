@@ -1,12 +1,71 @@
 # Page-RAID1/RAID5：ECC 回调与固定页映射设计
 
-修订日期：2026-09-11。
+修订日期：2026-09-12。
 
-状态：**仅更新设计，尚未实施**。当前代码基线仍为 `22b9519`，包含
-direct MTD 与 manifest。本修订的目标是 NAND core / `ecc.*` 接入、
-固定冗余页映射、取消 manifest；不是对现有代码行为的描述。
+状态：**已按本设计实现并完成多-plane RAID1/RAID5 验收**。迁移前代码
+基线 `22b9519` 使用 direct MTD 与 manifest；当前实现已接入 NAND core /
+`ecc.*`，使用固定冗余页映射并取消 RAID manifest。
 
-## 1. 目标与选择
+## 1. 首先明确：多-plane + RAID 需要提供哪些 MTD 接口
+
+**对上提供一个逻辑 NAND MTD 设备，对下由驱动把一个逻辑页/块映射到
+同一 die 内多个 plane。MTD 入口由 NAND core 提供，驱动实现下表中的
+nand_chip / controller 回调，不直接接管 mtd_info 的 I/O 函数指针。**
+
+本节先列接口范围和责任，后文再讨论初始化、BBT、ECC 返回值、固定映射、
+写入与恢复。此处主线为宏 1 的 RAID1/RAID5；宏 0 仅作为串行兼容分支。
+
+### 1.1 MTD 对外接口与驱动实现清单
+
+| MTD 层必须提供的能力 | NAND core 对接方式 | 驱动需要实现 / 适配 | 多-plane + RAID 语义 |
+| --- | --- | --- | --- |
+| 普通读取：mtd_read | 核心普通读可经 _read_oob 路径完成，不要求驱动另填 _read | ecc.read_page | RAID1 返回一份 16 KiB 数据；RAID5 拼接三个片段为 48 KiB；恢复受资格限制 |
+| 普通写入：mtd_write | 核心普通写可经 _write_oob 路径完成，不要求驱动另填 _write | ecc.write_page | 一个完整逻辑页生成两份镜像或 3D+1P，以一次 multi-plane PROGRAM 写入，检查全部成员结果 |
+| OOB 读取：mtd_read_oob / _read_oob | nand_read_oob | ecc.read_oob，明确 raw OOB 回调 | 对外仅组 BBM；任一成员坏则合成坏标记，同时供 nand_scan 建 BBT 使用 |
+| OOB 写入：mtd_write_oob / _write_oob | nand_write_oob | ecc.write_oob，明确 raw OOB 回调 | 将允许的 BBM 更新广播到成员，保护 main/LDPC/其他 OOB，需同步核心 BBT |
+| 擦除：mtd_erase / _erase | nand_erase → nand_erase_op | legacy.cmdfunc + legacy.waitfunc | ERASE1 保存逻辑地址，ERASE2 发起 multi-plane 擦除；汇总成员结果，由核心报告逻辑 fail_addr |
+| 坏块查询：mtd_block_isbad / _block_isbad | nand_block_isbad：有 BBT 查表，无 BBT 查 BBM | legacy.block_bad；初始化另需 ecc.read_oob | 任一成员坏则整逻辑块坏，不自行维护 BBT |
+| 标坏：mtd_block_markbad / _block_markbad | nand_block_markbad 管理流程与 BBT 更新 | legacy.block_markbad 广播物理 BBM | 保留 main 的要求依赖免前置擦除 core 扩展，不能只靠该回调 |
+| 同步：mtd_sync / _sync | nand_sync | 对接新增的 NAND chip sync hook，不覆盖 _sync | 完成在途工作；兼容模式还须排空后台 parity，具体锁契约见第 11 节 |
+| RAW 请求：MTD_OPS_RAW | 仍经核心 OOB I/O 分派，不是独立 _raw 接口 | ecc.read_page_raw/write_page_raw 与 read_oob_raw/write_oob_raw | 多-plane raw main 明确返回 EOPNOTSUPP，raw OOB 仅 BBM，不伪装支持 |
+
+表中 `mtd_*` 是调用方使用的接口，`_xxx` 是 mtd_info 内部入口，
+`ecc.*` / `legacy.*` 才是本设计的数据与命令底层接口；不注册 exec_op。
+`block_bad` 与 `block_markbad` 位于 `chip->legacy`，不位于 `chip->ecc`。
+仅有两个 block 回调不能覆盖初始化 BBT 扫描，原因与时序见第 3.3 节。
+
+### 1.2 初始化和接口挂接的前置条件
+
+- 必须执行 nand_scan 完整路径；自定义逻辑 ID 表使用等价的
+  nand_scan_with_ids。核心建立 BBT 后才注册 MTD，不设置 NAND_SKIP_BBTSCAN。
+- 驱动准备 nand_chip/controller、逻辑 ID 与精确几何，并在 attach_chip
+  阶段完成 ECC/OOB 等所需配置；扫描前准备好 legacy 命令、数据和 target
+  选择回调，支持识别、状态和复位。controller 对象与 attach_chip 仍保留。
+- RAID1 的 writesize 为 16 KiB、RAID5 为 48 KiB；均为 1600 页/逻辑块。
+  精确几何 core/BBT 补丁是前置依赖，不能只注册回调而忽略地址计算。
+- 公共 oobsize 为 1 B BBM、oobavail 为 0；禁用 subpage 读写，拒绝不满足
+  整页要求的写入。逻辑地址、retlen 与 ECC 错误必须保持 MTD 语义。
+- BBT、MTD 注册及核心资源清理由 NAND core 契约管理；驱动负责 MMIO、
+  成员映射、RAID、缓冲与 worker 生命周期。
+- _block_isreserved 等核心附带能力继续由核心管理；lock/unlock、panic write、
+  OTP 等不作为本轮新增 RAID 能力，不能将核心默认入口存在等同于已验收支持。
+
+```mermaid
+flowchart TB
+    M["一个逻辑 MTD 设备<br/>读、写、OOB、擦除、坏块、sync"]
+    M --> C["NAND core 提供 MTD 入口<br/>nand_scan 建 BBT，管理分页与返回语义"]
+    C --> E["驱动 ecc.*<br/>逻辑页与 OOB I/O"]
+    C --> B["驱动 legacy.block_bad / block_markbad<br/>物理 BBM 查询与广播"]
+    C --> O["驱动 legacy 命令接口<br/>cmdfunc / waitfunc / 数据 / target 选择"]
+    C --> S["chip sync hook<br/>等待工作完成"]
+    E --> R["固定逻辑到物理映射<br/>同 die、同 block/row、不同 plane"]
+    B --> R
+    O --> R
+    R --> P1["RAID1：两成员镜像"]
+    R --> P5["RAID5：四成员 3D+1P"]
+```
+
+### 1.3 接口范围确定后的设计选择
 
 parity 和 data 的位置由代码中的固定公式确定，不在 OOB 或其他介质区保存
 页号、映射表或 manifest。取消 RAID 软件 CRC、持久化 generation、
@@ -61,7 +120,7 @@ parity 和 data 的位置由代码中的固定公式确定，不在 OOB 或其�
 flowchart TD
     U["用户 MTD 请求"] --> C["NAND core<br/>分页、retlen、页缓存、RAM BBT"]
     C -->|"页 / OOB"| E["nand_chip.ecc<br/>read_page / write_page / OOB"]
-    C -->|"识别 / 状态 / 擦除"| O["controller.exec_op"]
+    C -->|"识别 / 状态 / 擦除"| O["legacy.cmdfunc / waitfunc<br/>及数据、target 选择回调"]
     E --> M{"编译宏与 raid_level"}
     M -->|"宏 0"| S["串行 D0..D6,P<br/>固定物理 row"]
     M -->|"宏 1 / RAID1"| R1["同 die 两 plane 镜像"]
@@ -76,7 +135,7 @@ flowchart TD
 
 驱动持有 `nand_chip`、`nand_controller`，通过 `nand_to_mtd(chip)`
 取得唯一 MTD，不再赋值任何 MTD I/O 回调。
-controller 模拟与逻辑几何一致的 READID/STATUS/RESET；
+legacy 命令适配层模拟与逻辑几何一致的 READID/STATUS/RESET；
 控制器 ID 寄存器不能直接冒充 NAND READID 字节流。
 一个逻辑 target 覆盖全部逻辑容量，物理 die 分布由 mapper 处理。
 
@@ -86,7 +145,7 @@ flowchart TD
     G --> V{"宏、profile 与能力合法？"}
     V -->|"否"| F["错误返回并回滚资源"]
     V -->|"是"| I["选择固定 mapper<br/>计算精确逻辑几何"]
-    I --> N["初始化 nand_chip / controller<br/>逻辑 ID 表与一个 target"]
+    I --> N["初始化 nand_chip / controller<br/>legacy 命令回调、逻辑 ID 与一个 target<br/>不注册 exec_op"]
     N --> Scan["nand_scan 核心扫描入口<br/>自定义 ID 表时用 nand_scan_with_ids"]
     Scan --> Ident["nand_scan_ident：识别与逻辑几何"]
     Ident --> Attach["nand_attach / attach_chip<br/>配置 ECC / OOB callbacks"]
@@ -162,6 +221,109 @@ Block 0；两组各占一个逻辑 BBT 条目。
 驱动不覆盖 MTD `_block_isbad` / `_block_markbad`，不维护与核心竞争的
 私有坏块表。第 8 节 RAM 恢复资格是条带写入状态，不是 BBT，二者不可混用。
 
+### 3.3 驱动 block_bad / block_markbad 与核心 BBT 的分工
+
+多-plane 模式采用驱动实现 `chip->legacy.block_bad` 和
+`chip->legacy.block_markbad`、NAND core 管理 BBT 的方案。
+这两个是 nand_chip 的底层回调，不是 MTD `_block_isbad/_block_markbad`，
+也不是 `ecc.*` 字段；普通页与 OOB I/O 仍按第 4 节接入 ECC 回调。
+
+**只实现两个 block 回调不够：初始化 BBT 扫描仍必须提供 OOB 读取路径。**
+本地 Linux 7.0.12 的 `nand_bbt.c:scan_block_fast` 通过
+`mtd_read_oob` 读取标记页，不调用 `legacy.block_bad`。
+
+| 接口 / 核心组件 | 责任与调用时机 |
+| --- | --- |
+| 驱动 `legacy.block_bad(chip, ofs)` | 将逻辑字节偏移映射到成员块，检查约定标记页；任一成员坏返回正值，全好返回 0，读取错误返回负 errno。用于核心无 BBT 的 BBM 查询路径，不作为初始化扫描入口 |
+| 驱动 `legacy.block_markbad(chip, ofs)` | 对逻辑块全部成员的约定标记页广播 BBM 写入；全部成功返回 0，失败返回负 errno；不自行更新或分配核心 BBT |
+| 驱动 `ecc.read_oob(chip, page)` | 按逻辑页映射读取成员 OOB，合成 BBM 到 chip 的 OOB 缓冲；供核心初始化 BBT 扫描和普通 OOB 读取使用 |
+| 驱动 `ecc.write_oob` | 保留用户 OOB/BBM 写入入口；与 block_markbad 共用底层成员 BBM 写入逻辑，但不是自定义 block_markbad 必须调用的上层接口 |
+| `nand_scan` / `nand_create_bbt` | 组织扫描并创建核心 RAM BBT，成功后才允许注册 MTD |
+| 核心坏块查询 | 已有 chip->bbt 时直接查表，不要求每次再调用驱动 block_bad |
+| 核心标坏路径 | 调用驱动 block_markbad 写物理标记，随后按核心契约更新 BBT 并返回结果 |
+
+```mermaid
+flowchart TB
+    Init["初始化：nand_scan"] --> Scan["nand_create_bbt / nand_scan_bbt"]
+    Scan --> OOB["mtd_read_oob → ecc.read_oob<br/>合成多-plane BBM"]
+    OOB --> Create["核心建立 RAM BBT"]
+    Query["运行期：核心 block_isbad"] --> Has{"已有 BBT？"}
+    Has -->|"是：正常运行路径"| Table["查询核心 BBT"]
+    Has -->|"否：BBM 查询路径"| Bad["legacy.block_bad<br/>查询成员物理标记"]
+    Mark["运行期：核心 block_markbad"] --> Pre["处理核心前置擦除<br/>本设计需免擦除 opt-in 扩展"]
+    Pre --> Write["legacy.block_markbad<br/>向成员块广播 BBM"]
+    Write --> Update["核心处理 BBT 更新及错误返回"]
+```
+
+两个 block 回调和 ECC OOB 回调应复用同一套成员映射、标记页规则和
+底层 BBM helper，避免初始化扫描结果与运行期查询不一致。
+`ofs` 是逻辑字节偏移，不能当作物理页号或用物理 erase_shift 直接取块；
+按精确逻辑 erasesize 取得逻辑块，再映射到同 die 的两个或四个成员块。
+底层回调不递归调用同一设备的 `mtd_block_isbad/markbad`，也不重复获取
+核心已持有的设备锁。
+
+标坏部分成员失败不能报告全部成功；应尽可能完成其余成员标记并保留首个
+写入错误。核心可能仍将 RAM BBT 标坏，返回值不代表物理 BBM 写入全部成功；
+重启后仍以实际物理 BBM 重扫结果为准。不能以回调成功伪装标记已持久化。
+
+**自定义 block_markbad 不会阻止核心前置擦除。**
+`nand_block_markbad_lowlevel` 在调用它之前已尝试擦除；为满足保留 main、
+LDPC 和其余 OOB 的约束，仍需第 11 节的默认关闭、仅本驱动启用的免擦除扩展。
+不设置 `NAND_BBT_NO_OOB_BBM` 来绕过擦除，因为它也会跳过物理 BBM 标坏调用。
+用户直接 OOB 写 BBM 后同步核心 BBT 的契约也仍需保留，不能仅靠这两个回调解决。
+
+### 3.4 命令接口选择：cmdfunc + waitfunc，不注册 exec_op
+
+本方案采用 NAND core 的 legacy 命令路径，保留 `nand_controller` 用于
+核心协调与 attach_chip，但 `controller.ops->exec_op` 不赋值。
+Linux 7.0.12 的 `nand_erase_op` 在存在 exec_op 时优先走 exec 路径，
+不会因 exec_op 返回“不支持擦除”而自动回退到 cmdfunc。
+因此不能同时注册 exec_op，又假设只有擦除会调用 legacy 回调。
+
+**legacy 是内核命令接口形式，不是串行 RAID 布局。**
+RAID1/RAID5 的成员仍位于同 die、相同 block/row、不同 plane；
+ERASE2 触发一次 multi-plane 擦除，不改成逐成员单块擦除。
+普通页数据仍由 ecc.read_page/write_page 直接编排 multi-plane MMIO。
+
+| 驱动 legacy 回调 | 本设计职责 |
+| --- | --- |
+| cmdfunc | 处理 READID、STATUS、RESET 和核心实际需要的命令；ERASE1 保存逻辑块地址，ERASE2 校验待执行状态并发起组擦除 |
+| waitfunc | 有界等待操作完成，检查全部选中成员；完成后返回 NAND 状态字节，成员擦除失败置 NAND_STATUS_FAIL，超时/传输异常返回负 errno |
+| select_chip | 实现逻辑 target 0 的选择与 -1 的取消选择；不能把逻辑 target 号直接当物理 die 号 |
+| read_byte / read_buf | 提供 READID/STATUS 等命令的数据流；覆盖扫描和默认 helper 实际调用的数据读取路径 |
+| write_buf 及其他必要 hooks | 按选用的默认 helper、feature 命令等实际调用补齐；不使用的功能须明确禁用或拒绝，不能返回伪造成功 |
+
+自定义 cmdfunc/select_chip 不依赖默认 cmd_ctrl 实现；若保留任何依赖
+cmd_ctrl 的默认函数，则必须提供相应 hook。不能只写 ERASE1/ERASE2
+而让 nand_scan 的识别、复位、状态及数据访问落入不可用默认函数。
+扫描前的命令回调必须就绪，不能全部延迟到识别之后的 attach_chip 才安装。
+
+```mermaid
+flowchart TB
+    M["mtd_erase"] --> N["nand_erase → nand_erase_nand<br/>核心检查范围、坏块和锁"]
+    N --> E["nand_erase_op<br/>未注册 exec_op，选择 legacy 路径"]
+    E --> C1["cmdfunc ERASE1<br/>保存逻辑块首个页号并计算成员块"]
+    C1 --> C2["cmdfunc ERASE2<br/>发起一次 multi-plane ERASE"]
+    C2 --> W["waitfunc<br/>有界等待并汇总全部成员状态"]
+    W --> R{"结果"}
+    R -->|"全部成功"| OK["返回正常 NAND 状态<br/>核心继续或结束擦除"]
+    R -->|"成员失败"| Bad["状态含 NAND_STATUS_FAIL<br/>nand_erase_op 返回 -EIO"]
+    R -->|"超时 / 传输错误"| Err["返回负 errno"]
+    Bad --> Out["核心报告失败及逻辑 fail_addr"]
+    Err --> Out
+```
+
+cmdfunc 返回 void，不能直接向核心返回 errno：地址错误、无有效 ERASE1
+就收到 ERASE2、发起失败等必须保存到本次操作的错误状态，由 waitfunc
+返回，且不得发起错误地址的擦除。新操作/RESET 应按状态机清理旧状态，
+超时后必须确认硬件停止或复位完成再复用命令槽，不能把旧完成状态当成新成功。
+READID/STATUS 缓冲与待擦除地址分开保存，状态命令不能覆盖待完成操作结果。
+
+ERASE1 的 page 为逻辑 target 内页号；用精确 pages_per_block 得到逻辑块，
+再按 profile 映射成员。第 10 节精确几何补丁必须同时覆盖
+nand_erase_nand 和 nand_erase_op 的移位计算，改用 legacy 不消除该依赖。
+第 11 节免前置擦除、worker 排空和页缓存失效要求同样保留。
+
 ## 4. ECC 回调契约
 
 | 接口 | 职责 |
@@ -171,7 +333,8 @@ Block 0；两组各占一个逻辑 BBT 条目。
 | `ecc.read_oob/write_oob` | 公开 OOB 与组 BBM；不写映射、CRC 或提交记录 |
 | `ecc.read_page_raw/write_page_raw` | 显式实现或拒绝，不能以普通 ECC 回调假冒 RAW |
 | `ecc.read_oob_raw/write_oob_raw` | 与公开 OOB 使用相同访问边界 |
-| `controller.exec_op` | 识别、状态、复位、擦除、BBM 所需命令适配 |
+| `legacy.cmdfunc / waitfunc` | 命令与完成状态；ERASE1/ERASE2 适配 multi-plane 擦除，不注册 exec_op |
+| `legacy.select_chip / read_byte / read_buf` 等 | 扫描和默认 helper 所需 target 选择及数据流；具体范围见第 3.4 节 |
 
 `page` 为逻辑 target 内页号。RAID5 一次 read_page 必须填满 49152 B
 的 D0/D1/D2；非整页用户读取由 NAND core 截取，任何必要 data 最终不可恢复
@@ -596,6 +759,8 @@ Linux 7.0.12 仍用 page_shift、phys_erase_shift 和掩码计算地址；
 1. `linux/patches/0001-mtd-rawnand-add-exact-geometry-helpers.patch`。
 2. `linux/patches/0002-mtd-rawnand-use-exact-geometry-in-NAND-core.patch`。
 3. `linux/patches/0003-mtd-rawnand-use-exact-geometry-in-NAND-BBT.patch`。
+4. `linux/patches/0004-mtd-rawnand-add-q3n-core-hooks.patch`。
+5. `linux/patches/0005-mtd-rawnand-fix-exact-page-columns.patch`。
 
 覆盖 page/column/target、跨块、最后页、OOB、擦除与 BBT。
 普通二次幂 NAND 保留原快路径；MTD core、UBI、UBIFS 不添加 RAID 分支。
@@ -618,7 +783,7 @@ flowchart TD
     Erase --> EOK{"全部擦除成功？"}
     EOK -->|"是"| Done["返回成功<br/>不产生任何提交清单"]
     EOK -->|"否"| Fail["返回 NAND FAIL / MTD 错误<br/>记录逻辑 fail_addr"]
-    Type -->|"markbad"| Skip["Q3N 启用拟新增的免前置擦除选项"]
+    Type -->|"markbad"| Skip["Q3N 启用免前置擦除选项"]
     Skip --> OOB["仅写 BBM<br/>保留 main、LDPC、其余 OOB"]
     OOB --> BBT["检查各成员结果并同步 RAM BBT"]
     BBT --> MOK{"更新成功？"}
@@ -627,17 +792,17 @@ flowchart TD
 ```
 
 NAND core 默认 markbad 前擦除，需默认关闭、由 Q3N 选择启用的免擦除扩展，
-不能只依赖 legacy.block_markbad。此扩展尚未实现。
+不能只依赖 legacy.block_markbad。当前 core 补丁已实现该 opt-in 扩展。
 
 串行继续异步 parity；当前 NAND core 的 nand_sync 只获取/释放设备锁，
-不会等待驱动 worker。拟增加默认 NULL 的 `nand_chip_ops.sync` hook；
-它是未来 core 扩展，不是现有字段，也不能通过覆盖 MTD _sync 实现。
+不会等待驱动 worker。当前 core 补丁增加默认 NULL 的 `nand_chip_ops.sync`
+hook；Q3N 使用该 hook，而不覆盖 MTD _sync。
 
 ```mermaid
 sequenceDiagram
     participant U as 用户 close / sync
     participant C as NAND core
-    participant D as 驱动 sync hook（拟新增）
+    participant D as 驱动 sync hook
     participant W as parity worker
     participant H as NAND
     U->>C: 请求同步
@@ -662,17 +827,17 @@ PROTECTED 资格，否则无法检验恢复路径。raw 改写、erase、重新�
 
 ## 12. 文件与实施边界
 
-本轮仅设计和文档变更，不执行以下实现步骤。
+用户已要求按本设计实施；以下为实现边界，完成情况以实施清单和测试结果为准。
 
-| 文件/组件 | 后续职责 |
+| 文件/组件 | 当前职责 |
 | --- | --- |
 | main.c / priv.h | nand_chip/controller 生命周期、profile 与 RAM 状态 |
-| 新 controller.c / ecc.c / page.c | 命令、ECC 适配与逻辑页编排 |
+| main.c | legacy 命令状态机、ECC 适配与逻辑页编排；不实现 exec_op |
 | map.c / mp.c | 保留固定地址计算和 multi-plane 传输 |
 | raid.c | 保留 XOR/镜像逻辑，删除新旧 manifest、软件 CRC、持久 generation |
 | sched.c | 保留串行调度，去掉清单依赖，维护 RAM data bitmap |
 | linux/patches 与脚本 | 精确几何、BBM 免擦除、sync/BBT 通知 |
-| QEMU ABI | 保留 main/OOB/LDPC；必要时单独增加串行 RAW 能力 |
+| QEMU ABI | 保留 main/OOB/LDPC 与 RAID 无关的 multi-plane 命令 |
 | 测试与 README | 删除清单相关断言，加入固定映射与 UNKNOWN 限制验收 |
 
 已存在的 raw NAND 介质格式头属于 QEMU 物理存储管理，不作为 RAID 提交依据，

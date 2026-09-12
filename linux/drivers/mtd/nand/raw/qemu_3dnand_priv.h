@@ -11,9 +11,6 @@
 #include <linux/wait.h>
 
 #define Q3N_RAID_MAX_DATA_PAGES	7
-#define Q3N_RAID_META_MAGIC		0x5133
-#define Q3N_RAID_META_VERSION		2
-#define Q3N_LEGACY_META_VERSION		1
 #define Q3N_RAID_NO_PARITY		0xff
 #define Q3N_MAX_PENDING_PARITY		32
 #define Q3N_MAX_PARITY_READ_INFLIGHT	1
@@ -52,21 +49,6 @@ struct q3n_raid_group {
 	struct q3n_phys_addr member[4];
 };
 
-struct q3n_raid_manifest {
-	__le16 magic;
-	u8 version;
-	u8 raid_level;
-	u8 die;
-	u8 member_bitmap;
-	u8 parity_plane;
-	u8 data_pages;
-	__le64 stripe_id;
-	__le32 generation;
-	__le32 data_crc[3];
-	__le32 parity_crc;
-	__le32 header_crc;
-} __packed;
-
 struct q3n_block_barrier {
 	atomic_t pending_parity;
 	bool cancelling;
@@ -81,25 +63,9 @@ enum q3n_stripe_state {
 	Q3N_STRIPE_PARITY_FAILED,
 };
 
-struct q3n_data_meta {
-	__le16 magic;
-	u8 version;
-	u8 slot;
-	__le64 stripe_id;
-	__le32 data_crc;
-	__le32 header_crc;
-} __packed;
-
-struct q3n_parity_manifest {
-	__le16 magic;
-	u8 version;
-	u8 data_pages;
-	__le64 stripe_id;
-	__le16 member_bitmap;
-	__le32 data_crc[Q3N_RAID_MAX_DATA_PAGES];
-	__le32 parity_crc;
-	__le32 header_crc;
-} __packed;
+void q3n_recovery_begin(enum q3n_stripe_state *state);
+void q3n_recovery_complete(enum q3n_stripe_state *state, bool success);
+bool q3n_recovery_allowed(enum q3n_stripe_state state);
 
 struct q3n_open_stripe {
 	u64 stripe_id;
@@ -107,7 +73,6 @@ struct q3n_open_stripe {
 	u8 data_pages;
 	u8 *parity;
 	size_t page_size;
-	u32 data_crc[Q3N_RAID_MAX_DATA_PAGES];
 	enum q3n_stripe_state state;
 };
 
@@ -120,7 +85,6 @@ struct q3n_parity_rebuild {
 	u8 data_pages;
 	u8 *parity_accumulator;
 	size_t page_size;
-	u32 data_crc[Q3N_RAID_MAX_DATA_PAGES];
 };
 
 struct q3n_ecc_result {
@@ -214,27 +178,8 @@ int q3n_open_stripe_update(struct q3n_open_stripe *stripe, u8 slot,
 			   const u8 *data, size_t len);
 int q3n_open_stripe_queue_parity(struct q3n_open_stripe *stripe);
 void q3n_open_stripe_complete_parity(struct q3n_open_stripe *stripe, bool ok);
-int q3n_build_legacy_manifest(const struct q3n_open_stripe *stripe,
-			      struct q3n_parity_manifest *manifest);
-int q3n_validate_manifest(const struct q3n_parity_manifest *manifest);
-int q3n_pack_data_oob(u8 *logical_oob, size_t oob_len,
-		      const struct q3n_data_meta *meta);
-int q3n_unpack_data_oob(const u8 *logical_oob, size_t oob_len,
-			struct q3n_data_meta *meta);
-int q3n_pack_parity_oob(u8 *logical_oob, size_t oob_len,
-			const struct q3n_parity_manifest *manifest);
-int q3n_unpack_parity_oob(const u8 *logical_oob, size_t oob_len,
-			  struct q3n_parity_manifest *manifest);
 int q3n_recover_page(u8 *out, const u8 *parity, const u8 * const *members,
 		     u8 data_pages, u8 missing_slot, size_t len);
-int q3n_build_manifest(const struct q3n_raid_group *group, u32 generation,
-		       const u32 data_crc[3], u32 parity_crc,
-		       struct q3n_raid_manifest *out);
-int q3n_pack_manifest_oob(u8 *oob,
-			  const struct q3n_raid_manifest *manifest);
-int q3n_unpack_manifest_oob(const u8 *oob,
-			    const struct q3n_raid_group *expected,
-			    struct q3n_raid_manifest *out);
 int q3n_raid5_recover(u8 *out, const u8 *parity, const u8 *other0,
 		      const u8 *other1, size_t len);
 int q3n_mp_read(struct q3n_mp_io *io, const struct q3n_mp_buffers *buffers,

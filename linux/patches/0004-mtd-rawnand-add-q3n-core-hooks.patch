@@ -1,0 +1,131 @@
+From: Codex <codex@openai.com>
+Subject: [PATCH 4/5] mtd: rawnand: add opt-in sync and BBM hooks
+
+Keep default NAND behavior unchanged while allowing a controller to preserve
+main data during OOB-only markbad, drain asynchronous work from nand_sync(),
+and reflect direct BBM writes in the standard RAM BBT.
+---
+ drivers/mtd/nand/raw/nand_base.c | 16 ++++++++------
+ drivers/mtd/nand/raw/nand_bbt.c  | 43 ++++++++++++++++++++++++++++++++++++++++
+ include/linux/mtd/rawnand.h      |  7 +++++++
+ 3 files changed, 59 insertions(+), 7 deletions(-)
+
+diff --git a/include/linux/mtd/rawnand.h b/include/linux/mtd/rawnand.h
+--- a/include/linux/mtd/rawnand.h
++++ b/include/linux/mtd/rawnand.h
+@@ -218,6 +218,9 @@ struct gpio_desc;
+  */
+ #define NAND_NO_BBM_QUIRK	BIT(27)
+ 
++/* Controller writes an OOB-only BBM and must preserve block contents. */
++#define NAND_MARKBAD_NO_ERASE	BIT(28)
++
+ /* Cell info constants */
+ #define NAND_CI_CHIPNR_MSK	0x03
+ #define NAND_CI_CELLTYPE_MSK	0x0C
+@@ -1197,6 +1200,7 @@ struct nand_legacy {
+  * @unlock_area: Unlock operation
+  * @setup_read_retry: Set the read-retry mode (mostly needed for MLC NANDs)
+  * @choose_interface_config: Choose the best interface configuration
++ * @sync: Wait for controller-private asynchronous work to complete
+  */
+ struct nand_chip_ops {
+ 	int (*suspend)(struct nand_chip *chip);
+@@ -1206,6 +1210,7 @@ struct nand_chip_ops {
+ 	int (*setup_read_retry)(struct nand_chip *chip, int retry_mode);
+ 	int (*choose_interface_config)(struct nand_chip *chip,
+ 				       struct nand_interface_config *iface);
++	void (*sync)(struct nand_chip *chip);
+ };
+ 
+ /**
+@@ -1584,6 +1589,8 @@ int nand_write_data_op(struct nand_chip *chip, const void *buf,
+ int nand_read_page_hwecc_oob_first(struct nand_chip *chip, uint8_t *buf,
+ 				   int oob_required, int page);
+ 
++int nand_bbt_markbad_from_oob(struct nand_chip *chip, unsigned int page);
++
+ /* Scan and identify a NAND device */
+ int nand_scan_with_ids(struct nand_chip *chip, unsigned int max_chips,
+ 		       struct nand_flash_dev *ids);
+diff --git a/drivers/mtd/nand/raw/nand_base.c b/drivers/mtd/nand/raw/nand_base.c
+--- a/drivers/mtd/nand/raw/nand_base.c
++++ b/drivers/mtd/nand/raw/nand_base.c
+@@ -578,11 +578,13 @@ static int nand_block_markbad_lowlevel(struct nand_chip *chip, loff_t ofs)
+ 	if (!(chip->bbt_options & NAND_BBT_NO_OOB_BBM)) {
+ 		struct erase_info einfo;
+ 
+-		/* Attempt erase before marking OOB */
+-		memset(&einfo, 0, sizeof(einfo));
+-		einfo.addr = ofs;
+-		einfo.len = mtd->erasesize;
+-		nand_erase_nand(chip, &einfo, 0);
++		if (!(chip->options & NAND_MARKBAD_NO_ERASE)) {
++			/* Attempt erase before marking OOB */
++			memset(&einfo, 0, sizeof(einfo));
++			einfo.addr = ofs;
++			einfo.len = mtd->erasesize;
++			nand_erase_nand(chip, &einfo, 0);
++		}
+ 
+ 		/* Write bad block marker to OOB */
+ 		nand_get_device(chip);
+@@ -4631,6 +4633,8 @@ static void nand_sync(struct mtd_info *mtd)
+ 
+ 	/* Grab the lock and see if the device is available */
+ 	nand_get_device(chip);
++	if (chip->ops.sync)
++		chip->ops.sync(chip);
+ 	/* Release it and go back */
+ 	nand_release_device(chip);
+ }
+diff --git a/drivers/mtd/nand/raw/nand_bbt.c b/drivers/mtd/nand/raw/nand_bbt.c
+--- a/drivers/mtd/nand/raw/nand_bbt.c
++++ b/drivers/mtd/nand/raw/nand_bbt.c
+@@ -1491,3 +1491,46 @@ int nand_markbad_bbt(struct nand_chip *this, loff_t offs)
+ 
+ 	return ret;
+ }
++
++/**
++ * nand_bbt_markbad_from_oob - reflect an OOB-only bad-block marker in RAM BBT
++ * @this: selected NAND chip
++ * @page: page relative to the selected target
++ *
++ * Controller drivers which expose direct OOB writes can use this after a BBM
++ * byte was programmed. The caller must hold the NAND device lock. Flash BBTs
++ * are deliberately unsupported because updating those requires the complete
++ * generic markbad transaction.
++ */
++int nand_bbt_markbad_from_oob(struct nand_chip *this, unsigned int page)
++{
++	struct mtd_info *mtd = nand_to_mtd(this);
++	u64 pages_per_target, blocks_per_target, global_block;
++	u32 block_in_target;
++	u8 old;
++
++	if (!this->bbt)
++		return 0;
++	if (this->cur_cs < 0 || this->cur_cs >= nanddev_ntargets(&this->base))
++		return -EINVAL;
++	if (this->bbt_options & NAND_BBT_USE_FLASH)
++		return -EOPNOTSUPP;
++
++	pages_per_target = nanddev_target_size(&this->base) / mtd->writesize;
++	blocks_per_target = nanddev_target_size(&this->base) / mtd->erasesize;
++	if (page >= pages_per_target)
++		return -EINVAL;
++	block_in_target = nand_page_to_eraseblock(this, page);
++	global_block = (u64)this->cur_cs * blocks_per_target + block_in_target;
++	if (global_block > ((u64)~0U >> 1))
++		return -EOVERFLOW;
++
++	old = bbt_get_entry(this, global_block);
++	if (old == BBT_BLOCK_GOOD) {
++		bbt_mark_entry(this, global_block, BBT_BLOCK_WORN);
++		mtd->ecc_stats.badblocks++;
++	}
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(nand_bbt_markbad_from_oob);

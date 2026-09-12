@@ -1,0 +1,65 @@
+From: Codex <codex@openai.com>
+Subject: [PATCH 5/5] mtd: rawnand: use exact page column remainder
+
+---
+ drivers/mtd/nand/raw/internals.h | 17 +++++++++++++++++
+ drivers/mtd/nand/raw/nand_base.c |  6 +++---
+ 2 files changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/mtd/nand/raw/internals.h b/drivers/mtd/nand/raw/internals.h
+--- a/drivers/mtd/nand/raw/internals.h
++++ b/drivers/mtd/nand/raw/internals.h
+@@ -97,6 +97,23 @@ static inline u64 nand_offs_to_page(struct nand_chip *chip, loff_t offs)
+ 	return offs >> chip->page_shift;
+ }
+ 
++static inline u32 nand_offs_in_page(struct nand_chip *chip, loff_t offs)
++{
++	if (nand_has_non_power_of_2_geometry(chip))
++		return offs % nand_to_mtd(chip)->writesize;
++
++	return offs & (nand_to_mtd(chip)->writesize - 1);
++}
++
++static inline bool nand_is_subpage_aligned(struct nand_chip *chip,
++					   loff_t offs)
++{
++	if (nand_has_non_power_of_2_geometry(chip))
++		return !(offs % chip->subpagesize);
++
++	return !(offs & (chip->subpagesize - 1));
++}
++
+ static inline u64 nand_offs_to_eraseblock(struct nand_chip *chip, loff_t offs)
+ {
+ 	if (nand_has_non_power_of_2_geometry(chip))
+diff --git a/drivers/mtd/nand/raw/nand_base.c b/drivers/mtd/nand/raw/nand_base.c
+--- a/drivers/mtd/nand/raw/nand_base.c
++++ b/drivers/mtd/nand/raw/nand_base.c
+@@ -3470,7 +3470,7 @@ static int nand_do_read_ops(struct nand_chip *chip, loff_t from,
+ 	realpage = nand_offs_to_page(chip, from);
+ 	page = nand_page_in_target(chip, realpage);
+ 
+-	col = (int)(from & (mtd->writesize - 1));
++	col = nand_offs_in_page(chip, from);
+ 
+ 	buf = ops->datbuf;
+ 	oob = ops->oobbuf;
+@@ -4300,7 +4300,7 @@ static int nand_write_page(struct nand_chip *chip, uint32_t offset,
+ 	return 0;
+ }
+ 
+-#define NOTALIGNED(x)	((x & (chip->subpagesize - 1)) != 0)
++#define NOTALIGNED(x)	(!nand_is_subpage_aligned(chip, (x)))
+ 
+ /**
+  * nand_do_write_ops - [INTERN] NAND write with ECC
+@@ -4340,7 +4340,7 @@ static int nand_do_write_ops(struct nand_chip *chip, loff_t to,
+ 	if (nand_region_is_secured(chip, to, writelen))
+ 		return -EIO;
+ 
+-	column = to & (mtd->writesize - 1);
++	column = nand_offs_in_page(chip, to);
+ 
+ 	chipnr = nand_offs_to_target(chip, to);
+ 	nand_select_target(chip, chipnr);

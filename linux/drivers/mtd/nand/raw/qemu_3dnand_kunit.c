@@ -2,7 +2,6 @@
 
 #include <kunit/test.h>
 #include <linux/completion.h>
-#include <linux/crc32.h>
 #include <linux/kthread.h>
 #include <linux/unaligned.h>
 
@@ -92,45 +91,10 @@ static void q3n_profile_geometry_values_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, size, 32715571200ULL);
 }
 
-static void q3n_manifest_v2_raid1_oob_and_validation_test(struct kunit *test)
-{
-	struct q3n_geometry geometry = q3n_test_raid_geometry(Q3N_RAID1);
-	struct q3n_raid_group group;
-	struct q3n_raid_manifest manifest;
-	struct q3n_raid_manifest decoded;
-	u32 data_crc[3] = { 0x12345678 };
-	u8 oob[Q3N_LOGICAL_OOB_SIZE];
-
-	KUNIT_ASSERT_EQ(test, q3n_map_raid1_page(&geometry, 0, 4, &group), 0);
-	KUNIT_ASSERT_EQ(test, q3n_build_manifest(&group, 7, data_crc, 0,
-						 &manifest), 0);
-	memset(oob, 0xff, sizeof(oob));
-	oob[0] = 0x5a;
-	KUNIT_ASSERT_EQ(test, q3n_pack_manifest_oob(oob, &manifest), 0);
-	KUNIT_EXPECT_EQ(test, oob[0], (u8)0x5a);
-	KUNIT_EXPECT_MEMEQ(test, oob + 1, &manifest, sizeof(manifest));
-	KUNIT_ASSERT_EQ(test, q3n_unpack_manifest_oob(oob, &group,
-						       &decoded), 0);
-	KUNIT_EXPECT_MEMEQ(test, &decoded, &manifest, sizeof(decoded));
-
-	oob[1 + offsetof(struct q3n_raid_manifest, header_crc)] ^= 1;
-	KUNIT_EXPECT_EQ(test, q3n_unpack_manifest_oob(oob, &group, &decoded),
-			-EBADMSG);
-	manifest.generation = 0;
-	manifest.header_crc = 0;
-	manifest.header_crc = cpu_to_le32(crc32_le(~0, (u8 *)&manifest,
-						    sizeof(manifest)));
-	KUNIT_ASSERT_EQ(test, q3n_pack_manifest_oob(oob, &manifest), 0);
-	KUNIT_EXPECT_EQ(test, q3n_unpack_manifest_oob(oob, &group, &decoded),
-			-EBADMSG);
-}
-
-static void q3n_manifest_v2_raid5_and_recovery_test(struct kunit *test)
+static void q3n_raid5_xor_recovery_test(struct kunit *test)
 {
 	struct q3n_geometry geometry = q3n_test_raid_geometry(Q3N_RAID5);
 	struct q3n_raid_group group;
-	struct q3n_raid_manifest manifest;
-	u32 data_crc[3] = { 1, 2, 3 };
 	u8 d0[16] = { 0x11 };
 	u8 d1[16] = { 0x22 };
 	u8 d2[16] = { 0x33 };
@@ -138,11 +102,8 @@ static void q3n_manifest_v2_raid5_and_recovery_test(struct kunit *test)
 	u8 recovered[16];
 
 	KUNIT_ASSERT_EQ(test, q3n_map_raid5_stripe(&geometry, 0, 3, &group), 0);
-	KUNIT_ASSERT_EQ(test, q3n_build_manifest(&group, 9, data_crc, 4,
-						 &manifest), 0);
-	KUNIT_EXPECT_EQ(test, manifest.raid_level, (u8)Q3N_RAID5);
-	KUNIT_EXPECT_EQ(test, manifest.member_bitmap, (u8)0x0f);
-	KUNIT_EXPECT_EQ(test, manifest.parity_plane, (u8)3);
+	KUNIT_EXPECT_EQ(test, group.member_mask, (u8)0x0f);
+	KUNIT_EXPECT_EQ(test, group.parity_plane, (u8)3);
 
 	q3n_xor_page(parity, d0, sizeof(parity));
 	q3n_xor_page(parity, d1, sizeof(parity));
@@ -351,147 +312,6 @@ q3n_ecc_accumulate_defers_failure_accounting_once_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, total.max_bitflips, 0U);
 	KUNIT_EXPECT_EQ(test, q3n_ecc_result_to_mtd_ret(&total), -EBADMSG);
 	KUNIT_EXPECT_EQ(test, failed, 1U);
-}
-
-static void q3n_manifest_rejects_header_crc_corruption_test(struct kunit *test)
-{
-	u8 parity[16] = {};
-	u8 data[16] = { 0x7c };
-	struct q3n_open_stripe stripe = {
-		.stripe_id = 12,
-		.data_pages = 1,
-		.parity = parity,
-		.page_size = sizeof(parity),
-	};
-	struct q3n_parity_manifest manifest;
-
-	KUNIT_ASSERT_EQ(test, q3n_open_stripe_update(&stripe, 0, data,
-						       sizeof(data)), 0);
-	KUNIT_ASSERT_EQ(test, q3n_build_legacy_manifest(&stripe, &manifest), 0);
-	KUNIT_EXPECT_EQ(test, q3n_validate_manifest(&manifest), 0);
-	manifest.header_crc ^= cpu_to_le32(1);
-	KUNIT_EXPECT_EQ(test, q3n_validate_manifest(&manifest), -EBADMSG);
-}
-
-static void q3n_data_oob_round_trip_preserves_bbm_test(struct kunit *test)
-{
-	u8 logical_oob[128] = {};
-	struct q3n_data_meta meta = {
-		.slot = 3,
-		.stripe_id = cpu_to_le64(0x123456789ULL),
-		.data_crc = cpu_to_le32(0xa5a55a5a),
-	};
-	struct q3n_data_meta decoded;
-
-	KUNIT_ASSERT_EQ(test, q3n_pack_data_oob(logical_oob,
-						 sizeof(logical_oob), &meta), 0);
-	KUNIT_EXPECT_EQ(test, logical_oob[0], (u8)0xff);
-	KUNIT_ASSERT_EQ(test, q3n_unpack_data_oob(logical_oob,
-						   sizeof(logical_oob), &decoded), 0);
-	KUNIT_EXPECT_EQ(test, decoded.slot, meta.slot);
-	KUNIT_EXPECT_EQ(test, decoded.stripe_id, meta.stripe_id);
-	KUNIT_EXPECT_EQ(test, decoded.data_crc, meta.data_crc);
-	KUNIT_EXPECT_MEMEQ(test, logical_oob + 1, &decoded, sizeof(decoded));
-	KUNIT_EXPECT_EQ(test, logical_oob[1 + sizeof(decoded)], (u8)0xff);
-}
-
-static void q3n_data_oob_rejects_corrupt_crc_fields_test(struct kunit *test)
-{
-	u8 logical_oob[128];
-	struct q3n_data_meta meta = {
-		.slot = 1,
-		.stripe_id = cpu_to_le64(17),
-		.data_crc = cpu_to_le32(0x11223344),
-	};
-	struct q3n_data_meta decoded;
-
-	KUNIT_ASSERT_EQ(test, q3n_pack_data_oob(logical_oob,
-						 sizeof(logical_oob), &meta), 0);
-	logical_oob[1 + offsetof(struct q3n_data_meta, data_crc)] ^= 1;
-	KUNIT_EXPECT_EQ(test, q3n_unpack_data_oob(logical_oob,
-						   sizeof(logical_oob), &decoded),
-			-EBADMSG);
-
-	KUNIT_ASSERT_EQ(test, q3n_pack_data_oob(logical_oob,
-						 sizeof(logical_oob), &meta), 0);
-	logical_oob[1 + offsetof(struct q3n_data_meta, header_crc)] ^= 1;
-	KUNIT_EXPECT_EQ(test, q3n_unpack_data_oob(logical_oob,
-						   sizeof(logical_oob), &decoded),
-			-EBADMSG);
-}
-
-static void q3n_parity_oob_round_trip_and_crc_validation_test(struct kunit *test)
-{
-	u8 logical_oob[128] = {};
-	u8 parity[16] = { 0x81 };
-	u8 data[16] = { 0x42 };
-	struct q3n_open_stripe stripe = {
-		.stripe_id = 23,
-		.data_pages = 1,
-		.parity = parity,
-		.page_size = sizeof(parity),
-	};
-	struct q3n_parity_manifest manifest;
-	struct q3n_parity_manifest decoded;
-
-	KUNIT_ASSERT_EQ(test, q3n_open_stripe_update(&stripe, 0, data,
-						       sizeof(data)), 0);
-	stripe.data_crc[0] = 0x11223344;
-	KUNIT_ASSERT_EQ(test, q3n_build_legacy_manifest(&stripe, &manifest), 0);
-	KUNIT_ASSERT_EQ(test, q3n_pack_parity_oob(logical_oob,
-						   sizeof(logical_oob), &manifest), 0);
-	KUNIT_EXPECT_EQ(test, logical_oob[0], (u8)0xff);
-	KUNIT_ASSERT_EQ(test, q3n_unpack_parity_oob(logical_oob,
-						     sizeof(logical_oob), &decoded), 0);
-	KUNIT_EXPECT_MEMEQ(test, &decoded, &manifest, sizeof(decoded));
-	KUNIT_EXPECT_MEMEQ(test, logical_oob + 1, &manifest, sizeof(manifest));
-	KUNIT_EXPECT_EQ(test, le32_to_cpu(decoded.data_crc[0]),
-			stripe.data_crc[0]);
-	KUNIT_EXPECT_EQ(test,
-		logical_oob[1 + offsetof(struct q3n_parity_manifest, data_crc)],
-		(u8)0x44);
-	KUNIT_EXPECT_EQ(test,
-		logical_oob[2 + offsetof(struct q3n_parity_manifest, data_crc)],
-		(u8)0x33);
-	KUNIT_EXPECT_EQ(test,
-		logical_oob[3 + offsetof(struct q3n_parity_manifest, data_crc)],
-		(u8)0x22);
-	KUNIT_EXPECT_EQ(test,
-		logical_oob[4 + offsetof(struct q3n_parity_manifest, data_crc)],
-		(u8)0x11);
-
-	logical_oob[1 + offsetof(struct q3n_parity_manifest, data_crc)] ^= 1;
-	KUNIT_EXPECT_EQ(test, q3n_unpack_parity_oob(logical_oob,
-						     sizeof(logical_oob), &decoded),
-			-EBADMSG);
-	KUNIT_ASSERT_EQ(test, q3n_pack_parity_oob(logical_oob,
-						   sizeof(logical_oob), &manifest), 0);
-	logical_oob[1 + offsetof(struct q3n_parity_manifest, parity_crc)] ^= 1;
-	KUNIT_EXPECT_EQ(test, q3n_unpack_parity_oob(logical_oob,
-						     sizeof(logical_oob), &decoded),
-			-EBADMSG);
-	KUNIT_ASSERT_EQ(test, q3n_pack_parity_oob(logical_oob,
-						   sizeof(logical_oob), &manifest), 0);
-	logical_oob[1 + offsetof(struct q3n_parity_manifest, header_crc)] ^= 1;
-	KUNIT_EXPECT_EQ(test, q3n_unpack_parity_oob(logical_oob,
-						     sizeof(logical_oob), &decoded),
-			-EBADMSG);
-}
-
-static void q3n_oob_helpers_reject_short_buffers_test(struct kunit *test)
-{
-	u8 logical_oob[128];
-	struct q3n_data_meta data_meta = {};
-	struct q3n_parity_manifest manifest = {};
-
-	KUNIT_EXPECT_EQ(test, q3n_pack_data_oob(logical_oob,
-						 sizeof(data_meta), &data_meta), -EINVAL);
-	KUNIT_EXPECT_EQ(test, q3n_unpack_data_oob(logical_oob,
-						   sizeof(data_meta), &data_meta), -EINVAL);
-	KUNIT_EXPECT_EQ(test, q3n_pack_parity_oob(logical_oob,
-						   sizeof(manifest), &manifest), -EINVAL);
-	KUNIT_EXPECT_EQ(test, q3n_unpack_parity_oob(logical_oob,
-						     sizeof(manifest), &manifest), -EINVAL);
 }
 
 static void q3n_open_stripe_is_unprotected_until_parity_completes_test(struct kunit *test)
@@ -773,13 +593,29 @@ static void q3n_block_barrier_terminal_put_wakes_on_drain_test(struct kunit *tes
 	KUNIT_EXPECT_EQ(test, q3n_block_pending(&cancel), 0);
 }
 
+static void q3n_ram_only_recovery_qualification_test(struct kunit *test)
+{
+	enum q3n_stripe_state state = Q3N_STRIPE_EMPTY;
+
+	KUNIT_EXPECT_FALSE(test, q3n_recovery_allowed(state));
+	q3n_recovery_begin(&state);
+	KUNIT_EXPECT_EQ(test, state, Q3N_STRIPE_UNPROTECTED);
+	q3n_recovery_complete(&state, false);
+	KUNIT_EXPECT_FALSE(test, q3n_recovery_allowed(state));
+	q3n_recovery_begin(&state);
+	q3n_recovery_complete(&state, true);
+	KUNIT_EXPECT_EQ(test, state, Q3N_STRIPE_PROTECTED);
+	KUNIT_EXPECT_TRUE(test, q3n_recovery_allowed(state));
+	q3n_recovery_begin(&state);
+	KUNIT_EXPECT_FALSE(test, q3n_recovery_allowed(state));
+}
+
 static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_bad_block_oob_marks_only_bbm_test),
 	KUNIT_CASE(q3n_raid1_plane_pair_mapping_test),
 	KUNIT_CASE(q3n_raid5_die_block_and_parity_rotation_test),
 	KUNIT_CASE(q3n_profile_geometry_values_test),
-	KUNIT_CASE(q3n_manifest_v2_raid1_oob_and_validation_test),
-	KUNIT_CASE(q3n_manifest_v2_raid5_and_recovery_test),
+	KUNIT_CASE(q3n_raid5_xor_recovery_test),
 	KUNIT_CASE(q3n_map_separate_parity_block_test),
 	KUNIT_CASE(q3n_map_non_power_of_two_geometry_test),
 	KUNIT_CASE(q3n_map_rejects_invalid_input_test),
@@ -791,11 +627,6 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_ecc_accumulate_uses_max_and_sums_corrected_test),
 	KUNIT_CASE(q3n_ecc_accumulate_preserves_threshold_test),
 	KUNIT_CASE(q3n_ecc_accumulate_defers_failure_accounting_once_test),
-	KUNIT_CASE(q3n_manifest_rejects_header_crc_corruption_test),
-	KUNIT_CASE(q3n_data_oob_round_trip_preserves_bbm_test),
-	KUNIT_CASE(q3n_data_oob_rejects_corrupt_crc_fields_test),
-	KUNIT_CASE(q3n_parity_oob_round_trip_and_crc_validation_test),
-	KUNIT_CASE(q3n_oob_helpers_reject_short_buffers_test),
 	KUNIT_CASE(q3n_open_stripe_is_unprotected_until_parity_completes_test),
 	KUNIT_CASE(q3n_recover_single_missing_page_test),
 	KUNIT_CASE(q3n_rebuild_processes_one_member_per_step_test),
@@ -809,6 +640,7 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_scheduler_waits_for_state_change_test),
 	KUNIT_CASE(q3n_block_barrier_blocks_new_work_and_drains_test),
 	KUNIT_CASE(q3n_block_barrier_terminal_put_wakes_on_drain_test),
+	KUNIT_CASE(q3n_ram_only_recovery_qualification_test),
 	{}
 };
 

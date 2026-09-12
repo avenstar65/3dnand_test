@@ -1,12 +1,32 @@
 # Page-RAID1/RAID5：ECC 接口与无 manifest 迁移清单
 
-修订日期：2026-09-11。
+修订日期：2026-09-12。
 
-**状态：仅刷新设计，以下任务全部尚未执行。**
-当前实现基线仍为 `22b9519`，使用 direct MTD 和 manifest。
-本清单不授权本轮修改代码、ABI、内核补丁或执行构建。
+**状态：多-plane RAID1/RAID5 已实现并验收。**
+实现已从 direct MTD/manifest 迁移到 NAND core `ecc.*`、固定映射和标准
+RAM BBT。按最终范围，宏 0 只保留原串行代码的构建回退，不再扩展串行
+RAID 验收；交付重点为宏 1 的同 die、多 plane RAID1/RAID5。
 
 规范：[ECC 回调与固定页映射设计](../specs/2026-08-30-multiplane-page-raid1-raid5-design.md)。
+
+## 0. 实施结果
+
+| 阶段 | 结果 | 验证 |
+| --- | --- | --- |
+| A 精确几何/core 契约 | 完成 | 真实 Linux core 补丁应用、重复应用、非二次幂地址与 BBT 单测 |
+| B NAND/ECC 接入 | 完成 | 默认内核构建、`nand_scan_with_ids()` 启动与 MTD 注册 |
+| C 固定映射/无 manifest | 完成 | KUnit 映射轮转及源码残留检查 |
+| D 多-plane RAID1/5 | 完成 | RAID1、RAID5 单故障恢复与双故障拒绝 smoke |
+| E OOB/BBT/生命周期 | 完成 | 跨重启数据摘要与 BBM/BBT 重建 smoke |
+| F 串行回退 | 仅构建 | 按最终范围不扩展或验收串行 RAID；宏 0 保留编译回退 |
+
+下方复选项保留为原实施分解与审查追溯，不再作为最终范围状态；最终结果
+以本表、设计文档第 13 节及实际测试输出为准。
+
+实施前先按规范第 1 节确认 MTD 接口覆盖：普通读写、OOB、擦除、坏块查询、
+标坏、同步及 RAW 的支持/拒绝边界。MTD 入口由核心提供，驱动挂接
+ecc.*、legacy 命令及 block_bad/block_markbad 回调和新增 sync hook；
+后续任务均以这张接口责任表为范围基准，不直接实现或覆盖 MTD I/O 回调。
 
 ## 1. 固定约束
 
@@ -44,7 +64,7 @@ flowchart TD
 - [ ] 核对 Linux 7.0.12 读写、OOB、擦除、target、BBT 的除法与取模。
 - [ ] 支持 16384/49152 writesize、1400/1600 pages/block，保留二次幂快路径。
 - [ ] 新增默认关闭的 markbad 免前置擦除选项；legacy.block_markbad 不足以替代。
-- [ ] 定义默认 NULL 的 NAND chip sync 扩展；这不是当前已有 API。
+- [ ] 定义默认 NULL 的 NAND chip sync 扩展；它由本次 core 补丁新增。
 - [ ] 明确 OOB-only BBM 写入后的 RAM BBT 更新契约。
 - [ ] 验证默认设备行为不变、补丁可重复应用且失败中止。
 
@@ -64,8 +84,25 @@ flowchart TD
   传输错误使扫描失败，不依赖 main ECC 或条带恢复资格。
 - [ ] 验证出厂坏块、任意 plane 坏标记、全好块、BBM 读取失败、BBT 分配失败、
   最后逻辑块和重启重建；block_isbad/markbad 使用 NAND core 而非 MTD 私有回调。
-- [ ] exec_op 适配识别、状态、擦除和 BBM；check_only 不访问介质。
+- [ ] 不注册 controller.ops->exec_op，保留 controller/attach_chip；scan 前
+  安装 cmdfunc、waitfunc、select_chip、read_byte/read_buf 及实际需要的数据 hooks。
+- [ ] legacy 路径支持逻辑 READID、STATUS、RESET；审计默认 helper 对
+  cmd_ctrl/write_buf 等的依赖，不把未实现命令伪装为成功。
+- [ ] ERASE1 保存并校验逻辑块地址，ERASE2 发起一次 multi-plane 擦除；
+  waitfunc 汇总成员 NAND 状态或返回负 errno，不采用逐成员串行擦除。
+- [ ] 为 void cmdfunc 保存本次操作错误，经 waitfunc 返回；验证无 ERASE1
+  的 ERASE2、地址非法、成员失败、超时、RESET 和旧完成状态隔离。
+- [ ] 验证真实 nand_erase → nand_erase_op → cmdfunc/waitfunc 调用链，
+  精确几何补丁覆盖两处擦除页号计算；免前置擦除和 worker 同步要求不变。
 - [ ] attach_chip 设置 ecc.read_page/write_page 及 OOB/RAW 回调。
+- [ ] 按规范第 3.3 节注册 legacy.block_bad / legacy.block_markbad，
+  与 ecc.read_oob/write_oob 共用成员映射和 BBM helper；不替换 MTD 坏块回调。
+- [ ] 验证初始化 BBT 扫描经过 ecc.read_oob 而非 block_bad；有 BBT 的查询
+  直接查核心表，无 BBT 的底层 BBM 查询才使用 block_bad。
+- [ ] 验证 block_markbad 广播全部成员标记、错误不被吞掉、核心更新 BBT；
+  回调不递归调用 MTD、不重复获取设备锁，也不自行修改核心 BBT。
+- [ ] 覆盖标坏部分失败与重启重扫；保留免前置擦除 opt-in 和用户 OOB 写后
+  BBT 同步依赖，不以 NAND_BBT_NO_OOB_BBM 绕过物理标记写入。
 - [ ] RAID5 始终读取完整 48 KiB 逻辑页；关闭 subpage 读写。
 - [ ] 正常读取返回最大 bitflips，恢复成功提升到阈值。
 - [ ] 不可恢复时每逻辑页增加一次 failed，由 core 生成 EBADMSG；
@@ -117,7 +154,7 @@ flowchart TD
 - [ ] 多-plane raw main 返回 EOPNOTSUPP；raw OOB 限于 BBM。
 - [ ] 串行真正 raw main 需要 capability 协商，不把普通 ECC 回调别名为 raw；
   缺能力明确拒绝，具体命令号仅在实施阶段分配。
-- [ ] 保留 P0>P1>P2 调度；通过拟新增 sync hook 排空 worker，包括 close 路径。
+- [ ] 保留 P0>P1>P2 调度；通过新增 sync hook 排空 worker，包括 close 路径。
 - [ ] 遵守 core 锁 → 状态锁 → MMIO；worker 不拿 core 锁，
   等待 worker 时不持有它需要的状态锁。
 - [ ] erase/markbad/remove 阻止新工作并正确排空或取消；清理相关恢复资格。
@@ -138,4 +175,4 @@ BBT 即时与重启一致，并发 sync/erase/markbad/remove 无死锁。
 - [ ] 验证串行地址/容量/调度兼容，不宣称继承旧清单保护状态。
 - [ ] 检查 kernel oops、lockdep、RCU stall，不只判断成功 marker。
 - [ ] 仅在实施并验收后将 README 当前行为改为无 manifest；
-  本轮保留“设计未实施”与当前实现说明。
+  在全部相关验收完成前保留未完成项和当前实现限制说明。

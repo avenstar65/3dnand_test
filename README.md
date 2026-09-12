@@ -105,12 +105,15 @@ LDPC。Linux 标坏通过普通 OOB PROGRAM 将 logical OOB byte 0 编程为 `00
 
 ## Multi-plane Page RAID1 / RAID5
 
-设计更新（2026-09-11）：后续拟迁移至 NAND core 的 `nand_chip.ecc.*`
-接口，并取消 RAID manifest，改用代码固定计算 parity / mirror 位置。
+实现更新（2026-09-12）：驱动通过 `nand_scan_with_ids()` 接入 NAND core，
+读写由 `nand_chip.ecc.*` 回调完成，擦除使用 legacy `cmdfunc + waitfunc`，
+未提供 `exec_op`。RAID 不使用 manifest，parity / mirror 位置由代码固定计算。
 无持久化提交证据时，重启后不自动恢复不可纠数据；完整限制见
 [ECC 与固定页映射设计](docs/superpowers/specs/2026-08-30-multiplane-page-raid1-raid5-design.md)
 及 [迁移任务清单](docs/superpowers/plans/2026-08-30-multiplane-page-raid1-raid5-implementation.md)。
-目前仅更新设计，当前代码仍使用 direct MTD 回调和 manifest；以下说明描述现有实现。
+
+`Q3N_ENABLE_MULTIPLANE_RAID=1`（默认）启用同 die 多 plane RAID1/RAID5；
+设为 `0` 时保留原有串行 D0..D6/P 布局。
 
 控制器固定为 2 die × 4 plane，冗余成员始终位于同一 die，不做跨 die
 备份。加载驱动时用只读参数选择 profile：
@@ -120,11 +123,10 @@ modprobe qemu_3dnand raid_level=1   # plane0/1、plane2/3 镜像，16 KiB 写对
 modprobe qemu_3dnand                # 默认 RAID5，3D+1P，48 KiB 写对齐
 ```
 
-RAID5 的 parity plane 按 stripe ID 在 0、1、2、3 间轮转。主数据通过一次
-multi-plane PROGRAM 写入；所有主成员成功后，再用独立的 multi-plane OOB
-PROGRAM 发布 v2 manifest。OOB byte 0 仍是 BBM，manifest 从 byte 1 开始，
-这 127 B 是驱动私有区域，不作为公共 MTD OOB 暴露。旧串行 D0..D6/P 介质
-没有 v2 manifest，切换到新 profile 时应使用 `--fresh-nand`。
+RAID5 的 parity plane 按 stripe ID 在 0、1、2、3 间轮转。主数据与 parity
+通过一次 multi-plane PROGRAM 写入；RAID1 的两个镜像也由一次 multi-plane
+PROGRAM 完成。多 plane 模式的逻辑 OOB 只保留坏块标记 byte 0，`oobavail=0`；
+不会在 OOB 中写入 RAID 元数据。切换 profile 时应使用 `--fresh-nand`。
 
 验收命令：
 
@@ -141,9 +143,8 @@ PROGRAM 发布 v2 manifest。OOB byte 0 仍是 BBM，manifest 从 byte 1 开始�
 ./scripts/q3n-persistence-smoke.sh
 ```
 
-脚本执行两轮 guest，验证 RAID5 v2 manifest 数据和同 die 四 plane 坏块组
-状态跨重启保留。QEMU 不解释 RAID 布局；映射、manifest 和恢复策略始终由
-Linux 驱动管理。
+脚本执行两轮 guest，验证数据和同 die 多 plane 坏块组状态跨重启保留。
+QEMU 不解释 RAID 布局；映射和当前启动周期内的恢复资格由 Linux 驱动管理。
 
 自动执行 MTD smoke 并在成功后关闭虚拟机：
 

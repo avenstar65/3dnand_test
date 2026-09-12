@@ -591,7 +591,7 @@ mtd_q3n_persist_prepare() {
   writesize=$(cat "/sys/class/mtd/mtd${mtd_num}/writesize") || return 1
   flash_erase -q "$mtd_dev" 0 2 || return 1
   dd if=/dev/zero of=/tmp/q3n-persist-pattern.bin bs="$writesize" count=1 2>/dev/null || return 1
-  printf 'q3n-raid5-persistent-manifest\n' |
+  printf 'q3n-raid5-persistent-data\n' |
     dd of=/tmp/q3n-persist-pattern.bin conv=notrunc 2>/dev/null || return 1
   dd if=/tmp/q3n-persist-pattern.bin of="$mtd_dev" bs="$writesize" count=1 2>/dev/null || return 1
   dd if="$mtd_dev" of=/tmp/q3n-persist-main-before.bin bs="$writesize" count=1 2>/dev/null || return 1
@@ -613,7 +613,7 @@ mtd_q3n_persist_verify() {
   erasesize=$(cat "/sys/class/mtd/mtd${mtd_num}/erasesize") || return 1
   writesize=$(cat "/sys/class/mtd/mtd${mtd_num}/writesize") || return 1
   dd if=/dev/zero of=/tmp/q3n-persist-pattern.bin bs="$writesize" count=1 2>/dev/null || return 1
-  printf 'q3n-raid5-persistent-manifest\n' |
+  printf 'q3n-raid5-persistent-data\n' |
     dd of=/tmp/q3n-persist-pattern.bin conv=notrunc 2>/dev/null || return 1
   dd if="$mtd_dev" of=/tmp/q3n-persist-main-verified.bin bs="$writesize" count=1 2>/dev/null || return 1
   cmp /tmp/q3n-persist-pattern.bin /tmp/q3n-persist-main-verified.bin || return 1
@@ -904,12 +904,8 @@ mtd_q3n_profile_smoke() {
   [ "$(cat /sys/class/mtd/mtd$mtd_num/writesize)" = "$write_size" ] || return 1
   [ "$(cat /sys/kernel/debug/qemu_3dnand/raid_level)" = "$level" ] || return 1
   flash_erase "$mtd_dev" 0 1 || return 1
-  dd if=/dev/zero of=/tmp/q3n-profile.bin bs="$write_size" count=1 2>/dev/null || return 1
-  printf 'q3n-raid%s-multiplane\n' "$level" |
-    dd of=/tmp/q3n-profile.bin conv=notrunc 2>/dev/null || return 1
-  dd if=/tmp/q3n-profile.bin of="$mtd_dev" bs="$write_size" count=1 2>/dev/null || return 1
-  dd if="$mtd_dev" of=/tmp/q3n-profile-read.bin bs="$write_size" count=1 2>/dev/null || return 1
-  cmp /tmp/q3n-profile.bin /tmp/q3n-profile-read.bin || return 1
+  mtd_badblock data-write "$mtd_dev" 0 0x5a || return 1
+  mtd_badblock data-read "$mtd_dev" 0 0x5a || return 1
   recovered_before=$(cat /sys/kernel/debug/qemu_3dnand/raid_recovered)
   if [ "$level" = 1 ]; then
     first_bad=0
@@ -919,14 +915,15 @@ mtd_q3n_profile_smoke() {
     second_bad=2
   fi
   echo "$first_bad" > /sys/kernel/debug/qemu_3dnand/inject_profile_plane_loss || return 1
-  dd if="$mtd_dev" of=/tmp/q3n-profile-recovered.bin bs=16384 count=1 2>/dev/null || return 1
-  dd if=/tmp/q3n-profile.bin of=/tmp/q3n-profile-expected.bin bs=16384 count=1 2>/dev/null || return 1
-  cmp /tmp/q3n-profile-expected.bin /tmp/q3n-profile-recovered.bin || return 1
+  mtd_badblock data-read "$mtd_dev" 0 0x5a || return 1
   recovered_after=$(cat /sys/kernel/debug/qemu_3dnand/raid_recovered)
   [ "$recovered_after" -gt "$recovered_before" ] || return 1
   failed_before=$(cat /sys/kernel/debug/qemu_3dnand/raid_failed)
   echo "$second_bad" > /sys/kernel/debug/qemu_3dnand/inject_profile_plane_loss || return 1
-  dd if="$mtd_dev" of=/tmp/q3n-profile-double-fail.bin bs=16384 count=1 2>/dev/null || true
+  if mtd_badblock data-read "$mtd_dev" 0 0x5a; then
+    echo "q3n RAID$level double-member loss unexpectedly read successfully"
+    return 1
+  fi
   failed_after=$(cat /sys/kernel/debug/qemu_3dnand/raid_failed)
   [ "$failed_after" -gt "$failed_before" ] || return 1
   [ "$(cat /sys/kernel/debug/qemu_3dnand/multiplane_commands)" -gt 0 ] || return 1
