@@ -880,12 +880,14 @@ static void qemu_3dnand_profile_account_ecc(struct qemu_3dnand *q3n,
 	q3n->mtd->ecc_stats.corrected += ecc->corrected_bits;
 }
 
+#if Q3N_ENABLE_MULTIPLANE_RAID
 static void qemu_3dnand_profile_invalidate_leb(struct qemu_3dnand *q3n,
 					       u64 leb)
 {
 	memset(&q3n->profile_state[leb * q3n->pages_per_block], 0,
 	       q3n->pages_per_block * sizeof(*q3n->profile_state));
 }
+#endif
 
 static int qemu_3dnand_profile_read_page(struct qemu_3dnand *q3n,
 					 loff_t from, u8 *out)
@@ -1876,6 +1878,7 @@ static int qemu_3dnand_ecc_write_page_raw(struct nand_chip *chip,
 	return -EOPNOTSUPP;
 }
 
+#if Q3N_ENABLE_MULTIPLANE_RAID
 static int qemu_3dnand_block_bad(struct nand_chip *chip, loff_t ofs)
 {
 	struct qemu_3dnand *q3n = qemu_3dnand_from_chip(chip);
@@ -1899,6 +1902,7 @@ static int qemu_3dnand_block_markbad(struct nand_chip *chip, loff_t ofs)
 	q3n->core_markbad = false;
 	return ret;
 }
+#endif
 
 static int qemu_3dnand_erase_page(struct qemu_3dnand *q3n, u32 page)
 {
@@ -2128,8 +2132,10 @@ static int qemu_3dnand_register_mtd(struct qemu_3dnand *q3n)
 	q3n->chip.legacy.read_buf = qemu_3dnand_read_buf;
 	q3n->chip.legacy.write_buf = qemu_3dnand_write_buf;
 	q3n->chip.legacy.select_chip = qemu_3dnand_select_chip;
+#if Q3N_ENABLE_MULTIPLANE_RAID
 	q3n->chip.legacy.block_bad = qemu_3dnand_block_bad;
 	q3n->chip.legacy.block_markbad = qemu_3dnand_block_markbad;
+#endif
 	q3n->chip.ops.sync = qemu_3dnand_sync;
 
 	mtd = nand_to_mtd(&q3n->chip);

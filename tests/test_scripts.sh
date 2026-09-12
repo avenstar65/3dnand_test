@@ -64,6 +64,14 @@ assert_function_precedes() {
     fail "$function in $file does not place $first_pattern before $second_pattern"
 }
 
+preprocess_register_mtd() {
+	mode=$1
+	sed -n '/^static int qemu_3dnand_register_mtd(/,/^static int qemu_3dnand_inject_data_loss(/p' \
+		"$repo_root/linux/drivers/mtd/nand/raw/qemu_3dnand_main.c" |
+		sed '$d' |
+		cc -E -P -x c -DQ3N_ENABLE_MULTIPLANE_RAID="$mode" -
+}
+
 for file in \
   Dockerfile \
   .dockerignore \
@@ -561,6 +569,20 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'nand_scan_with_id
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'chip->ecc.read_page = qemu_3dnand_ecc_read_page'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'chip.legacy.block_bad = qemu_3dnand_block_bad'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'chip.legacy.block_markbad = qemu_3dnand_block_markbad'
+enabled_register_mtd=$(preprocess_register_mtd 1)
+disabled_register_mtd=$(preprocess_register_mtd 0)
+printf '%s\n' "$enabled_register_mtd" |
+	grep -Fq 'q3n->chip.legacy.block_bad = qemu_3dnand_block_bad;' ||
+	fail 'multi-plane mode does not register block_bad'
+printf '%s\n' "$enabled_register_mtd" |
+	grep -Fq 'q3n->chip.legacy.block_markbad = qemu_3dnand_block_markbad;' ||
+	fail 'multi-plane mode does not register block_markbad'
+! printf '%s\n' "$disabled_register_mtd" |
+	grep -Fq 'q3n->chip.legacy.block_bad = qemu_3dnand_block_bad;' ||
+	fail 'non-multi-plane mode unexpectedly registers block_bad'
+! printf '%s\n' "$disabled_register_mtd" |
+	grep -Fq 'q3n->chip.legacy.block_markbad = qemu_3dnand_block_markbad;' ||
+	fail 'non-multi-plane mode unexpectedly registers block_markbad'
 assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'mtd->_read ='
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'qemu_3dnand_profile_invalidate_leb'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_main.c 'result.success_mask != group.member_mask'

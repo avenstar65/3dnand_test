@@ -113,7 +113,9 @@ LDPC。Linux 标坏通过普通 OOB PROGRAM 将 logical OOB byte 0 编程为 `00
 及 [迁移任务清单](docs/superpowers/plans/2026-08-30-multiplane-page-raid1-raid5-implementation.md)。
 
 `Q3N_ENABLE_MULTIPLANE_RAID=1`（默认）启用同 die 多 plane RAID1/RAID5；
-设为 `0` 时保留原有串行 D0..D6/P 布局。
+设为 `0` 时保留原有串行 D0..D6/P 布局。驱动只在宏为 `1` 时注册 NAND
+`legacy.block_bad/block_markbad`；宏为 `0` 时不接管这两个回调，沿用
+NAND core 默认坏块处理。
 
 控制器固定为 2 die × 4 plane，冗余成员始终位于同一 die，不做跨 die
 备份。加载驱动时用只读参数选择 profile：

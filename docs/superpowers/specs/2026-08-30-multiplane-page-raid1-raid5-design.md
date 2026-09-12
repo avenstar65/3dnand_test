@@ -24,8 +24,8 @@ nand_chip / controller 回调，不直接接管 mtd_info 的 I/O 函数指针。
 | OOB 读取：mtd_read_oob / _read_oob | nand_read_oob | ecc.read_oob，明确 raw OOB 回调 | 对外仅组 BBM；任一成员坏则合成坏标记，同时供 nand_scan 建 BBT 使用 |
 | OOB 写入：mtd_write_oob / _write_oob | nand_write_oob | ecc.write_oob，明确 raw OOB 回调 | 将允许的 BBM 更新广播到成员，保护 main/LDPC/其他 OOB，需同步核心 BBT |
 | 擦除：mtd_erase / _erase | nand_erase → nand_erase_op | legacy.cmdfunc + legacy.waitfunc | ERASE1 保存逻辑地址，ERASE2 发起 multi-plane 擦除；汇总成员结果，由核心报告逻辑 fail_addr |
-| 坏块查询：mtd_block_isbad / _block_isbad | nand_block_isbad：有 BBT 查表，无 BBT 查 BBM | legacy.block_bad；初始化另需 ecc.read_oob | 任一成员坏则整逻辑块坏，不自行维护 BBT |
-| 标坏：mtd_block_markbad / _block_markbad | nand_block_markbad 管理流程与 BBT 更新 | legacy.block_markbad 广播物理 BBM | 保留 main 的要求依赖免前置擦除 core 扩展，不能只靠该回调 |
+| 坏块查询：mtd_block_isbad / _block_isbad | nand_block_isbad：有 BBT 查表，无 BBT 查 BBM | 仅 multi-plane 模式注册 legacy.block_bad；初始化另需 ecc.read_oob | 任一成员坏则整逻辑块坏，不自行维护 BBT；宏 0 沿用核心默认处理 |
+| 标坏：mtd_block_markbad / _block_markbad | nand_block_markbad 管理流程与 BBT 更新 | 仅 multi-plane 模式注册 legacy.block_markbad，广播物理 BBM | 保留 main 的要求依赖免前置擦除 core 扩展；宏 0 沿用核心默认处理 |
 | 同步：mtd_sync / _sync | nand_sync | 对接新增的 NAND chip sync hook，不覆盖 _sync | 完成在途工作；兼容模式还须排空后台 parity，具体锁契约见第 11 节 |
 | RAW 请求：MTD_OPS_RAW | 仍经核心 OOB I/O 分派，不是独立 _raw 接口 | ecc.read_page_raw/write_page_raw 与 read_oob_raw/write_oob_raw | 多-plane raw main 明确返回 EOPNOTSUPP，raw OOB 仅 BBM，不伪装支持 |
 
@@ -47,6 +47,9 @@ nand_chip / controller 回调，不直接接管 mtd_info 的 I/O 函数指针。
   整页要求的写入。逻辑地址、retlen 与 ECC 错误必须保持 MTD 语义。
 - BBT、MTD 注册及核心资源清理由 NAND core 契约管理；驱动负责 MMIO、
   成员映射、RAID、缓冲与 worker 生命周期。
+- `Q3N_ENABLE_MULTIPLANE_RAID=1` 时才注册 `legacy.block_bad` 和
+  `legacy.block_markbad`；宏为 0 时两个指针保持未赋值，由 NAND core 的
+  默认 BBM/BBT 路径处理，驱动不接管坏块查询和标坏。
 - _block_isreserved 等核心附带能力继续由核心管理；lock/unlock、panic write、
   OTP 等不作为本轮新增 RAID 能力，不能将核心默认入口存在等同于已验收支持。
 
@@ -55,7 +58,9 @@ flowchart TB
     M["一个逻辑 MTD 设备<br/>读、写、OOB、擦除、坏块、sync"]
     M --> C["NAND core 提供 MTD 入口<br/>nand_scan 建 BBT，管理分页与返回语义"]
     C --> E["驱动 ecc.*<br/>逻辑页与 OOB I/O"]
-    C --> B["驱动 legacy.block_bad / block_markbad<br/>物理 BBM 查询与广播"]
+    C --> G{"multi-plane RAID<br/>是否启用？"}
+    G -->|"是"| B["驱动 legacy.block_bad / block_markbad<br/>物理 BBM 查询与广播"]
+    G -->|"否"| D["保持回调未赋值<br/>NAND core 默认坏块处理"]
     C --> O["驱动 legacy 命令接口<br/>cmdfunc / waitfunc / 数据 / target 选择"]
     C --> S["chip sync hook<br/>等待工作完成"]
     E --> R["固定逻辑到物理映射<br/>同 die、同 block/row、不同 plane"]
@@ -227,6 +232,8 @@ Block 0；两组各占一个逻辑 BBT 条目。
 `chip->legacy.block_markbad`、NAND core 管理 BBT 的方案。
 这两个是 nand_chip 的底层回调，不是 MTD `_block_isbad/_block_markbad`，
 也不是 `ecc.*` 字段；普通页与 OOB I/O 仍按第 4 节接入 ECC 回调。
+这两个回调的实现和注册都受 `Q3N_ENABLE_MULTIPLANE_RAID` 编译条件保护；
+宏为 0 时不注册，避免串行模式错误复用多-plane 成员映射和广播语义。
 
 **只实现两个 block 回调不够：初始化 BBT 扫描仍必须提供 OOB 读取路径。**
 本地 Linux 7.0.12 的 `nand_bbt.c:scan_block_fast` 通过
@@ -244,6 +251,9 @@ Block 0；两组各占一个逻辑 BBT 条目。
 
 ```mermaid
 flowchart TB
+    Mode{"Q3N_ENABLE_MULTIPLANE_RAID"}
+    Mode -->|"0"| Default["不注册 block_bad / block_markbad<br/>沿用 NAND core 默认路径"]
+    Mode -->|"1"| Init
     Init["初始化：nand_scan"] --> Scan["nand_create_bbt / nand_scan_bbt"]
     Scan --> OOB["mtd_read_oob → ecc.read_oob<br/>合成多-plane BBM"]
     OOB --> Create["核心建立 RAM BBT"]
