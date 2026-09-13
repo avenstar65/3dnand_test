@@ -15,6 +15,9 @@ struct q3n_device_desc {
 	u32 logical_oob_size;
 	u32 physical_oob_size;
 	u32 pages_per_block;
+	u32 blocks_per_plane;
+	u8 dies;
+	u8 planes_per_die;
 	u32 ecc_step_size;
 	u32 ecc_strength;
 	u32 ldpc_bytes_per_step;
@@ -32,6 +35,9 @@ static const struct q3n_device_desc q3n_devices[] = {
 		.logical_oob_size = Q3N_LOGICAL_OOB_SIZE,
 		.physical_oob_size = Q3N_PHYSICAL_OOB_SIZE,
 		.pages_per_block = 1600,
+		.blocks_per_plane = 247,
+		.dies = Q3N_DIES,
+		.planes_per_die = Q3N_PLANES_PER_DIE,
 		.ecc_step_size = Q3N_ECC_STEP_SIZE,
 		.ecc_strength = Q3N_ECC_STRENGTH,
 		.ldpc_bytes_per_step = Q3N_LDPC_BYTES_PER_STEP,
@@ -57,13 +63,21 @@ const struct q3n_device_desc *q3n_device_match(const u8 *id, size_t len)
 int q3n_device_validate(struct qemu_3dnand *q3n,
 			const struct q3n_device_desc *device)
 {
+	u64 pool_blocks;
+
 	if (!q3n || !device)
 		return -EINVAL;
+	pool_blocks = (u64)q3n->data_blocks_per_plane +
+		q3n->parity_blocks_per_plane + q3n->metadata_blocks_per_plane +
+		q3n->reserve_blocks_per_plane;
 	if ((q3n->cap & device->required_caps) != device->required_caps)
 		return -EINVAL;
 	if (q3n->page_size != device->page_size ||
 	    q3n->oob_size != device->logical_oob_size ||
-	    q3n->pages_per_block != device->pages_per_block)
+	    q3n->pages_per_block != device->pages_per_block ||
+	    q3n->blocks_per_plane != device->blocks_per_plane ||
+	    !q3n->data_blocks_per_plane || !q3n->parity_blocks_per_plane ||
+	    pool_blocks > device->blocks_per_plane)
 		return -EINVAL;
 	if (device->physical_oob_size != Q3N_PHYSICAL_OOB_SIZE ||
 	    q3n->ecc_step_size != device->ecc_step_size ||
@@ -99,4 +113,14 @@ int q3n_device_build_scan_id(struct qemu_3dnand *q3n,
 const char *q3n_device_name(const struct q3n_device_desc *device)
 {
 	return device ? device->name : "unknown";
+}
+
+u8 q3n_device_dies(const struct q3n_device_desc *device)
+{
+	return device ? device->dies : 0;
+}
+
+u8 q3n_device_planes_per_die(const struct q3n_device_desc *device)
+{
+	return device ? device->planes_per_die : 0;
 }

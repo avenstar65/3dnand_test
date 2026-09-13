@@ -209,5 +209,7 @@ int q3n_device_build_scan_id(struct qemu_3dnand *q3n,
 			     struct nand_flash_dev *scan_id, u32 writesize,
 			     u32 oobsize, u32 erasesize, u64 size);
 const char *q3n_device_name(const struct q3n_device_desc *device);
+u8 q3n_device_dies(const struct q3n_device_desc *device);
+u8 q3n_device_planes_per_die(const struct q3n_device_desc *device);
 
 #endif /* __QEMU_3DNAND_INTERNAL_H */

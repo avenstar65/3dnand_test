@@ -322,6 +322,8 @@ again:
 
 	mutex_lock(&parity->q3n->mtd_lock);
 	ret = q3n_parity_start_locked(parity, &sequence);
+	if (!ret)
+		ret = q3n_parity_rebuild_locked(parity);
 	mutex_unlock(&parity->q3n->mtd_lock);
 	if (ret == -ECANCELED) {
 		qemu_3dnand_finish_parity_work(parity);
@@ -337,9 +339,6 @@ again:
 	}
 	if (ret)
 		goto out_failed;
-	mutex_lock(&parity->q3n->mtd_lock);
-	ret = q3n_parity_rebuild_locked(parity);
-	mutex_unlock(&parity->q3n->mtd_lock);
 	if (ret)
 		goto out_failed;
 	if (parity->rebuild.next_slot == Q3N_DATA_PAGES &&

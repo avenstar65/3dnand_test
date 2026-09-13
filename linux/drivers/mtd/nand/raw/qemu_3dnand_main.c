@@ -143,8 +143,8 @@ static void q3n_configure_geometry(struct qemu_3dnand *q3n)
 		.pages_per_block = q3n->pages_per_block,
 		.blocks_per_plane = q3n->blocks_per_plane,
 		.data_blocks_per_plane = q3n->data_blocks_per_plane,
-		.dies = Q3N_DIES,
-		.planes_per_die = Q3N_PLANES_PER_DIE,
+		.dies = q3n_device_dies(q3n->device),
+		.planes_per_die = q3n_device_planes_per_die(q3n->device),
 		.raid_level = q3n->raid_level,
 	};
 	q3n->profile_leb_count = q3n->data_blocks_per_plane *

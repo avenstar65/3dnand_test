@@ -118,6 +118,21 @@ def dependency_cycles(graph):
     return cycles
 
 
+def source_dependencies(sources):
+    """Build module edges from calls to functions defined by another module."""
+    owners = {}
+    for module, source in sources.items():
+        for name, *_ in function_spans(source):
+            owners[name] = module
+    graph = {module: set() for module in sources}
+    for module, source in sources.items():
+        clean = strip_comments_and_literals(source)
+        for name, owner in owners.items():
+            if owner != module and re.search(rf"\b{re.escape(name)}\s*\(", clean):
+                graph[module].add(owner)
+    return graph
+
+
 class FunctionScannerTests(unittest.TestCase):
     def test_function_limit_accepts_50_effective_lines(self):
         body = "\n".join(f"\tv += {i};" for i in range(49))
@@ -157,6 +172,14 @@ class ArchitectureHelperTests(unittest.TestCase):
             (root / "other.c").write_text("void unrelated(void) {}\n")
             self.assertIn("q3n_owned", (root / "owner.c").read_text())
             self.assertNotIn("q3n_owned", (root / "other.c").read_text())
+
+    def test_source_dependencies_follow_real_calls(self):
+        sources = {
+            "upper": "int lower_api(void); int upper(void) { return lower_api(); }",
+            "lower": "int lower_api(void) { return 0; }",
+        }
+        self.assertEqual(source_dependencies(sources),
+                         {"upper": {"lower"}, "lower": set()})
 
 
 class RepositoryArchitectureTests(unittest.TestCase):
@@ -210,7 +233,13 @@ class RepositoryArchitectureTests(unittest.TestCase):
         self.assertEqual(found, allowed)
 
     def test_dependency_graph_is_acyclic(self):
-        self.assertEqual(dependency_cycles(DEPENDENCIES), [])
+        sources = {module: self.source(module) for module in DRIVER_MODULES}
+        graph = source_dependencies(sources)
+        unexpected = {module: targets - DEPENDENCIES[module]
+                      for module, targets in graph.items()
+                      if targets - DEPENDENCIES[module]}
+        self.assertEqual(unexpected, {})
+        self.assertEqual(dependency_cycles(graph), [])
 
     def test_device_id_and_build_wiring(self):
         device = self.source("device")

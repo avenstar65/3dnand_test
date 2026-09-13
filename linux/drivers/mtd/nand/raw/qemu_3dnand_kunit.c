@@ -28,6 +28,22 @@ static struct q3n_geometry q3n_test_raid_geometry(enum q3n_raid_level level)
 	};
 }
 
+static void q3n_device_set_valid_geometry(struct qemu_3dnand *q3n)
+{
+	q3n->page_size = Q3N_PAGE_SIZE;
+	q3n->oob_size = Q3N_LOGICAL_OOB_SIZE;
+	q3n->pages_per_block = 1600;
+	q3n->blocks_per_plane = 247;
+	q3n->data_blocks_per_plane = 208;
+	q3n->parity_blocks_per_plane = 32;
+	q3n->metadata_blocks_per_plane = 3;
+	q3n->reserve_blocks_per_plane = 4;
+	q3n->ecc_step_size = Q3N_ECC_STEP_SIZE;
+	q3n->ecc_strength = Q3N_ECC_STRENGTH;
+	q3n->ldpc_bytes_per_step = Q3N_LDPC_BYTES_PER_STEP;
+	q3n->ldpc_steps = Q3N_LDPC_STEPS;
+}
+
 static void q3n_device_full_id_match_test(struct kunit *test)
 {
 	static const u8 exact[] = {
@@ -51,9 +67,7 @@ static void q3n_device_rejects_missing_capability_test(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL(test, q3n);
 	q3n->cap = Q3N_CAP_BASIC_FLASH | Q3N_CAP_PERSISTENT_MEDIA;
-	q3n->page_size = Q3N_PAGE_SIZE;
-	q3n->oob_size = Q3N_LOGICAL_OOB_SIZE;
-	q3n->pages_per_block = 1600;
+	q3n_device_set_valid_geometry(q3n);
 	KUNIT_EXPECT_EQ(test, q3n_device_validate(q3n,
 			q3n_device_match(exact, sizeof(exact))), -EINVAL);
 }
@@ -68,13 +82,8 @@ static void q3n_device_rejects_ecc_mismatch_test(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, q3n);
 	q3n->cap = Q3N_CAP_BASIC_FLASH | Q3N_CAP_PERSISTENT_MEDIA |
 		Q3N_CAP_BAD_BLOCK_MARKER;
-	q3n->page_size = Q3N_PAGE_SIZE;
-	q3n->oob_size = Q3N_LOGICAL_OOB_SIZE;
-	q3n->pages_per_block = 1600;
-	q3n->ecc_step_size = Q3N_ECC_STEP_SIZE;
+	q3n_device_set_valid_geometry(q3n);
 	q3n->ecc_strength = Q3N_ECC_STRENGTH - 1;
-	q3n->ldpc_bytes_per_step = Q3N_LDPC_BYTES_PER_STEP;
-	q3n->ldpc_steps = Q3N_LDPC_STEPS;
 	KUNIT_EXPECT_EQ(test, q3n_device_validate(q3n,
 			q3n_device_match(exact, sizeof(exact))), -EINVAL);
 }
