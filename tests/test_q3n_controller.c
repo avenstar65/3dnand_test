@@ -120,6 +120,16 @@ static void test_multiplane_result_keeps_successes_and_failures(void)
     assert(failure == 0x02);
 }
 
+static void test_default_read_id_is_ymtc(void)
+{
+    static const uint8_t expected[] = {
+        0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44,
+    };
+
+    assert(sizeof(q3n_default_nand_id) == sizeof(expected));
+    assert(!memcmp(q3n_default_nand_id, expected, sizeof(expected)));
+}
+
 static void q3n_media_merge_program(uint8_t *stored,
                                     const uint8_t *incoming, size_t length)
 {
@@ -316,6 +326,7 @@ int main(void)
     test_multiplane_descriptor_validation();
     test_multiplane_staging_reset_is_slot_local();
     test_multiplane_result_keeps_successes_and_failures();
+    test_default_read_id_is_ymtc();
     test_decode_thresholds();
     test_decode_aggregates_steps();
     test_ldpc_mismatch_is_uncorrectable();

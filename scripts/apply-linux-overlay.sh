@@ -29,7 +29,10 @@ copy_overlay() {
 }
 
 rm -f "$raw_dir/qemu_3dnand.c"
-for file in qemu_3dnand_main.c qemu_3dnand.h qemu_3dnand_priv.h \
+for file in qemu_3dnand_main.c qemu_3dnand_internal.h qemu_3dnand.h \
+            qemu_3dnand_priv.h qemu_3dnand_device.c qemu_3dnand_hw.c \
+            qemu_3dnand_nand.c qemu_3dnand_profile.c \
+            qemu_3dnand_serial.c qemu_3dnand_debugfs.c \
             qemu_3dnand_map.c qemu_3dnand_raid.c qemu_3dnand_sched.c \
             qemu_3dnand_kunit.c qemu_3dnand_mp.c Kconfig.qemu_3dnand \
             Makefile.qemu_3dnand; do

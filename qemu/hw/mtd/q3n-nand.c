@@ -24,6 +24,9 @@
 
 /* Q3N_CONTROLLER_HELPERS_BEGIN */
 #define Q3N_LDPC_PROFILE_VERSION      1U
+static const uint8_t q3n_default_nand_id[] = {
+    0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44,
+};
 typedef struct Q3NEccResult {
     uint32_t status;
     uint32_t ecc_max_bitflips;
@@ -479,11 +482,10 @@ static void q3n_finish_error(Q3NNandState *s)
 
 static void q3n_cmd_read_id(Q3NNandState *s)
 {
-    static const uint8_t id[] = { 0x2c, 0xd7, 0x90, 0xa6, 'Q', '3', 'N', 'D' };
-
     memset(s->data_buf, 0xff, sizeof(s->data_buf));
-    memcpy(s->data_buf, id, sizeof(id));
-    s->data_count = sizeof(id);
+    memcpy(s->data_buf, q3n_default_nand_id,
+           sizeof(q3n_default_nand_id));
+    s->data_count = sizeof(q3n_default_nand_id);
     s->data_pos = 0;
     q3n_finish_ok(s);
 }

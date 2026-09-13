@@ -5,8 +5,7 @@
 #include <linux/kthread.h>
 #include <linux/unaligned.h>
 
-#include "qemu_3dnand.h"
-#include "qemu_3dnand_priv.h"
+#include "qemu_3dnand_internal.h"
 
 static const struct q3n_geometry q3n_test_geometry = {
 	.page_size = 16 * 1024,
@@ -27,6 +26,57 @@ static struct q3n_geometry q3n_test_raid_geometry(enum q3n_raid_level level)
 		.planes_per_die = 4,
 		.raid_level = level,
 	};
+}
+
+static void q3n_device_full_id_match_test(struct kunit *test)
+{
+	static const u8 exact[] = {
+		0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44,
+	};
+	u8 near[sizeof(exact)];
+
+	memcpy(near, exact, sizeof(near));
+	near[7] ^= 1;
+	KUNIT_EXPECT_NOT_NULL(test, q3n_device_match(exact, sizeof(exact)));
+	KUNIT_EXPECT_PTR_EQ(test, q3n_device_match(near, sizeof(near)), NULL);
+	KUNIT_EXPECT_PTR_EQ(test, q3n_device_match(exact, 1), NULL);
+}
+
+static void q3n_device_rejects_missing_capability_test(struct kunit *test)
+{
+	static const u8 exact[] = {
+		0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44,
+	};
+	struct qemu_3dnand *q3n = kunit_kzalloc(test, sizeof(*q3n), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, q3n);
+	q3n->cap = Q3N_CAP_BASIC_FLASH | Q3N_CAP_PERSISTENT_MEDIA;
+	q3n->page_size = Q3N_PAGE_SIZE;
+	q3n->oob_size = Q3N_LOGICAL_OOB_SIZE;
+	q3n->pages_per_block = 1600;
+	KUNIT_EXPECT_EQ(test, q3n_device_validate(q3n,
+			q3n_device_match(exact, sizeof(exact))), -EINVAL);
+}
+
+static void q3n_device_rejects_ecc_mismatch_test(struct kunit *test)
+{
+	static const u8 exact[] = {
+		0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44,
+	};
+	struct qemu_3dnand *q3n = kunit_kzalloc(test, sizeof(*q3n), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, q3n);
+	q3n->cap = Q3N_CAP_BASIC_FLASH | Q3N_CAP_PERSISTENT_MEDIA |
+		Q3N_CAP_BAD_BLOCK_MARKER;
+	q3n->page_size = Q3N_PAGE_SIZE;
+	q3n->oob_size = Q3N_LOGICAL_OOB_SIZE;
+	q3n->pages_per_block = 1600;
+	q3n->ecc_step_size = Q3N_ECC_STEP_SIZE;
+	q3n->ecc_strength = Q3N_ECC_STRENGTH - 1;
+	q3n->ldpc_bytes_per_step = Q3N_LDPC_BYTES_PER_STEP;
+	q3n->ldpc_steps = Q3N_LDPC_STEPS;
+	KUNIT_EXPECT_EQ(test, q3n_device_validate(q3n,
+			q3n_device_match(exact, sizeof(exact))), -EINVAL);
 }
 
 static void q3n_raid1_plane_pair_mapping_test(struct kunit *test)
@@ -611,6 +661,9 @@ static void q3n_ram_only_recovery_qualification_test(struct kunit *test)
 }
 
 static struct kunit_case q3n_map_test_cases[] = {
+	KUNIT_CASE(q3n_device_full_id_match_test),
+	KUNIT_CASE(q3n_device_rejects_missing_capability_test),
+	KUNIT_CASE(q3n_device_rejects_ecc_mismatch_test),
 	KUNIT_CASE(q3n_bad_block_oob_marks_only_bbm_test),
 	KUNIT_CASE(q3n_raid1_plane_pair_mapping_test),
 	KUNIT_CASE(q3n_raid5_die_block_and_parity_rotation_test),

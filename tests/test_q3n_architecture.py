@@ -8,6 +8,17 @@ import unittest
 
 
 CONTROL_WORDS = {"if", "for", "while", "switch"}
+DRIVER_MODULES = ("main", "device", "hw", "nand", "profile", "serial",
+                  "debugfs")
+DEPENDENCIES = {
+    "main": {"device", "hw", "nand", "debugfs"},
+    "nand": {"device", "hw", "profile", "serial"},
+    "profile": {"hw"},
+    "serial": {"hw"},
+    "debugfs": {"hw", "serial"},
+    "device": set(),
+    "hw": set(),
+}
 
 
 def strip_comments_and_literals(source):
@@ -146,6 +157,70 @@ class ArchitectureHelperTests(unittest.TestCase):
             (root / "other.c").write_text("void unrelated(void) {}\n")
             self.assertIn("q3n_owned", (root / "owner.c").read_text())
             self.assertNotIn("q3n_owned", (root / "other.c").read_text())
+
+
+class RepositoryArchitectureTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = pathlib.Path(__file__).resolve().parents[1]
+        cls.driver = cls.root / "linux/drivers/mtd/nand/raw"
+
+    def source(self, module):
+        return (self.driver / f"qemu_3dnand_{module}.c").read_text()
+
+    def test_split_files_and_internal_header_exist(self):
+        for module in DRIVER_MODULES:
+            self.assertTrue((self.driver / f"qemu_3dnand_{module}.c").is_file())
+        self.assertTrue((self.driver / "qemu_3dnand_internal.h").is_file())
+
+    def test_split_functions_have_at_most_50_effective_lines(self):
+        failures = []
+        for module in DRIVER_MODULES:
+            for name, start, end, count in find_oversized_functions(
+                    self.source(module), 50):
+                failures.append(f"{module}:{start}-{end} {name}={count}")
+        self.assertEqual(failures, [])
+
+    def test_responsibility_ownership(self):
+        owners = {
+            "device": r"(?m)^const struct q3n_device_desc \*q3n_device_match",
+            "hw": r"(?m)^int q3n_hw_read_page_locked",
+            "nand": r"(?m)^int q3n_nand_register",
+            "profile": r"(?m)^int q3n_profile_read_page_locked",
+            "serial": r"(?m)^static void qemu_3dnand_parity_worker",
+            "debugfs": r"(?m)^void q3n_debugfs_init",
+            "main": r"(?m)^static int qemu_3dnand_probe",
+        }
+        for owner, pattern in owners.items():
+            self.assertRegex(self.source(owner), pattern)
+            for other in set(DRIVER_MODULES) - {owner}:
+                self.assertNotRegex(self.source(other), pattern)
+
+    def test_main_contains_only_lifecycle_functions(self):
+        allowed = {
+            "qemu_3dnand_free_metadata", "q3n_pci_prepare",
+            "q3n_validate_controller", "q3n_read_geometry",
+            "q3n_discover_device", "q3n_validate_device_geometry",
+            "q3n_configure_geometry",
+            "q3n_alloc_buffers", "q3n_alloc_metadata",
+            "q3n_alloc_runtime", "q3n_log_geometry", "q3n_probe_failed",
+            "qemu_3dnand_probe", "qemu_3dnand_remove",
+        }
+        found = {span[0] for span in function_spans(self.source("main"))}
+        self.assertEqual(found, allowed)
+
+    def test_dependency_graph_is_acyclic(self):
+        self.assertEqual(dependency_cycles(DEPENDENCIES), [])
+
+    def test_device_id_and_build_wiring(self):
+        device = self.source("device")
+        self.assertIn("0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44",
+                      device)
+        makefile = (self.driver / "Makefile.qemu_3dnand").read_text()
+        overlay = (self.root / "scripts/apply-linux-overlay.sh").read_text()
+        for module in DRIVER_MODULES[1:]:
+            self.assertIn(f"qemu_3dnand_{module}.o", makefile)
+            self.assertIn(f"qemu_3dnand_{module}.c", overlay)
 
 
 if __name__ == "__main__":

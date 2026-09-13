@@ -141,6 +141,7 @@
 #define Q3N_FAULT_REGION_MAIN          0U
 #define Q3N_FAULT_REGION_LDPC          1U
 
+#define Q3N_CMD_READ_ID                1
 #define Q3N_CMD_READ_PAGE              2
 #define Q3N_CMD_PROGRAM_PAGE           3
 #define Q3N_CMD_ERASE_BLOCK            4
