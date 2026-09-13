@@ -148,6 +148,32 @@ PROGRAM 完成。多 plane 模式的逻辑 OOB 只保留坏块标记 byte 0，`o
 脚本执行两轮 guest，验证数据和同 die 多 plane 坏块组状态跨重启保留。
 QEMU 不解释 RAID 布局；映射和当前启动周期内的恢复资格由 Linux 驱动管理。
 
+### Linux 驱动逻辑架构
+
+Linux overlay 已按职责拆分，`qemu_3dnand_main.c` 只负责 PCI 生命周期：
+
+```mermaid
+flowchart TB
+    CORE["NAND core / MTD"] --> NAND["qemu_3dnand_nand.c<br/>ecc.* / legacy / nand_scan / BBT"]
+    NAND --> PROFILE["qemu_3dnand_profile.c<br/>multi-plane RAID1/RAID5"]
+    NAND --> SERIAL["qemu_3dnand_serial.c<br/>宏 0 串行兼容与 parity worker"]
+    PROFILE --> MP["map.c / mp.c / raid.c"]
+    SERIAL --> ALG["map.c / raid.c / sched.c"]
+    PROFILE --> HW["qemu_3dnand_hw.c<br/>物理 MMIO / READID / page / OOB / erase"]
+    SERIAL --> HW
+    NAND --> HW
+    MAIN["qemu_3dnand_main.c<br/>PCI probe/remove"] --> DEVICE["qemu_3dnand_device.c<br/>完整 NAND ID 与器件约束"]
+    MAIN --> NAND
+    MAIN --> DEBUG["qemu_3dnand_debugfs.c"]
+    HW --> QEMU["QEMU q3n NAND"]
+```
+
+QEMU 和 Linux 使用真实的完整 NAND ID `9c d7 98 a6 51 33 4e 44`。当前器件
+定义为 `YMTC QEMU 3D NAND`，私有描述表位于独立 `qemu_3dnand_device.c`，
+后续可增加非 YMTC 器件而不把厂商定义放回 PCI、NAND 或 RAID 文件。未知或
+仅前缀相同的 ID 不会注册 MTD。详细边界和验证结果见
+[Linux 驱动按功能拆分设计](docs/superpowers/specs/2026-09-13-linux-driver-functional-split-design.md)。
+
 自动执行 MTD smoke 并在成功后关闭虚拟机：
 
 ```sh

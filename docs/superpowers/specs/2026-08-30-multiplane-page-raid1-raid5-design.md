@@ -145,6 +145,9 @@ flowchart TD
 取得唯一 MTD，不再赋值任何 MTD I/O 回调。
 legacy 命令适配层模拟与逻辑几何一致的 READID/STATUS/RESET；
 控制器 ID 寄存器不能直接冒充 NAND READID 字节流。
+
+实现后的 Linux 文件职责与真实八字节 READID 路径见
+[QEMU 3D NAND Linux 驱动按功能拆分设计](2026-09-13-linux-driver-functional-split-design.md)。
 一个逻辑 target 覆盖全部逻辑容量，物理 die 分布由 mapper 处理。
 
 ```mermaid

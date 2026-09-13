@@ -144,6 +144,8 @@ work/build/qemu-11.0.2/qemu-system-x86_64-unsigned -machine q35 -device q3n-nand
 
 The Linux overlay registers an MTD device named `qemu-3dnand` through
 `nand_scan_with_ids()`, so NAND core creates and owns the RAM bad-block table.
+The controller READID value is `9c d7 98 a6 51 33 4e 44`; Linux matches all
+eight bytes against its private `YMTC QEMU 3D NAND` descriptor before scanning.
 Page data and BBM OOB flow through `nand_chip.ecc.*`; erase sequencing uses the
 legacy `cmdfunc` / `waitfunc` callbacks. The driver maps logical pages to the
 QEMU physical media and owns the selected RAID1/RAID5 layout without providing

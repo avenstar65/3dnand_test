@@ -2,7 +2,7 @@
 
 日期：2026-09-13
 
-状态：已确认，等待实现计划评审
+状态：已实现并通过验证
 
 ## 1. 背景与目标
 
@@ -318,3 +318,52 @@ BBT 扫描结果、RAID 映射、ECC 错误和 debugfs 统计。
 - 本次新增和迁移函数通过 50 行自动检查且无例外。
 - 宏 0、宏 1 均完整构建；RAID1、RAID5 和持久化运行测试通过。
 - 没有改变第 12 节列出的兼容性不变量。
+
+## 15. 实现结果（2026-09-13）
+
+目标架构已经落地。原 `qemu_3dnand_main.c` 从约 3000 行收敛为 PCI 生命周期
+协调层；共享状态、器件、物理硬件、NAND core、multi-plane profile、串行兼容
+路径和 debugfs 分别位于第 6 节列出的文件中。所有七个拆分实现文件均通过
+50 有效代码行门禁，无例外项。
+
+实际初始化路径如下：
+
+```mermaid
+flowchart LR
+    PCI["PCI probe / BAR"] --> CTRL["校验控制器 ID 与 capability"]
+    CTRL --> RID["hw.c 执行 READID"]
+    RID --> MATCH["device.c 完整 8-byte 匹配"]
+    MATCH --> GEOM["读取并校验 page/OOB/ECC/LDPC 几何"]
+    GEOM --> MEM["分配调度、RAID 与 I/O 状态"]
+    MEM --> SCAN["nand.c: nand_scan_with_ids"]
+    SCAN --> BBT["NAND core 创建 RAM BBT"]
+    BBT --> MTD["注册 MTD 与 debugfs"]
+```
+
+验证结果：
+
+| 项目 | 结果 |
+| --- | --- |
+| 架构、函数长度、core patch、overlay、脚本和 controller host tests | 通过 |
+| QEMU 11.0.2 构建及 YMTC READID `9c d7 98 a6 51 33 4e 44` | 通过 |
+| `Q3N_ENABLE_MULTIPLANE_RAID=0` Linux 7.0.12 构建 | 通过；对象中无 multi-plane `block_bad/block_markbad` |
+| `Q3N_ENABLE_MULTIPLANE_RAID=1` Linux 7.0.12 构建 | 通过；对象中包含两个坏块回调 |
+| KUnit、RAID1、RAID5、持久化 smoke | 全部通过 |
+| 重构前串行 smoke | 在 `p0 continuation` 阶段既有挂起，因此不作为本次新增门禁 |
+
+运行过的最终验证命令包括：
+
+```sh
+python3 tests/test_q3n_architecture.py -v
+python3 tests/test_nand_core_patches.py -v
+sh tests/test_q3n_overlay.sh
+sh tests/test_scripts.sh
+./scripts/shell.sh ./scripts/build-qemu.sh
+Q3N_ENABLE_MULTIPLANE_RAID=0 ./scripts/shell.sh ./scripts/build-kernel.sh
+Q3N_ENABLE_MULTIPLANE_RAID=1 ./scripts/shell.sh ./scripts/build-kernel.sh
+./scripts/shell.sh ./scripts/build-rootfs.sh
+./scripts/q3n-kunit-smoke.sh
+./scripts/q3n-raid1-smoke.sh
+./scripts/q3n-raid5-smoke.sh
+./scripts/q3n-persistence-smoke.sh
+```
