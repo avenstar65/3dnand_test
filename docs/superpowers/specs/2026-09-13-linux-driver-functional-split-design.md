@@ -171,7 +171,7 @@ debugfs 或 PCI 生命周期。
 - 完整 ID 和 ID 长度；
 - 必需 capability；
 - die/plane 数量；
-- page、物理 OOB、pages-per-block 约束；
+- page、逻辑/物理 OOB、pages-per-block 约束；
 - ECC step、strength、LDPC bytes/steps 约束；
 - 可用的 multi-plane RAID 能力。
 
@@ -205,6 +205,8 @@ sequenceDiagram
 
 匹配必须使用 descriptor 声明的全部 ID 字节，不能只比较厂商字节或前缀。
 Linux 驱动不再在 `cmdfunc(NAND_CMD_READID)` 中伪造 ID。
+当前 `GEOM0` 只上报 128 B logical OOB；descriptor 中的 1664 B physical OOB
+用于校验驱动/QEMU 介质 ABI 常量，不把它误当作控制器动态上报值。
 
 ## 8. 函数长度和可维护性约束
 
