@@ -1,5 +1,8 @@
 # Page-RAID1/RAID5：ECC 回调与固定页映射设计
 
+Linux 驱动后续按功能拆分的模块边界、器件识别和验证要求见
+[QEMU 3D NAND Linux 驱动按功能拆分设计](2026-09-13-linux-driver-functional-split-design.md)。
+
 修订日期：2026-09-12。
 
 状态：**已按本设计实现并完成多-plane RAID1/RAID5 验收**。迁移前代码
