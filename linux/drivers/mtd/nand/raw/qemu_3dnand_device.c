@@ -2,6 +2,7 @@
 /* NAND identification and per-device constraints. */
 
 #include <linux/kernel.h>
+#include <linux/overflow.h>
 #include <linux/string.h>
 
 #include "qemu_3dnand_internal.h"
@@ -102,6 +103,9 @@ int q3n_device_validate_geometry(struct qemu_3dnand *q3n,
 {
 	if (!q3n || !observed)
 		return -EINVAL;
+	if (!IS_ALIGNED(q3n->page_size, sizeof(u32)) ||
+	    !IS_ALIGNED(q3n->oob_size, sizeof(u32)))
+		return -EINVAL;
 	if (observed->page_size != q3n->page_size ||
 	    observed->oob_size != q3n->oob_size ||
 	    observed->pages_per_block != q3n->pages_per_block ||
@@ -112,6 +116,21 @@ int q3n_device_validate_geometry(struct qemu_3dnand *q3n,
 	    observed->ldpc_steps != q3n->ldpc_steps)
 		return -EINVAL;
 	return 0;
+}
+
+static int q3n_device_validate_ecc_layout(struct qemu_3dnand *q3n)
+{
+	u32 physical_oob_size;
+	u32 ldpc_size;
+
+	if (!q3n->physical_oob_size || !q3n->ecc_strength ||
+	    !q3n->ldpc_bytes_per_step || !q3n->ldpc_steps)
+		return -EINVAL;
+	if (check_mul_overflow(q3n->ldpc_bytes_per_step, q3n->ldpc_steps,
+			       &ldpc_size) ||
+	    check_add_overflow(q3n->oob_size, ldpc_size, &physical_oob_size))
+		return -EOVERFLOW;
+	return physical_oob_size == q3n->physical_oob_size ? 0 : -EINVAL;
 }
 
 int q3n_device_validate(struct qemu_3dnand *q3n,
@@ -129,7 +148,8 @@ int q3n_device_validate(struct qemu_3dnand *q3n,
 	if (!q3n->data_blocks_per_plane || !q3n->parity_blocks_per_plane ||
 	    pool_blocks > device->blocks_per_plane)
 		return -EINVAL;
-	if (!q3n->ecc_step_size || q3n->page_size % q3n->ecc_step_size ||
+	if (q3n_device_validate_ecc_layout(q3n) || !q3n->ecc_step_size ||
+	    q3n->page_size % q3n->ecc_step_size ||
 	    q3n->page_size / q3n->ecc_step_size != q3n->ldpc_steps)
 		return -EINVAL;
 	return 0;

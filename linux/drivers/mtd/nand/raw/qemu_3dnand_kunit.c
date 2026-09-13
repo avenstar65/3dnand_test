@@ -117,6 +117,43 @@ static void q3n_device_rejects_ecc_mismatch_test(struct kunit *test)
 		q3n_device_validate_geometry(q3n, &observed), -EINVAL);
 }
 
+static void q3n_device_rejects_unaligned_geometry_test(struct kunit *test)
+{
+	struct qemu_3dnand *q3n = kunit_kzalloc(test, sizeof(*q3n), GFP_KERNEL);
+	struct q3n_device_geometry observed;
+
+	KUNIT_ASSERT_NOT_NULL(test, q3n);
+	q3n_device_set_valid_geometry(q3n);
+	q3n->oob_size = 129;
+	observed = (struct q3n_device_geometry) {
+		.page_size = q3n->page_size, .oob_size = q3n->oob_size,
+		.pages_per_block = q3n->pages_per_block,
+		.blocks_per_plane = q3n->blocks_per_plane,
+		.ecc_step_size = q3n->ecc_step_size,
+		.ecc_strength = q3n->ecc_strength,
+		.ldpc_bytes_per_step = q3n->ldpc_bytes_per_step,
+		.ldpc_steps = q3n->ldpc_steps,
+	};
+	KUNIT_EXPECT_EQ(test,
+		q3n_device_validate_geometry(q3n, &observed), -EINVAL);
+}
+
+static void q3n_device_rejects_invalid_physical_oob_test(struct kunit *test)
+{
+	static const u8 exact[] = {
+		0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44,
+	};
+	struct qemu_3dnand *q3n = kunit_kzalloc(test, sizeof(*q3n), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, q3n);
+	q3n_device_set_valid_geometry(q3n);
+	q3n->physical_oob_size = 0;
+	q3n->cap = Q3N_CAP_BASIC_FLASH | Q3N_CAP_PERSISTENT_MEDIA |
+		Q3N_CAP_BAD_BLOCK_MARKER;
+	KUNIT_EXPECT_EQ(test, q3n_device_validate(q3n,
+			q3n_device_match(exact, sizeof(exact))), -EINVAL);
+}
+
 static void q3n_raid1_plane_pair_mapping_test(struct kunit *test)
 {
 	struct q3n_geometry geometry = q3n_test_raid_geometry(Q3N_RAID1);
@@ -703,6 +740,8 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_device_id_supplies_runtime_geometry_test),
 	KUNIT_CASE(q3n_device_rejects_missing_capability_test),
 	KUNIT_CASE(q3n_device_rejects_ecc_mismatch_test),
+	KUNIT_CASE(q3n_device_rejects_unaligned_geometry_test),
+	KUNIT_CASE(q3n_device_rejects_invalid_physical_oob_test),
 	KUNIT_CASE(q3n_bad_block_oob_marks_only_bbm_test),
 	KUNIT_CASE(q3n_raid1_plane_pair_mapping_test),
 	KUNIT_CASE(q3n_raid5_die_block_and_parity_rotation_test),
