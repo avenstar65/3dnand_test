@@ -30,18 +30,19 @@ static struct q3n_geometry q3n_test_raid_geometry(enum q3n_raid_level level)
 
 static void q3n_device_set_valid_geometry(struct qemu_3dnand *q3n)
 {
-	q3n->page_size = Q3N_PAGE_SIZE;
-	q3n->oob_size = Q3N_LOGICAL_OOB_SIZE;
+	q3n->page_size = 16 * 1024;
+	q3n->oob_size = 128;
+	q3n->physical_oob_size = 1664;
 	q3n->pages_per_block = 1600;
 	q3n->blocks_per_plane = 247;
 	q3n->data_blocks_per_plane = 208;
 	q3n->parity_blocks_per_plane = 32;
 	q3n->metadata_blocks_per_plane = 3;
 	q3n->reserve_blocks_per_plane = 4;
-	q3n->ecc_step_size = Q3N_ECC_STEP_SIZE;
-	q3n->ecc_strength = Q3N_ECC_STRENGTH;
-	q3n->ldpc_bytes_per_step = Q3N_LDPC_BYTES_PER_STEP;
-	q3n->ldpc_steps = Q3N_LDPC_STEPS;
+	q3n->ecc_step_size = 1024;
+	q3n->ecc_strength = 40;
+	q3n->ldpc_bytes_per_step = 96;
+	q3n->ldpc_steps = 16;
 }
 
 static void q3n_device_full_id_match_test(struct kunit *test)
@@ -56,6 +57,27 @@ static void q3n_device_full_id_match_test(struct kunit *test)
 	KUNIT_EXPECT_NOT_NULL(test, q3n_device_match(exact, sizeof(exact)));
 	KUNIT_EXPECT_PTR_EQ(test, q3n_device_match(near, sizeof(near)), NULL);
 	KUNIT_EXPECT_PTR_EQ(test, q3n_device_match(exact, 1), NULL);
+}
+
+static void q3n_device_id_supplies_runtime_geometry_test(struct kunit *test)
+{
+	static const u8 exact[] = {
+		0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44,
+	};
+	struct qemu_3dnand *q3n = kunit_kzalloc(test, sizeof(*q3n), GFP_KERNEL);
+	const struct q3n_device_desc *device;
+
+	KUNIT_ASSERT_NOT_NULL(test, q3n);
+	device = q3n_device_match(exact, sizeof(exact));
+	KUNIT_ASSERT_NOT_NULL(test, device);
+	KUNIT_ASSERT_EQ(test, q3n_device_apply_geometry(q3n, device), 0);
+	KUNIT_EXPECT_EQ(test, q3n->page_size, (u32)(16 * 1024));
+	KUNIT_EXPECT_EQ(test, q3n->oob_size, (u32)128);
+	KUNIT_EXPECT_EQ(test, q3n->physical_oob_size, (u32)1664);
+	KUNIT_EXPECT_EQ(test, q3n->profile_geometry.dies, (u8)2);
+	KUNIT_EXPECT_EQ(test, q3n->profile_geometry.planes_per_die, (u8)4);
+	KUNIT_EXPECT_EQ(test, q3n->ecc_step_size, (u32)1024);
+	KUNIT_EXPECT_EQ(test, q3n->ecc_strength, (u32)40);
 }
 
 static void q3n_device_rejects_missing_capability_test(struct kunit *test)
@@ -78,14 +100,21 @@ static void q3n_device_rejects_ecc_mismatch_test(struct kunit *test)
 		0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44,
 	};
 	struct qemu_3dnand *q3n = kunit_kzalloc(test, sizeof(*q3n), GFP_KERNEL);
+	struct q3n_device_geometry observed;
+	const struct q3n_device_desc *device;
 
 	KUNIT_ASSERT_NOT_NULL(test, q3n);
-	q3n->cap = Q3N_CAP_BASIC_FLASH | Q3N_CAP_PERSISTENT_MEDIA |
-		Q3N_CAP_BAD_BLOCK_MARKER;
-	q3n_device_set_valid_geometry(q3n);
-	q3n->ecc_strength = Q3N_ECC_STRENGTH - 1;
-	KUNIT_EXPECT_EQ(test, q3n_device_validate(q3n,
-			q3n_device_match(exact, sizeof(exact))), -EINVAL);
+	device = q3n_device_match(exact, sizeof(exact));
+	KUNIT_ASSERT_NOT_NULL(test, device);
+	KUNIT_ASSERT_EQ(test, q3n_device_apply_geometry(q3n, device), 0);
+	observed = (struct q3n_device_geometry) {
+		.page_size = 16 * 1024, .oob_size = 128,
+		.pages_per_block = 1600, .blocks_per_plane = 247,
+		.ecc_step_size = 1024, .ecc_strength = 39,
+		.ldpc_bytes_per_step = 96, .ldpc_steps = 16,
+	};
+	KUNIT_EXPECT_EQ(test,
+		q3n_device_validate_geometry(q3n, &observed), -EINVAL);
 }
 
 static void q3n_raid1_plane_pair_mapping_test(struct kunit *test)
@@ -176,18 +205,18 @@ static void q3n_raid5_xor_recovery_test(struct kunit *test)
 
 static void q3n_build_bad_block_oob(u8 *logical_oob)
 {
-	memset(logical_oob, 0xff, Q3N_LOGICAL_OOB_SIZE);
+	memset(logical_oob, 0xff, 128);
 	logical_oob[0] = 0x00;
 }
 
 static void q3n_bad_block_oob_marks_only_bbm_test(struct kunit *test)
 {
-	u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
+	u8 logical_oob[128];
 	u32 i;
 
 	q3n_build_bad_block_oob(logical_oob);
 	KUNIT_EXPECT_EQ(test, logical_oob[0], (u8)0x00);
-	for (i = 1; i < Q3N_LOGICAL_OOB_SIZE; i++)
+	for (i = 1; i < ARRAY_SIZE(logical_oob); i++)
 		KUNIT_EXPECT_EQ(test, logical_oob[i], (u8)0xff);
 }
 
@@ -671,6 +700,7 @@ static void q3n_ram_only_recovery_qualification_test(struct kunit *test)
 
 static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_device_full_id_match_test),
+	KUNIT_CASE(q3n_device_id_supplies_runtime_geometry_test),
 	KUNIT_CASE(q3n_device_rejects_missing_capability_test),
 	KUNIT_CASE(q3n_device_rejects_ecc_mismatch_test),
 	KUNIT_CASE(q3n_bad_block_oob_marks_only_bbm_test),

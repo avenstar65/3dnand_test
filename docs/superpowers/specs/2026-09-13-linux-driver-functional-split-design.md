@@ -153,8 +153,10 @@ debugfs 或 PCI 生命周期。
 | `qemu_3dnand_priv.h` | 现有映射、RAID、scheduler、multi-plane 算法类型和可测试 API | PCI/NAND core 对象 |
 
 `qemu_3dnand_device.c` 中的 descriptor 保持私有。其他模块通过窄接口取得名称、
-验证结果和运行时 `nand_flash_dev`，不直接依赖 descriptor 字段布局。未来确有
-厂商特定命令时，再基于实际差异增加 quirk 或 ops。
+运行时几何、验证结果和 `nand_flash_dev`，不直接依赖 descriptor 字段布局。
+page size、逻辑/物理 OOB、die/plane 和 ECC/LDPC 参数均由完整 ID 对应的
+descriptor 提供；公共寄存器头不保存当前器件的固定几何。未来确有厂商特定
+命令时，再基于实际差异增加 quirk 或 ops。
 
 ## 7. 器件识别和扩展
 
@@ -190,7 +192,10 @@ sequenceDiagram
     Probe->>Dev: q3n_device_match(id, len)
     alt 完整 ID 已知
         Dev-->>Probe: opaque device descriptor
-        Probe->>Dev: 校验 capability、几何和 ECC
+        Probe->>Dev: 应用 ID 对应的运行时几何
+        Probe->>HW: 读取控制器几何寄存器
+        Probe->>Dev: 与 ID 几何交叉校验
+        Probe->>Dev: 校验 capability 和 block pool
         Probe->>NAND: 准备该器件的逻辑 scan ID
         NAND->>Core: nand_scan_with_ids()
         Core->>NAND: NAND_CMD_READID
@@ -205,8 +210,9 @@ sequenceDiagram
 
 匹配必须使用 descriptor 声明的全部 ID 字节，不能只比较厂商字节或前缀。
 Linux 驱动不再在 `cmdfunc(NAND_CMD_READID)` 中伪造 ID。
-当前 `GEOM0` 只上报 128 B logical OOB；descriptor 中的 1664 B physical OOB
-用于校验驱动/QEMU 介质 ABI 常量，不把它误当作控制器动态上报值。
+当前 `GEOM0` 只上报 logical OOB；physical OOB 由 ID descriptor 提供，不把它
+误当作控制器动态上报值。QEMU 模型在创建设备前仍需要自身的介质布局常量，
+但 Linux 驱动不再把这些常量作为探测输入。
 
 ## 8. 函数长度和可维护性约束
 
@@ -241,7 +247,8 @@ multi-plane profile、串行 parity、缓冲区、统计/debugfs。
 flowchart TB
     P["PCI probe"] --> BAR["映射 BAR"]
     BAR --> ID["读取真实 NAND ID并匹配器件描述"]
-    ID --> GEOM["读取并校验 capability / 几何 / ECC"]
+    ID --> APPLY["从 ID descriptor 应用 page/OOB/die/plane/ECC 几何"]
+    APPLY --> GEOM["读取控制器寄存器并交叉校验"]
     GEOM --> STATE["初始化锁、scheduler、workqueue、缓冲和 RAID 状态"]
     STATE --> SCAN["q3n_nand_register<br/>nand_scan_with_ids 创建 BBT"]
     SCAN --> REG["mtd_device_register"]
@@ -333,7 +340,8 @@ flowchart LR
     PCI["PCI probe / BAR"] --> CTRL["校验控制器 ID 与 capability"]
     CTRL --> RID["hw.c 执行 READID"]
     RID --> MATCH["device.c 完整 8-byte 匹配"]
-    MATCH --> GEOM["读取并校验 page/OOB/ECC/LDPC 几何"]
+    MATCH --> APPLY["应用 ID descriptor 的运行时几何"]
+    APPLY --> GEOM["读取寄存器并校验 page/OOB/ECC/LDPC"]
     GEOM --> MEM["分配调度、RAID 与 I/O 状态"]
     MEM --> SCAN["nand.c: nand_scan_with_ids"]
     SCAN --> BBT["NAND core 创建 RAM BBT"]

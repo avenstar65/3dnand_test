@@ -14,6 +14,8 @@
 #define Q3N_RAID_NO_PARITY		0xff
 #define Q3N_MAX_PENDING_PARITY		32
 #define Q3N_MAX_PARITY_READ_INFLIGHT	1
+#define Q3N_MAX_PLANES_PER_DIE		4
+#define Q3N_MAX_LOGICAL_OOB_SIZE	256
 
 enum q3n_raid_level {
 	Q3N_RAID1 = 1,
@@ -46,7 +48,7 @@ struct q3n_raid_group {
 	u8 member_mask;
 	u8 parity_plane;
 	u8 data_pages;
-	struct q3n_phys_addr member[4];
+	struct q3n_phys_addr member[Q3N_MAX_PLANES_PER_DIE];
 };
 
 struct q3n_block_barrier {
@@ -97,20 +99,23 @@ struct q3n_ecc_result {
 struct q3n_mp_io {
 	void __iomem *regs;
 	u32 page_size;
+	u32 oob_size;
 	u32 pages_per_block;
+	u8 dies;
+	u8 planes_per_die;
 };
 
 struct q3n_mp_result {
 	u8 success_mask;
 	u8 failure_mask;
-	struct q3n_ecc_result ecc[4];
+	struct q3n_ecc_result ecc[Q3N_MAX_PLANES_PER_DIE];
 };
 
 struct q3n_mp_buffers {
 	u8 mask;
 	u8 die;
-	struct q3n_phys_addr addr[4];
-	u8 *data[4];
+	struct q3n_phys_addr addr[Q3N_MAX_PLANES_PER_DIE];
+	u8 *data[Q3N_MAX_PLANES_PER_DIE];
 };
 
 static inline void q3n_ecc_accumulate(struct q3n_ecc_result *total,

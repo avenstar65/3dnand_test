@@ -444,9 +444,7 @@ for header in \
   assert_not_contains "$header" 'Q3N_REG_STAT_ORDER_ERRORS'
 done
 for symbol in \
-  Q3N_PHYSICAL_OOB_SIZE Q3N_LOGICAL_OOB_SIZE Q3N_BBM_OOB_OFFSET \
-  Q3N_LDPC_OOB_OFFSET Q3N_LDPC_BYTES_PER_STEP Q3N_LDPC_STEPS \
-  Q3N_METADATA_OOB_OFFSET Q3N_REG_ECC_GEOM0 Q3N_REG_ECC_GEOM1 \
+  Q3N_BBM_OOB_OFFSET Q3N_REG_ECC_GEOM0 Q3N_REG_ECC_GEOM1 \
   Q3N_REG_ECC_STATUS Q3N_REG_ECC_MAX_BITFLIPS \
   Q3N_REG_ECC_CORRECTED_BITS Q3N_REG_ECC_FAILED_STEP \
   Q3N_REG_FAULT_STEP Q3N_REG_FAULT_FIRST_BIT \
@@ -454,6 +452,12 @@ for symbol in \
   Q3N_FAULT_INJECT_BITFLIPS; do
   assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
   assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h "$symbol"
+done
+for symbol in Q3N_PAGE_SIZE Q3N_DIES Q3N_PLANES_PER_DIE \
+  Q3N_PHYSICAL_OOB_SIZE Q3N_LOGICAL_OOB_SIZE Q3N_ECC_STEP_SIZE \
+  Q3N_ECC_STRENGTH Q3N_LDPC_BYTES_PER_STEP Q3N_LDPC_STEPS; do
+  assert_contains qemu/include/hw/mtd/q3n-nand.h "$symbol"
+  assert_not_contains linux/drivers/mtd/nand/raw/qemu_3dnand.h "$symbol"
 done
 assert_contains qemu/include/hw/mtd/q3n-media.h 'Q3N_BBM_GOOD.*0xff'
 assert_contains qemu/include/hw/mtd/q3n-media.h 'Q3N_BBM_BAD.*0x00'
@@ -524,6 +528,8 @@ assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_hw.c 'lockdep_assert_held
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_device.c 'YMTC QEMU 3D NAND'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_device.c '0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_device.c 'memcmp\(id, device->id, len\)'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_device.c 'YMTC_PAGE_SIZE'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_device.c 'q3n_device_apply_geometry'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_nand.c 'nand_scan_with_ids'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_nand.c 'chip->ecc.read_page = qemu_3dnand_ecc_read_page'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_nand.c 'q3n_hw_read_id_locked'

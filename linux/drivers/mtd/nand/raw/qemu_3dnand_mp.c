@@ -32,10 +32,12 @@ static int q3n_mp_validate(const struct q3n_mp_io *io,
 	u8 plane;
 
 	if (!io || !io->regs || !io->page_size || !io->pages_per_block ||
-	    !buffers || !result || !buffers->mask ||
-	    (buffers->mask & ~Q3N_MP_ALL_PLANES) || buffers->die >= Q3N_DIES)
+	    !io->oob_size || !io->planes_per_die ||
+	    io->planes_per_die > Q3N_MAX_PLANES_PER_DIE || !buffers || !result ||
+	    !buffers->mask || (buffers->mask & ~GENMASK(io->planes_per_die - 1, 0)) ||
+	    buffers->die >= io->dies)
 		return -EINVAL;
-	for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
+	for (plane = 0; plane < io->planes_per_die; plane++) {
 		if (!(buffers->mask & BIT(plane)))
 			continue;
 		if (buffers->addr[plane].page >= io->pages_per_block ||
@@ -86,7 +88,7 @@ static int q3n_mp_read_common(struct q3n_mp_io *io,
 			      const struct q3n_mp_buffers *buffers,
 			      struct q3n_mp_result *result, bool oob)
 {
-	u32 length = oob ? Q3N_LOGICAL_OOB_SIZE : io->page_size;
+	u32 length = oob ? io->oob_size : io->page_size;
 	u32 command = oob ? Q3N_CMD_MP_READ_PAGE_OOB : Q3N_CMD_MP_READ_PAGE;
 	u8 plane;
 	int ret;
@@ -96,7 +98,7 @@ static int q3n_mp_read_common(struct q3n_mp_io *io,
 		return ret;
 	q3n_mp_writel(io, Q3N_REG_MP_DIE, buffers->die);
 	q3n_mp_writel(io, Q3N_REG_MP_PLANE_MASK, buffers->mask);
-	for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
+	for (plane = 0; plane < io->planes_per_die; plane++) {
 		if (!(buffers->mask & BIT(plane)))
 			continue;
 		q3n_mp_select_addr(io, buffers, plane);
@@ -105,7 +107,7 @@ static int q3n_mp_read_common(struct q3n_mp_io *io,
 	}
 	q3n_mp_writel(io, Q3N_REG_CMD, command);
 	ret = q3n_mp_complete(io, result);
-	for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
+	for (plane = 0; plane < io->planes_per_die; plane++) {
 		u32 offset;
 
 		if (!(result->success_mask & BIT(plane)))
@@ -124,7 +126,7 @@ static int q3n_mp_program_common(struct q3n_mp_io *io,
 				 const struct q3n_mp_buffers *buffers,
 				 struct q3n_mp_result *result, bool oob)
 {
-	u32 length = oob ? Q3N_LOGICAL_OOB_SIZE : io->page_size;
+	u32 length = oob ? io->oob_size : io->page_size;
 	u32 command = oob ? Q3N_CMD_MP_PROGRAM_PAGE_OOB :
 		Q3N_CMD_MP_PROGRAM_PAGE;
 	u8 plane;
@@ -135,7 +137,7 @@ static int q3n_mp_program_common(struct q3n_mp_io *io,
 		return ret;
 	q3n_mp_writel(io, Q3N_REG_MP_DIE, buffers->die);
 	q3n_mp_writel(io, Q3N_REG_MP_PLANE_MASK, buffers->mask);
-	for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
+	for (plane = 0; plane < io->planes_per_die; plane++) {
 		u32 offset;
 
 		if (!(buffers->mask & BIT(plane)))
@@ -190,7 +192,7 @@ int q3n_mp_erase(struct q3n_mp_io *io,
 		return ret;
 	q3n_mp_writel(io, Q3N_REG_MP_DIE, buffers->die);
 	q3n_mp_writel(io, Q3N_REG_MP_PLANE_MASK, buffers->mask);
-	for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
+	for (plane = 0; plane < io->planes_per_die; plane++) {
 		if (buffers->mask & BIT(plane))
 			q3n_mp_select_addr(io, buffers, plane);
 	}

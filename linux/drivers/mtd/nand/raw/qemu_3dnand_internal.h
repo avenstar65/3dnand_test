@@ -18,6 +18,17 @@
 
 struct q3n_device_desc;
 
+struct q3n_device_geometry {
+	u32 page_size;
+	u32 oob_size;
+	u32 pages_per_block;
+	u32 blocks_per_plane;
+	u32 ecc_step_size;
+	u32 ecc_strength;
+	u32 ldpc_bytes_per_step;
+	u32 ldpc_steps;
+};
+
 struct qemu_3dnand_data_block_meta {
 	u32 generation;
 	bool bad;
@@ -61,8 +72,8 @@ struct qemu_3dnand {
 
 	struct q3n_mp_io mp;
 	struct q3n_geometry profile_geometry;
-	u8 *mp_buf[Q3N_PLANES_PER_DIE];
-	u8 *mp_oob[Q3N_PLANES_PER_DIE];
+	u8 *mp_buf[Q3N_MAX_PLANES_PER_DIE];
+	u8 *mp_oob[Q3N_MAX_PLANES_PER_DIE];
 	enum q3n_stripe_state *profile_state;
 	u32 profile_leb_count;
 
@@ -87,6 +98,7 @@ struct qemu_3dnand {
 	u8 *raid_buf;
 	u32 page_size;
 	u32 oob_size;
+	u32 physical_oob_size;
 	u32 ecc_step_size;
 	u32 ecc_strength;
 	u32 ldpc_bytes_per_step;
@@ -138,15 +150,15 @@ int q3n_hw_read_id_locked(struct qemu_3dnand *q3n, u8 *id, size_t len);
 int q3n_hw_read_page_locked(struct qemu_3dnand *q3n, u32 block, u32 page,
 			    u8 *buf, u32 op_class, struct q3n_ecc_result *ecc);
 int q3n_hw_read_oob_locked(struct qemu_3dnand *q3n, u32 block, u32 page,
-			   u8 oob[Q3N_LOGICAL_OOB_SIZE], u32 op_class);
+			   u8 *oob, u32 op_class);
 int q3n_hw_program_page_locked(struct qemu_3dnand *q3n, u32 block, u32 page,
 			       const u8 *buf, u32 op_class);
 int q3n_hw_program_oob_locked(struct qemu_3dnand *q3n, u32 block, u32 page,
-			      const u8 oob[Q3N_LOGICAL_OOB_SIZE], u32 op_class);
+			      const u8 *oob, u32 op_class);
 int q3n_hw_erase_block_locked(struct qemu_3dnand *q3n, u32 block);
 int q3n_hw_get_block_status_locked(struct qemu_3dnand *q3n, u32 block,
 				   u32 *status);
-void q3n_hw_build_bad_block_oob(u8 *logical_oob);
+void q3n_hw_build_bad_block_oob(u8 *logical_oob, size_t oob_size);
 void q3n_hw_account_background_ecc(struct qemu_3dnand *q3n,
 				   const struct q3n_ecc_result *ecc);
 void q3n_hw_account_foreground_ecc(struct qemu_3dnand *q3n,
@@ -203,13 +215,15 @@ void q3n_debugfs_remove(struct qemu_3dnand *q3n);
 void q3n_debugfs_unpause(struct qemu_3dnand *q3n);
 
 const struct q3n_device_desc *q3n_device_match(const u8 *id, size_t len);
+int q3n_device_apply_geometry(struct qemu_3dnand *q3n,
+			      const struct q3n_device_desc *device);
+int q3n_device_validate_geometry(struct qemu_3dnand *q3n,
+			 const struct q3n_device_geometry *observed);
 int q3n_device_validate(struct qemu_3dnand *q3n,
 			const struct q3n_device_desc *device);
 int q3n_device_build_scan_id(struct qemu_3dnand *q3n,
 			     struct nand_flash_dev *scan_id, u32 writesize,
 			     u32 oobsize, u32 erasesize, u64 size);
 const char *q3n_device_name(const struct q3n_device_desc *device);
-u8 q3n_device_dies(const struct q3n_device_desc *device);
-u8 q3n_device_planes_per_die(const struct q3n_device_desc *device);
 
 #endif /* __QEMU_3DNAND_INTERNAL_H */

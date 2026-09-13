@@ -85,6 +85,7 @@ static int q3n_validate_controller(struct qemu_3dnand *q3n)
 
 static int q3n_read_geometry(struct qemu_3dnand *q3n)
 {
+	struct q3n_device_geometry observed;
 	u32 geom0 = q3n_hw_readl(q3n, Q3N_REG_GEOM0);
 	u32 geom1 = q3n_hw_readl(q3n, Q3N_REG_GEOM1);
 	u32 ecc_geom0 = q3n_hw_readl(q3n, Q3N_REG_ECC_GEOM0);
@@ -92,14 +93,18 @@ static int q3n_read_geometry(struct qemu_3dnand *q3n)
 	u32 pool0 = q3n_hw_readl(q3n, Q3N_REG_POOL0);
 	u32 pool1 = q3n_hw_readl(q3n, Q3N_REG_POOL1);
 
-	q3n->page_size = geom0 & 0xffff;
-	q3n->oob_size = geom0 >> 16;
-	q3n->ecc_step_size = ecc_geom0 & 0xffff;
-	q3n->ecc_strength = ecc_geom0 >> 16;
-	q3n->ldpc_bytes_per_step = ecc_geom1 & 0xffff;
-	q3n->ldpc_steps = ecc_geom1 >> 16;
-	q3n->pages_per_block = geom1 & 0xffff;
-	q3n->blocks_per_plane = geom1 >> 16;
+	observed = (struct q3n_device_geometry) {
+		.page_size = geom0 & 0xffff,
+		.oob_size = geom0 >> 16,
+		.pages_per_block = geom1 & 0xffff,
+		.blocks_per_plane = geom1 >> 16,
+		.ecc_step_size = ecc_geom0 & 0xffff,
+		.ecc_strength = ecc_geom0 >> 16,
+		.ldpc_bytes_per_step = ecc_geom1 & 0xffff,
+		.ldpc_steps = ecc_geom1 >> 16,
+	};
+	if (q3n_device_validate_geometry(q3n, &observed))
+		return -EINVAL;
 	q3n->data_blocks_per_plane = pool0 & 0xffff;
 	q3n->parity_blocks_per_plane = pool0 >> 16;
 	q3n->metadata_blocks_per_plane = pool1 & 0xffff;
@@ -121,7 +126,8 @@ static int q3n_discover_device(struct qemu_3dnand *q3n)
 	q3n->device = q3n_device_match(q3n->nand_id, q3n->nand_id_len);
 	if (!q3n->device)
 		return dev_err_probe(dev, -ENODEV, "unsupported NAND ID\n");
-	return 0;
+	ret = q3n_device_apply_geometry(q3n, q3n->device);
+	return ret ? dev_err_probe(dev, ret, "invalid NAND descriptor\n") : 0;
 }
 
 static int q3n_validate_device_geometry(struct qemu_3dnand *q3n)
@@ -137,14 +143,17 @@ static void q3n_configure_geometry(struct qemu_3dnand *q3n)
 {
 	q3n->mp.regs = q3n->regs;
 	q3n->mp.page_size = q3n->page_size;
+	q3n->mp.oob_size = q3n->oob_size;
 	q3n->mp.pages_per_block = q3n->pages_per_block;
+	q3n->mp.dies = q3n->profile_geometry.dies;
+	q3n->mp.planes_per_die = q3n->profile_geometry.planes_per_die;
 	q3n->profile_geometry = (struct q3n_geometry) {
 		.page_size = q3n->page_size,
 		.pages_per_block = q3n->pages_per_block,
 		.blocks_per_plane = q3n->blocks_per_plane,
 		.data_blocks_per_plane = q3n->data_blocks_per_plane,
-		.dies = q3n_device_dies(q3n->device),
-		.planes_per_die = q3n_device_planes_per_die(q3n->device),
+		.dies = q3n->profile_geometry.dies,
+		.planes_per_die = q3n->profile_geometry.planes_per_die,
 		.raid_level = q3n->raid_level,
 	};
 	q3n->profile_leb_count = q3n->data_blocks_per_plane *
@@ -167,9 +176,9 @@ static int q3n_alloc_buffers(struct qemu_3dnand *q3n)
 	q3n->raid_buf = devm_kmalloc(dev, q3n->page_size, GFP_KERNEL);
 	if (!q3n->page_buf || !q3n->raid_buf)
 		return -ENOMEM;
-	for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
+	for (plane = 0; plane < q3n->profile_geometry.planes_per_die; plane++) {
 		q3n->mp_buf[plane] = devm_kmalloc(dev, q3n->page_size, GFP_KERNEL);
-		q3n->mp_oob[plane] = devm_kmalloc(dev, Q3N_LOGICAL_OOB_SIZE,
+		q3n->mp_oob[plane] = devm_kmalloc(dev, q3n->oob_size,
 						 GFP_KERNEL);
 		if (!q3n->mp_buf[plane] || !q3n->mp_oob[plane])
 			return -ENOMEM;
@@ -219,9 +228,10 @@ static void q3n_log_geometry(struct qemu_3dnand *q3n)
 	resource_size_t bar_start = pci_resource_start(q3n->pdev, 0);
 
 	dev_info(dev,
-		 "q3n NAND %s: page=%u oob=%u pages/block=%u blocks/plane=%u cap=0x%x\n",
+		 "q3n NAND %s: page=%u oob=%u physical-oob=%u pages/block=%u blocks/plane=%u cap=0x%x\n",
 		 q3n_device_name(q3n->device),
-		 q3n->page_size, q3n->oob_size, q3n->pages_per_block,
+		 q3n->page_size, q3n->oob_size, q3n->physical_oob_size,
+		 q3n->pages_per_block,
 		 q3n->blocks_per_plane, q3n->cap);
 	dev_info(dev,
 		 "q3n driver %s: data=%u parity=%u metadata=%u reserve=%u bar=%pa size=%pa mtd=%s\n",

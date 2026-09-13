@@ -575,7 +575,7 @@ static int q3n_serial_validate_oob(struct mtd_info *mtd, loff_t addr,
 		return -EOPNOTSUPP;
 	if (addr < 0 || addr + ops->len > mtd->size)
 		return -EINVAL;
-	if (ops->ooboffs >= Q3N_LOGICAL_OOB_SIZE && ops->ooblen)
+	if (ops->ooboffs >= mtd->oobsize && ops->ooblen)
 		return -EINVAL;
 	return 0;
 }
@@ -589,8 +589,8 @@ static int q3n_serial_read_oob_step(struct qemu_3dnand *q3n,
 	size_t data_chunk = min_t(size_t, ops->len - cursor->data_done,
 				  q3n->page_size - cursor->column);
 	size_t oob_chunk = min_t(size_t, ops->ooblen - cursor->oob_done,
-				 Q3N_LOGICAL_OOB_SIZE - cursor->ooboffs);
-	u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
+				 q3n->oob_size - cursor->ooboffs);
+	u8 logical_oob[Q3N_MAX_LOGICAL_OOB_SIZE];
 	u32 block, page, ignored;
 	int ret;
 
@@ -669,7 +669,7 @@ static int q3n_serial_program_buffers_locked(struct qemu_3dnand *q3n,
 		u32 block, u32 page, const u8 *data, const u8 *oob, u32 ooboffs,
 		size_t ooblen, bool *data_programmed, bool *oob_programmed)
 {
-	u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
+	u8 logical_oob[Q3N_MAX_LOGICAL_OOB_SIZE];
 	int ret = 0;
 
 	memset(logical_oob, 0xff, sizeof(logical_oob));
@@ -792,7 +792,7 @@ static int q3n_serial_write_oob_step(struct qemu_3dnand *q3n,
 {
 	loff_t page_addr = cursor->logical_page * q3n->page_size;
 	size_t oob_chunk = min_t(size_t, ops->ooblen - cursor->oob_done,
-				 Q3N_LOGICAL_OOB_SIZE - cursor->ooboffs);
+				 q3n->oob_size - cursor->ooboffs);
 	const u8 *data = cursor->data_done < ops->len ?
 		ops->datbuf + cursor->data_done : NULL;
 	bool data_programmed;
@@ -975,7 +975,7 @@ int __maybe_unused q3n_serial_block_bad(struct mtd_info *mtd, loff_t ofs)
 int __maybe_unused q3n_serial_block_markbad(struct mtd_info *mtd, loff_t ofs)
 {
 	struct qemu_3dnand *q3n = mtd->priv;
-	u8 logical_oob[Q3N_LOGICAL_OOB_SIZE];
+	u8 logical_oob[Q3N_MAX_LOGICAL_OOB_SIZE];
 	u64 block;
 	u32 status;
 	int ret;
@@ -1005,7 +1005,7 @@ int __maybe_unused q3n_serial_block_markbad(struct mtd_info *mtd, loff_t ofs)
 	if (ret)
 		goto out_unlock;
 
-	q3n_hw_build_bad_block_oob(logical_oob);
+	q3n_hw_build_bad_block_oob(logical_oob, q3n->oob_size);
 	ret = q3n_hw_program_oob_locked(q3n, block, 0,
 						   logical_oob, Q3N_OP_FOREGROUND);
 	if (!ret)

@@ -41,7 +41,7 @@ static int qemu_3dnand_inject_profile_plane_loss(void *data, u64 value)
 	u64 addr;
 	int ret;
 
-	if (value >= Q3N_PLANES_PER_DIE)
+	if (value >= q3n->profile_geometry.planes_per_die)
 		return -ERANGE;
 	block = value * q3n->blocks_per_plane;
 	addr = block * q3n->pages_per_block * q3n->page_size;

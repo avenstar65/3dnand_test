@@ -171,7 +171,9 @@ flowchart TB
 QEMU 和 Linux 使用真实的完整 NAND ID `9c d7 98 a6 51 33 4e 44`。当前器件
 定义为 `YMTC QEMU 3D NAND`，私有描述表位于独立 `qemu_3dnand_device.c`，
 后续可增加非 YMTC 器件而不把厂商定义放回 PCI、NAND 或 RAID 文件。未知或
-仅前缀相同的 ID 不会注册 MTD。详细边界和验证结果见
+仅前缀相同的 ID 不会注册 MTD。page size、逻辑/物理 OOB、die/plane 和
+ECC/LDPC 参数由完整 ID 对应的 descriptor 填充，控制器几何寄存器仅用于
+交叉校验；Linux 公共寄存器头不再固定当前器件几何。详细边界和验证结果见
 [Linux 驱动按功能拆分设计](docs/superpowers/specs/2026-09-13-linux-driver-functional-split-design.md)。
 
 自动执行 MTD smoke 并在成功后关闭虚拟机：

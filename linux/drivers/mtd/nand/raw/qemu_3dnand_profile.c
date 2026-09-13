@@ -62,7 +62,7 @@ void q3n_profile_buffers(struct qemu_3dnand *q3n,
 	memset(buffers, 0, sizeof(*buffers));
 	buffers->mask = group->member_mask;
 	buffers->die = group->die;
-	for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
+	for (plane = 0; plane < q3n->profile_geometry.planes_per_die; plane++) {
 		buffers->addr[plane] = group->member[plane];
 		buffers->data[plane] = oob ? q3n->mp_oob[plane] :
 			q3n->mp_buf[plane];
@@ -88,14 +88,14 @@ int q3n_profile_write_page_locked(struct qemu_3dnand *q3n,
 	q3n_recovery_begin(&q3n->profile_state[state_index]);
 	q3n_profile_buffers(q3n, &group, &buffers, false);
 	if (q3n->raid_level == Q3N_RAID1) {
-		for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++)
+		for (plane = 0; plane < q3n->profile_geometry.planes_per_die; plane++)
 			if (group.member_mask & BIT(plane))
 				buffers.data[plane] = (u8 *)data;
 	} else {
 		u8 slot = 0;
 
 		memset(q3n->raid_buf, 0, q3n->page_size);
-		for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
+		for (plane = 0; plane < q3n->profile_geometry.planes_per_die; plane++) {
 			if (plane == group.parity_plane) {
 				buffers.data[plane] = q3n->raid_buf;
 				continue;
@@ -176,7 +176,7 @@ static u8 q3n_profile_collect_raid5(struct qemu_3dnand *q3n,
 	u8 slot = 0;
 	u8 plane;
 
-	for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
+	for (plane = 0; plane < q3n->profile_geometry.planes_per_die; plane++) {
 		bool ok = (result->success_mask & BIT(plane)) &&
 			!result->ecc[plane].uncorrectable;
 
@@ -211,7 +211,7 @@ static int q3n_profile_recover_raid5(struct qemu_3dnand *q3n,
 	    result->ecc[group->parity_plane].uncorrectable ||
 	    !q3n_recovery_allowed(q3n->profile_state[state_index]))
 		return q3n_profile_read_failed(q3n);
-	for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++)
+	for (plane = 0; plane < q3n->profile_geometry.planes_per_die; plane++)
 		if (plane != missing && plane != group->parity_plane)
 			source[count++] = plane;
 	q3n_raid5_recover(out + missing_slot * q3n->page_size,
@@ -231,7 +231,7 @@ int q3n_profile_read_page_locked(struct qemu_3dnand *q3n,
 	u64 state_index;
 	u32 column;
 	u32 max_bitflips = 0;
-	u8 missing = Q3N_PLANES_PER_DIE;
+	u8 missing = q3n->profile_geometry.planes_per_die;
 	u8 failed;
 	int ret;
 
@@ -377,7 +377,7 @@ int __maybe_unused q3n_profile_block_bad(struct mtd_info *mtd,
 		goto out;
 	q3n_profile_buffers(q3n, &group, &buffers, true);
 	q3n_mp_read_oob(&q3n->mp, &buffers, &result);
-	for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
+	for (plane = 0; plane < q3n->profile_geometry.planes_per_die; plane++) {
 		if (!(group.member_mask & BIT(plane)))
 			continue;
 		if (!(result.success_mask & BIT(plane))) {
@@ -414,11 +414,11 @@ int __maybe_unused q3n_profile_block_markbad(struct mtd_info *mtd,
 		goto out;
 	q3n_profile_buffers(q3n, &group, &buffers, true);
 	q3n_mp_read_oob(&q3n->mp, &buffers, &result);
-	for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
+	for (plane = 0; plane < q3n->profile_geometry.planes_per_die; plane++) {
 		if (!(group.member_mask & BIT(plane)))
 			continue;
 		if (!(result.success_mask & BIT(plane)))
-			memset(q3n->mp_oob[plane], 0xff, Q3N_LOGICAL_OOB_SIZE);
+			memset(q3n->mp_oob[plane], 0xff, q3n->oob_size);
 		q3n->mp_oob[plane][0] = 0x00;
 	}
 	ret = q3n_mp_program_oob(&q3n->mp, &buffers, &result);

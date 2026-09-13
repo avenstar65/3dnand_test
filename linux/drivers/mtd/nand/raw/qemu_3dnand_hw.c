@@ -138,7 +138,7 @@ int q3n_hw_read_page_locked(struct qemu_3dnand *q3n,
 
 int q3n_hw_read_oob_locked(
 		struct qemu_3dnand *q3n, u32 block, u32 page,
-		u8 logical_oob[Q3N_LOGICAL_OOB_SIZE], u32 op_class)
+		u8 *logical_oob, u32 op_class)
 {
 	int ret;
 	u32 i;
@@ -146,13 +146,13 @@ int q3n_hw_read_oob_locked(
 	lockdep_assert_held(&q3n->mtd_lock);
 	qemu_3dnand_set_addr(q3n, q3n_hw_phys_addr(q3n, block, page));
 	q3n_hw_writel(q3n, Q3N_REG_OP_CLASS, op_class);
-	q3n_hw_writel(q3n, Q3N_REG_OOB_LEN, Q3N_LOGICAL_OOB_SIZE);
+	q3n_hw_writel(q3n, Q3N_REG_OOB_LEN, q3n->oob_size);
 	q3n_hw_writel(q3n, Q3N_REG_CMD, Q3N_CMD_READ_PAGE_OOB);
 	ret = q3n_hw_wait_ready_locked(q3n);
 	if (ret)
 		return ret;
 
-	for (i = 0; i < Q3N_LOGICAL_OOB_SIZE; i += sizeof(u32))
+	for (i = 0; i < q3n->oob_size; i += sizeof(u32))
 		put_unaligned_le32(q3n_hw_readl(q3n, Q3N_REG_DATA),
 				   logical_oob + i);
 
@@ -169,8 +169,8 @@ int q3n_hw_program_page_locked(
 	lockdep_assert_held(&q3n->mtd_lock);
 	qemu_3dnand_set_addr(q3n, q3n_hw_phys_addr(q3n, block, page));
 	q3n_hw_writel(q3n, Q3N_REG_OP_CLASS, op_class);
-	q3n_hw_writel(q3n, Q3N_REG_LEN, Q3N_PAGE_SIZE);
-	for (i = 0; i < Q3N_PAGE_SIZE; i += sizeof(u32))
+	q3n_hw_writel(q3n, Q3N_REG_LEN, q3n->page_size);
+	for (i = 0; i < q3n->page_size; i += sizeof(u32))
 		q3n_hw_writel(q3n, Q3N_REG_DATA,
 				     get_unaligned_le32(data + i));
 	q3n_hw_writel(q3n, Q3N_REG_CMD, Q3N_CMD_PROGRAM_PAGE);
@@ -180,7 +180,7 @@ int q3n_hw_program_page_locked(
 
 int q3n_hw_program_oob_locked(
 		struct qemu_3dnand *q3n, u32 block, u32 page,
-		const u8 logical_oob[Q3N_LOGICAL_OOB_SIZE], u32 op_class)
+		const u8 *logical_oob, u32 op_class)
 {
 	int ret;
 	u32 i;
@@ -188,8 +188,8 @@ int q3n_hw_program_oob_locked(
 	lockdep_assert_held(&q3n->mtd_lock);
 	qemu_3dnand_set_addr(q3n, q3n_hw_phys_addr(q3n, block, page));
 	q3n_hw_writel(q3n, Q3N_REG_OP_CLASS, op_class);
-	q3n_hw_writel(q3n, Q3N_REG_OOB_LEN, Q3N_LOGICAL_OOB_SIZE);
-	for (i = 0; i < Q3N_LOGICAL_OOB_SIZE; i += sizeof(u32))
+	q3n_hw_writel(q3n, Q3N_REG_OOB_LEN, q3n->oob_size);
+	for (i = 0; i < q3n->oob_size; i += sizeof(u32))
 		q3n_hw_writel(q3n, Q3N_REG_DATA,
 				     get_unaligned_le32(logical_oob + i));
 
@@ -209,9 +209,9 @@ int q3n_hw_erase_block_locked(struct qemu_3dnand *q3n,
 	return q3n_hw_wait_ready_locked(q3n);
 }
 
-void q3n_hw_build_bad_block_oob(u8 *logical_oob)
+void q3n_hw_build_bad_block_oob(u8 *logical_oob, size_t oob_size)
 {
-	memset(logical_oob, 0xff, Q3N_LOGICAL_OOB_SIZE);
+	memset(logical_oob, 0xff, oob_size);
 	logical_oob[0] = 0x00;
 }
 

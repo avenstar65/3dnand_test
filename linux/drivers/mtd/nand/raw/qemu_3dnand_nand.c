@@ -72,7 +72,7 @@ static int qemu_3dnand_ecc_read_oob(struct nand_chip *chip, int page)
 			goto out;
 		}
 		chip->oob_poi[0] = 0xff;
-		for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++)
+		for (plane = 0; plane < q3n->profile_geometry.planes_per_die; plane++)
 			if ((group.member_mask & BIT(plane)) &&
 			    q3n->mp_oob[plane][Q3N_BBM_OOB_OFFSET] != 0xff)
 				chip->oob_poi[0] = 0x00;
@@ -80,7 +80,7 @@ static int qemu_3dnand_ecc_read_oob(struct nand_chip *chip, int page)
 #else
 	{
 		struct q3n_phys_addr phys;
-		u8 oob[Q3N_LOGICAL_OOB_SIZE];
+		u8 oob[Q3N_MAX_LOGICAL_OOB_SIZE];
 
 		ret = q3n_map_serial_data_page(&q3n->profile_geometry, page,
 					       &phys);
@@ -120,10 +120,10 @@ static int q3n_ecc_write_oob_locked(struct nand_chip *chip, int page,
 			goto out;
 		q3n_profile_invalidate_leb(q3n, leb);
 		q3n_profile_buffers(q3n, &group, &buffers, true);
-		for (plane = 0; plane < Q3N_PLANES_PER_DIE; plane++) {
+		for (plane = 0; plane < q3n->profile_geometry.planes_per_die; plane++) {
 			if (!(group.member_mask & BIT(plane)))
 				continue;
-			memset(q3n->mp_oob[plane], 0xff, Q3N_LOGICAL_OOB_SIZE);
+			memset(q3n->mp_oob[plane], 0xff, q3n->oob_size);
 			q3n->mp_oob[plane][0] = chip->oob_poi[0];
 		}
 		ret = q3n_mp_program_oob(&q3n->mp, &buffers, &result);
@@ -135,7 +135,7 @@ out:
 #else
 	{
 		struct q3n_phys_addr phys;
-		u8 oob[Q3N_LOGICAL_OOB_SIZE];
+		u8 oob[Q3N_MAX_LOGICAL_OOB_SIZE];
 
 		memset(oob, 0xff, sizeof(oob));
 		memcpy(oob, chip->oob_poi, q3n->mtd->oobsize);
@@ -455,15 +455,16 @@ static void qemu_3dnand_sync(struct nand_chip *chip)
 
 static int qemu_3dnand_attach_chip(struct nand_chip *chip)
 {
+	struct qemu_3dnand *q3n = qemu_3dnand_from_chip(chip);
 	struct mtd_info *mtd = nand_to_mtd(chip);
 
 	mtd_set_ooblayout(mtd, &qemu_3dnand_ooblayout_ops);
 	chip->ecc.engine_type = NAND_ECC_ENGINE_TYPE_ON_HOST;
 	chip->ecc.placement = NAND_ECC_PLACEMENT_OOB;
-	chip->ecc.size = Q3N_ECC_STEP_SIZE;
-	chip->ecc.strength = Q3N_ECC_STRENGTH;
+	chip->ecc.size = q3n->ecc_step_size;
+	chip->ecc.strength = q3n->ecc_strength;
 	chip->ecc.bytes = 0;
-	chip->ecc.steps = mtd->writesize / Q3N_ECC_STEP_SIZE;
+	chip->ecc.steps = mtd->writesize / q3n->ecc_step_size;
 	chip->ecc.read_page = qemu_3dnand_ecc_read_page;
 	chip->ecc.write_page = qemu_3dnand_ecc_write_page;
 	chip->ecc.read_page_raw = qemu_3dnand_ecc_read_page_raw;
@@ -521,7 +522,7 @@ static void q3n_nand_init_mtd(struct qemu_3dnand *q3n)
 	q3n->mtd->name = "qemu-3dnand";
 	q3n->mtd->dev.parent = &q3n->pdev->dev;
 	q3n->mtd->owner = THIS_MODULE;
-	q3n->mtd->bitflip_threshold = Q3N_ECC_STRENGTH;
+	q3n->mtd->bitflip_threshold = q3n->ecc_strength;
 	q3n->mtd->priv = q3n;
 }
 
@@ -559,7 +560,7 @@ int q3n_nand_register(struct qemu_3dnand *q3n)
 	if (ret || !writesize || !erasesize || !size || size > U64_MAX - SZ_1M)
 		return ret ?: -EINVAL;
 	ret = q3n_device_build_scan_id(q3n, &q3n->scan_ids[0], writesize,
-		Q3N_ENABLE_MULTIPLANE_RAID ? 1 : Q3N_LOGICAL_OOB_SIZE,
+		Q3N_ENABLE_MULTIPLANE_RAID ? 1 : q3n->oob_size,
 		erasesize, size);
 	if (ret)
 		return ret;
