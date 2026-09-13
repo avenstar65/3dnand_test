@@ -705,4 +705,6 @@ ${CC:-cc} -std=c11 -Wall -Wextra -Werror \
   -o "$controller_tmp/test_q3n_controller"
 "$controller_tmp/test_q3n_controller"
 
+python3 "$repo_root/tests/test_q3n_architecture.py" -v
+
 printf 'ok: script structure verified\n'
