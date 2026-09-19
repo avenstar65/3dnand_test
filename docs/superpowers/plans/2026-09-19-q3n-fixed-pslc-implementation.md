@@ -25,8 +25,8 @@
 - A QEMU/driver ABI mismatch in the new capability bit must fail probe instead of silently registering TLC MTD.
 - The physical READID must remain byte-for-byte unchanged while operational `bits_per_cell` becomes 1.
 - The pSLC override must happen in `attach_chip()`, before `nand_scan_tail()`, so MTD becomes `MTD_NANDFLASH`.
-- Reduced block-pool input must reject zero, non-numeric, and pool-overflow values before QEMU launch.
-- The UBIFS smoke must never erase the default full-capacity image and must cleanly unmount/detach on success or failure.
+- Reduced block-pool input must reject zero, non-numeric, and pool-overflow values before QEMU launch; 82 data blocks/plane must expose a RAID1 MTD of exactly 8200 MiB.
+- The UBIFS smoke must use a dedicated 8200 MiB logical MTD image, never erase the default full-capacity image, and cleanly unmount/detach on success or failure.
 
 ---
 
@@ -216,7 +216,7 @@ git commit -m "feat: expose q3n runtime geometry as pseudo-SLC"
 
 **Interfaces:**
 - Consumes: QEMU's existing `data-blocks-per-plane` property.
-- Produces: host option `--data-blocks-per-plane N`; default remains 208.
+- Produces: host option `--data-blocks-per-plane N`; default remains 208 and `N=82` yields an 8200 MiB RAID1 MTD.
 
 - [ ] **Step 1: Add failing script assertions and argument tests**
 
@@ -258,6 +258,15 @@ Run:
 
 Expected: PASS; help lists the new option and states that it is intended for reduced-capacity tests.
 
+Run an interactive geometry check with `--data-blocks-per-plane 82`,
+load `qemu_3dnand raid_level=1`, and require:
+
+```sh
+test "$(cat /sys/class/mtd/mtd0/size)" = "8598323200"
+```
+
+The value is `82 × 4 × 1600 × 16384` bytes, or 8200 MiB.
+
 - [ ] **Step 5: Commit the launch option**
 
 ```bash
@@ -274,7 +283,7 @@ git commit -m "test: support reduced q3n block pools"
 - Modify: `tests/test_scripts.sh`
 
 **Interfaces:**
-- Consumes: `--data-blocks-per-plane 8`, guest `raid_level=1`, compression modules, UBI and UBIFS.
+- Consumes: `--data-blocks-per-plane 82`, a dedicated `work/media/q3n-ubifs-smoke.raw` image, guest `raid_level=1`, compression modules, UBI and UBIFS.
 - Produces: guest function `mtd_q3n_ubifs_smoke()`, boot selector `MTD_SMOKE=q3n-ubifs-smoke`, and success marker `q3n pSLC RAID1 UBIFS smoke passed`.
 
 - [ ] **Step 1: Add failing structure tests**
@@ -329,7 +338,8 @@ Create `scripts/q3n-ubifs-smoke.sh` following the existing smoke wrappers:
 
 ```sh
 if ! "$repo_root/scripts/run-qemu.sh" --fresh-nand \
-     --data-blocks-per-plane 8 \
+     --nand-image work/media/q3n-ubifs-smoke.raw \
+     --data-blocks-per-plane 82 \
      --append "MTD_SMOKE=q3n-ubifs-smoke" >"$log" 2>&1; then
   cat "$log"
   die "q3n pSLC RAID1 UBIFS QEMU failed"
@@ -337,6 +347,10 @@ fi
 ```
 
 Require both the q3n UBIFS marker and generic MTD success marker.
+Before formatting, the guest must require the MTD size to be
+`8598323200` bytes. The wrapper must use a cleanup trap for only the exact
+`work/media/q3n-ubifs-smoke.raw` test image so a failed run cannot leave a
+large allocation behind.
 
 - [ ] **Step 5: Rebuild QEMU/kernel/rootfs and verify GREEN end to end**
 
