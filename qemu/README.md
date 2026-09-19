@@ -31,6 +31,7 @@ Implemented base functions:
 | Raw NAND byte/overlay restart persistence | Implemented through `BlockBackend` |
 | First-page `OOB[0]` bad-block marker | Implemented (`0xff` good, `0x00` bad) |
 | 25MiB data block erase | Implemented |
+| Fixed pSLC capability | Implemented (`Q3N_CAP_PSEUDO_SLC`) |
 | Basic page read/program/block erase commands | Implemented |
 | Independent 128 B logical-OOB read/program commands | Implemented |
 | Arbitrary/repeated page program with NAND bytewise-AND semantics | Implemented |
@@ -101,7 +102,8 @@ there is no dedicated mark-bad command.
 The page slots are followed by sparse, fixed-size error-overlay slots. Each page
 has a 16384 B main bitmap and a 1536 B LDPC bitmap. Fault injection XORs bits in
 these persistent overlays, so injecting the same range twice restores it;
-erasing a block clears all of its overlays. Version 1 images are intentionally
+erasing a block discards its page and overlay ranges so the raw image remains
+sparse. Version 1 images are intentionally
 rejected because their physical-page stride and OOB semantics are incompatible
 with version 2.
 
@@ -142,14 +144,22 @@ For x86_64 bring-up, use the PCI wrapper:
 work/build/qemu-11.0.2/qemu-system-x86_64-unsigned -machine q35 -device q3n-nand-pci ...
 ```
 
-The Linux overlay registers an MTD device named `qemu-3dnand` through
-`nand_scan_with_ids()`, so NAND core creates and owns the RAM bad-block table.
-The controller READID value is `9c d7 98 a6 51 33 4e 44`; Linux matches all
+The Linux overlay performs one `nand_scan_with_ids()`, so NAND core creates and
+owns one RAM bad-block table, then registers `qemu-3dnand-test` and
+`qemu-3dnand-data`. The test partition is an eraseblock-aligned 8175 MiB slice.
+The controller advertises `Q3N_CAP_PSEUDO_SLC`; fixed pSLC uses the unchanged
+READID `9c d7 98 a6 51 33 4e 44`. Linux matches all
 eight bytes against its private `YMTC QEMU 3D NAND` descriptor before scanning.
+During controller `attach_chip()`, Linux requires the pSLC capability and sets
+the runtime memory organization to one bit per cell before MTD initialization.
 Page data and BBM OOB flow through `nand_chip.ecc.*`; erase sequencing uses the
 legacy `cmdfunc` / `waitfunc` callbacks. The driver maps logical pages to the
 QEMU physical media and owns the selected RAID1/RAID5 layout without providing
 an `exec_op()` implementation.
+
+RAID1 keeps a 16 KiB logical page and is covered by
+`scripts/q3n-ubifs-smoke.sh`. RAID5 exposes a 48 KiB logical page and remains a
+raw-MTD validation profile; unmodified UBI/UBIFS compatibility is not claimed.
 
 In the guest, `mtd.sh q3n-stats` reads debugfs counters and
 `mtd.sh q3n-inject-loss <logical-byte-address>` injects a single data page loss

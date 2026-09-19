@@ -51,7 +51,9 @@ BASE_IMAGE=your-registry.example.com/library/ubuntu:24.04 ./scripts/build-image.
 默认下载 QEMU 11.0.2，源码放在 `work/qemu/qemu-11.0.2`，构建输出在 `work/build/qemu-11.0.2/qemu-system-x86_64-unsigned`。
 可以用 `QEMU_VERSION` 或 `QEMU_DIR` 覆盖默认源码版本/目录。
 当前 QEMU overlay 会注册 `q3n-nand-pci`，`scripts/run-qemu.sh` 默认把它挂到 q35 PCI 总线上。
-Linux overlay 会注册 `qemu_3dnand` PCI 驱动，并通过直接 MTD 回调暴露名为 `qemu-3dnand` 的 MTD 设备。
+Linux overlay 会注册 `qemu_3dnand` PCI 驱动，经一次 `nand_scan_with_ids()`
+创建 NAND core BBT，再暴露 `qemu-3dnand-test` 和 `qemu-3dnand-data` 两个
+MTD 分区。
 
 配置并编译内核：
 
@@ -175,6 +177,36 @@ QEMU 和 Linux 使用真实的完整 NAND ID `9c d7 98 a6 51 33 4e 44`。当前�
 ECC/LDPC 参数由完整 ID 对应的 descriptor 填充，控制器几何寄存器仅用于
 交叉校验；Linux 公共寄存器头不再固定当前器件几何。详细边界和验证结果见
 [Linux 驱动按功能拆分设计](docs/superpowers/specs/2026-09-13-linux-driver-functional-split-design.md)。
+
+### 固定 pSLC 与 MTD 分区
+
+当前驱动只支持器件原有的固定 pSLC 布局；pSLC 与 TLC 使用相同物理 READID
+`9c d7 98 a6 51 33 4e 44`，不能靠修改 ID 区分。QEMU 始终报告
+`Q3N_CAP_PSEUDO_SLC`。Linux 在 NAND controller 的 `attach_chip()` 中要求该
+能力并把运行时 `bits_per_cell` 设为 1，随后 `nand_scan_tail()` 才以
+`MTD_NANDFLASH`（sysfs `type` 为 `nand`）完成注册。不会修改通用 NAND core、
+UBI 或 UBIFS 来绕过 MLC 检查。
+
+一次 scan 后，驱动把同一个 master/BBT 划分为：
+
+- `qemu-3dnand-test`：目标 8 GiB，按 eraseblock 向下取整；RAID1 和 RAID5
+  均为 8175 MiB（8572108800 B）。
+- `qemu-3dnand-data`：紧随 test 分区，占用剩余容量。
+
+RAID1 的逻辑 page 为 16 KiB，提供标准 UBI/UBIFS 自动验收：
+
+```sh
+./scripts/q3n-ubifs-smoke.sh
+```
+
+脚本只格式化 `qemu-3dnand-test`，使用独立
+`work/media/q3n-ubifs-smoke.raw`，并在退出时删除该镜像。手工操作时按顺序
+加载 `qemu_3dnand raid_level=1`、`zlib_deflate`、`deflate`、
+`zstd_compress`、`zstd`、`ubi`、`ubifs`，然后对 test 分区执行
+`ubiformat`、`ubiattach`、`ubimkvol` 和 UBIFS mount。不要对默认的大容量
+设备执行 `flash_erase -q "$MTD_DEV" 0 0`；它会无差别遍历全部 eraseblock，
+耗时且可能让后端镜像快速占用磁盘。RAID5 的逻辑 page 为 48 KiB，本阶段只
+作为 raw-MTD profile 验证，不声明兼容未修改的 UBI/UBIFS。
 
 自动执行 MTD smoke 并在成功后关闭虚拟机：
 

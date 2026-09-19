@@ -90,12 +90,17 @@
 `Q3N_CAP_MULTIPLANE` 置位时，驱动可以使用第 5 节定义的通用同 die
 multi-plane 命令；未置位时不得提交这些命令。
 
+`Q3N_CAP_PSEUDO_SLC` 表示控制器只暴露固定 pSLC 语义。该能力不改变物理
+READID；Linux 必须在 `attach_chip()` 中确认能力后，把 NAND 运行时
+`bits_per_cell` 设为 1，再由 `nand_scan_tail()` 初始化 SLC MTD。
+
 | 位 | 定义 | 说明 |
 | ---: | --- | --- |
 | 0 | `Q3N_CAP_BASIC_FLASH` | 支持基础 NAND 读、写、擦除 |
 | 1 | `Q3N_CAP_PERSISTENT_MEDIA` | 支持持久化 NAND 后端镜像 |
 | 2 | `Q3N_CAP_BAD_BLOCK_MARKER` | 支持物理坏块标记 |
 | 3 | `Q3N_CAP_MULTIPLANE` | 支持四 slot 同 die multi-plane 命令与逐 slot 结果 |
+| 4 | `Q3N_CAP_PSEUDO_SLC` | 固定 pSLC 模式，要求 NAND core 以 SLC 语义注册 |
 
 ## 4. 状态寄存器
 
@@ -152,7 +157,7 @@ success/failure bitmap；全局 `STATUS.ERROR` 不清除逐 slot 结果。选择
 `READ_ID` 在 PIO buffer 中返回：
 
 ```text
-2c d7 90 a6 51 33 4e 44
+9c d7 98 a6 51 33 4e 44
 ```
 
 后四个字节的 ASCII 表示为 `Q3ND`。

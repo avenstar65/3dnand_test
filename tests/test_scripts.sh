@@ -123,6 +123,15 @@ for file in \
   assert_file "$file"
 done
 assert_file docs/qemu-3dnand-register-reference.md
+assert_contains README.md 'Q3N_CAP_PSEUDO_SLC'
+assert_contains README.md 'q3n-ubifs-smoke\.sh'
+assert_contains README.md 'qemu-3dnand-test'
+assert_contains README.md '不要对默认的大容量'
+assert_contains README.md 'flash_erase -q.*0 0'
+assert_contains qemu/README.md 'Q3N_CAP_PSEUDO_SLC'
+assert_contains qemu/README.md 'fixed pSLC'
+assert_contains qemu/README.md '9c d7 98 a6 51 33 4e 44'
+assert_contains docs/qemu-3dnand-register-reference.md 'Q3N_CAP_PSEUDO_SLC'
 
 assert_file tests/test_q3n_overlay.c
 assert_file tests/test_q3n_overlay.sh
@@ -212,6 +221,7 @@ assert_contains rootfs/profile.d/mtd.sh 'zstd_compress'
 assert_contains rootfs/profile.d/mtd.sh 'ubiformat -q'
 assert_contains rootfs/profile.d/mtd.sh 'qemu_3dnand'
 assert_contains rootfs/profile.d/mtd.sh 'qemu-3dnand'
+assert_contains rootfs/profile.d/mtd.sh 'grep -q.*qemu-3dnand-test'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-inject-loss'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-stats'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-serial-smoke'

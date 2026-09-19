@@ -13,7 +13,8 @@ mtd_load_simulators() {
 mtd_load_q3n() {
   modprobe qemu_3dnand || return 1
   cat /proc/mtd
-  grep -q '"qemu-3dnand"' /proc/mtd
+  grep -q '"qemu-3dnand-test"' /proc/mtd || return 1
+  grep -q '"qemu-3dnand-data"' /proc/mtd
 }
 
 mtd_q3n_stats() {
