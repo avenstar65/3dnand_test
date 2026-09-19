@@ -88,8 +88,9 @@ OOB、坏块标记和 bitflip overlay 会在 QEMU 正常退出后保留。需要
 ./scripts/run-qemu.sh --fresh-nand
 ```
 
-也可以用 `--nand-image PATH` 选择独立镜像。镜像是约 51 GiB 的固定布局 sparse
-raw 文件，实际只为 header、已写物理页和 overlay 分配空间。
+也可以用 `--nand-image PATH` 选择独立镜像。镜像是约 106 GiB 的固定布局 sparse
+raw 文件（包含约 53 GiB 的物理页 slot 和约 53 GiB 的 bitflip overlay），
+实际只为 header、已写物理页和 overlay 分配空间。
 
 每个 `0x4680` B 物理页的精确布局为：
 
