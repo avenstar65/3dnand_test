@@ -487,8 +487,6 @@ int q3n_media_erase_block(Q3NMedia *m, uint32_t block)
 {
     uint64_t page_block_length;
     uint64_t overlay_block_length;
-    uint8_t *clear_overlay;
-    uint8_t *clear_pages;
     uint8_t marker;
     int ret;
 
@@ -508,18 +506,14 @@ int q3n_media_erase_block(Q3NMedia *m, uint32_t block)
                         &overlay_block_length)) {
         return -EOVERFLOW;
     }
-    clear_pages = g_malloc0(page_block_length);
-    ret = blk_pwrite(m->blk, q3n_media_slot_offset(m, block, 0),
-                     page_block_length, clear_pages, 0);
-    g_free(clear_pages);
+    ret = blk_pdiscard(m->blk, q3n_media_slot_offset(m, block, 0),
+                       page_block_length, 0);
     if (ret < 0) {
         return ret;
     }
-    clear_overlay = g_malloc0(overlay_block_length);
-    ret = blk_pwrite(m->blk,
-                     q3n_media_overlay_slot_offset(m, block, 0),
-                     overlay_block_length, clear_overlay, 0);
-    g_free(clear_overlay);
+    ret = blk_pdiscard(m->blk,
+                       q3n_media_overlay_slot_offset(m, block, 0),
+                       overlay_block_length, 0);
     if (ret < 0) {
         return ret;
     }

@@ -51,7 +51,13 @@ mtd_q3n_inject_loss() {
 }
 
 mtd_find_q3n() {
-  sed -n 's/^mtd\([0-9][0-9]*\):.*"qemu-3dnand"$/\1/p' /proc/mtd | head -n 1
+  sed -n 's/^mtd\([0-9][0-9]*\):.*"qemu-3dnand-test"$/\1/p' /proc/mtd | head -n 1
+}
+
+mtd_find_named() {
+  mtd_name=$1
+  sed -n "s/^mtd\\([0-9][0-9]*\\):.*\"$mtd_name\"$/\\1/p" /proc/mtd |
+    head -n 1
 }
 
 mtd_q3n_serial_cleanup() {
@@ -847,6 +853,49 @@ mtd_ubifs() {
 
   echo "UBIFS 已挂载:"
   mount | grep "$UBIFS_MOUNT" || return 1
+}
+
+mtd_q3n_ubifs_cleanup() {
+  sync 2>/dev/null || true
+  umount "$UBIFS_MOUNT" 2>/dev/null || true
+  if [ -n "${q3n_ubifs_mtd_num:-}" ]; then
+    ubidetach -m "$q3n_ubifs_mtd_num" 2>/dev/null || true
+  fi
+}
+
+mtd_q3n_ubifs_smoke() {
+  q3n_ubifs_mtd_num=
+  trap 'mtd_q3n_ubifs_cleanup' 0
+  trap 'exit 1' HUP INT TERM
+  modprobe qemu_3dnand raid_level=1 || return 1
+  modprobe zlib_deflate || return 1
+  modprobe deflate || return 1
+  modprobe zstd_compress || return 1
+  modprobe zstd || return 1
+  modprobe ubi || return 1
+  modprobe ubifs || return 1
+
+  q3n_ubifs_mtd_num=$(mtd_find_named qemu-3dnand-test) || return 1
+  [ -n "$q3n_ubifs_mtd_num" ] || return 1
+  mtd_find_named qemu-3dnand-data >/dev/null || return 1
+  q3n_sysfs="/sys/class/mtd/mtd${q3n_ubifs_mtd_num}"
+  [ "$(cat "$q3n_sysfs/size")" = "8572108800" ] || return 1
+  [ "$(cat "$q3n_sysfs/writesize")" = "16384" ] || return 1
+  grep -qx nand "$q3n_sysfs/type" || return 1
+  q3n_ubifs_dev="/dev/mtd${q3n_ubifs_mtd_num}"
+
+  mkdir -p "$UBIFS_MOUNT"
+  ubiformat -q -y "$q3n_ubifs_dev" || return 1
+  ubiattach /dev/ubi_ctrl -m "$q3n_ubifs_mtd_num" || return 1
+  ubimkvol /dev/ubi0 -N "$UBIFS_VOL_NAME" -m || return 1
+  mount -t ubifs "ubi0:$UBIFS_VOL_NAME" "$UBIFS_MOUNT" || return 1
+  echo "q3n-pseudo-slc-raid1" > "$UBIFS_MOUNT/probe.txt" || return 1
+  sync
+  grep -qx "q3n-pseudo-slc-raid1" "$UBIFS_MOUNT/probe.txt" || return 1
+  mtd_q3n_ubifs_cleanup
+  q3n_ubifs_mtd_num=
+  trap - 0 HUP INT TERM
+  echo "q3n pSLC RAID1 UBIFS smoke passed"
 }
 
 mtd_clean() {

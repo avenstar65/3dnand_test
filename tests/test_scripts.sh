@@ -90,6 +90,7 @@ for file in \
   scripts/build-module.sh \
   scripts/run-qemu.sh \
   scripts/q3n-serial-smoke.sh \
+  scripts/q3n-ubifs-smoke.sh \
   scripts/q3n-persistence-smoke.sh \
   scripts/gdb-kernel.sh \
   scripts/smoke-test.sh \
@@ -141,6 +142,7 @@ for file in \
   scripts/build-module.sh \
   scripts/run-qemu.sh \
   scripts/q3n-serial-smoke.sh \
+  scripts/q3n-ubifs-smoke.sh \
   scripts/q3n-persistence-smoke.sh \
   scripts/gdb-kernel.sh \
   scripts/smoke-test.sh \
@@ -242,6 +244,11 @@ assert_contains rootfs/profile.d/mtd.sh 'p1 over p2 acceptance passed'
 assert_contains rootfs/profile.d/mtd.sh 'while.*page.*-lt 8'
 assert_contains rootfs/profile.d/mtd.sh 'cmp.*q3n-serial-page'
 assert_contains rootfs/init 'q3n-serial-smoke.*mtd_q3n_serial_smoke'
+assert_contains rootfs/init 'q3n-ubifs-smoke.*mtd_q3n_ubifs_smoke'
+assert_contains rootfs/profile.d/mtd.sh 'mtd_q3n_ubifs_smoke'
+assert_contains rootfs/profile.d/mtd.sh '/type'
+assert_contains rootfs/profile.d/mtd.sh 'grep -qx nand'
+assert_contains rootfs/profile.d/mtd.sh 'q3n pSLC RAID1 UBIFS smoke passed'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-generation-smoke'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-cancel-barrier-smoke'
 assert_contains rootfs/profile.d/mtd.sh 'q3n-markbad-smoke'
@@ -381,6 +388,8 @@ assert_function_contains qemu/hw/mtd/q3n-nand.c q3n_mmio_read \
   'Q3N_CAP_MULTIPLANE'
 assert_function_contains qemu/hw/mtd/q3n-nand.c q3n_mmio_read \
   'Q3N_CAP_PSEUDO_SLC'
+assert_contains qemu/hw/mtd/q3n-media.c 'blk_pdiscard'
+assert_not_contains qemu/hw/mtd/q3n-media.c 'g_malloc0\(page_block_length\)'
 assert_function_contains linux/drivers/mtd/nand/raw/qemu_3dnand_nand.c \
   qemu_3dnand_attach_chip 'q3n_device_apply_pslc'
 assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_nand.c \
