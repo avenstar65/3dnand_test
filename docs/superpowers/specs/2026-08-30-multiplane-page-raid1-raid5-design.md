@@ -3,7 +3,7 @@
 Linux 驱动后续按功能拆分的模块边界、器件识别和验证要求见
 [QEMU 3D NAND Linux 驱动按功能拆分设计](2026-09-13-linux-driver-functional-split-design.md)。
 
-修订日期：2026-09-12。
+修订日期：2026-09-19。
 
 状态：**已按本设计实现并完成多-plane RAID1/RAID5 验收**。迁移前代码
 基线 `22b9519` 使用 direct MTD 与 manifest；当前实现已接入 NAND core /
@@ -44,6 +44,10 @@ nand_chip / controller 回调，不直接接管 mtd_info 的 I/O 函数指针。
 - 驱动准备 nand_chip/controller、逻辑 ID 与精确几何，并在 attach_chip
   阶段完成 ECC/OOB 等所需配置；扫描前准备好 legacy 命令、数据和 target
   选择回调，支持识别、状态和复位。controller 对象与 attach_chip 仍保留。
+- QEMU 控制器固定上报 pSLC 运行模式 capability；物理 NAND ID 与 TLC
+  READID 保持一致。驱动只支持 pSLC，在 attach_chip 阶段、nand_scan_tail
+  之前将 NAND memory organization 的运行态 bits-per-cell 设为 1；缺少该
+  capability 时 probe 失败，不提供 TLC 兼容或运行时模式切换。
 - RAID1 的 writesize 为 16 KiB、RAID5 为 48 KiB；均为 1600 页/逻辑块。
   精确几何 core/BBT 补丁是前置依赖，不能只注册回调而忽略地址计算。
 - 公共 oobsize 为 1 B BBM、oobavail 为 0；禁用 subpage 读写，拒绝不满足
@@ -121,6 +125,46 @@ parity 和 data 的位置由代码中的固定公式确定，不在 OOB 或其�
 去掉清单后无法从介质自识别 profile，启动参数必须与写入时一致。
 旧介质不自动转换；默认用独立 fresh NAND 验收。串行兼容指地址、容量、
 接口和调度兼容，不再承诺解释旧清单或继承其保护状态。
+
+### 2.1 固定 pSLC 运行模式与几何
+
+本驱动只支持 pSLC，不支持 TLC 数据布局，也不提供 `pseudo-slc=off` 或
+其他运行时切换开关。当前 QEMU 几何本身就是 pSLC 几何：16 KiB 物理页、
+1664 B 物理 OOB、128 B 逻辑 OOB、1600 pages/block、247 blocks/plane、
+2 die × 4 plane。RAID1/RAID5 的逻辑几何继续由上表按该 pSLC 物理几何
+计算，不从 TLC 容量或 pages/block 推导。
+
+pSLC 是同一颗 NAND 的运行模式，因此 READID 与 TLC 模式一致，不能篡改
+ID 中的 cell-type 位来伪造一颗 SLC 器件。QEMU 在 `Q3N_REG_CAP` 固定上报
+`Q3N_CAP_PSEUDO_SLC`；Linux 驱动的器件描述仍按原 ID 匹配，同时要求该
+能力位存在。能力位表达当前阵列的运行契约，ID 继续表达物理器件身份。
+
+Linux 7.0.12 的扫描顺序是 `nand_scan_ident`、controller `attach_chip`、
+`nand_scan_tail`。识别阶段可以保留物理 ID 所表达的 TLC cell type；驱动在
+`attach_chip` 中验证 `Q3N_CAP_PSEUDO_SLC` 后，将
+`nanddev_get_memorg(&chip->base)->bits_per_cell` 设为 1。随后
+`nand_scan_tail` 内的 `nanddev_init` 基于运行态值创建 `MTD_NANDFLASH`，
+从而让 UBI 按 SLC 设备接受它。扫描完成后驱动再次验证 `nand_is_slc()` 与
+`mtd->type == MTD_NANDFLASH`；不一致时清理 NAND core 状态并拒绝注册 MTD。
+不修改 UBI 的 MLC 拒绝逻辑，也不新增 NAND core 的 pSLC 私有分支。
+
+```mermaid
+flowchart TD
+    Q["QEMU 固定 pSLC 布局<br/>保持原物理 READID"] --> C["Q3N_REG_CAP<br/>Q3N_CAP_PSEUDO_SLC"]
+    C --> P["Linux PCI probe<br/>读取 ID、capability 与 pSLC 几何"]
+    P --> V{"ID 已支持且<br/>pSLC capability 存在？"}
+    V -->|否| F["probe 失败<br/>不提供 TLC 模式"]
+    V -->|是| I["nand_scan_ident<br/>识别物理器件与精确几何"]
+    I --> A["controller.attach_chip<br/>运行态 bits_per_cell = 1"]
+    A --> T["nand_scan_tail / nanddev_init<br/>MTD_NANDFLASH"]
+    T --> B["nand_create_bbt<br/>按 pSLC 逻辑几何建表"]
+    B --> U["RAID1 可进入 UBI / UBIFS"]
+```
+
+RAID1 的 16 KiB writesize 是二次幂，可以进入原生 UBI/UBIFS；RAID5 的
+48 KiB writesize 仍触发原生 UBI/UBIFS 的非二次幂限制，本轮不修改该限制。
+端到端 UBIFS 验收使用 QEMU 已有 block-pool 参数缩小测试容量，避免测试时
+对默认 20 GiB 级逻辑 MTD 执行全盘 `flash_erase`。默认产品几何不缩小。
 
 ## 3. 接口分层与初始化
 
@@ -862,6 +906,12 @@ PROTECTED 资格，否则无法检验恢复路径。raw 改写、erase、重新�
 ## 13. 验收矩阵与限制
 
 - 三模式正确注册 NAND core，驱动不覆盖 MTD I/O callbacks。
+- QEMU 保持原 NAND ID并固定上报 `Q3N_CAP_PSEUDO_SLC`；缺少 capability
+  时驱动 probe 失败，不存在 TLC/off 模式。
+- multi-plane RAID1/RAID5 均由 pSLC 物理几何派生；扫描后
+  `nand_is_slc()` 为真且 MTD 类型为 `MTD_NANDFLASH`。
+- 缩小 block pool 的 RAID1 pSLC 验收能够 attach UBI、创建 volume、挂载
+  UBIFS、写回读、卸载并 detach；RAID5 明确不执行 UBIFS 验收。
 - 固定公式覆盖首尾页、跨块、两 die 分布、RAID1 两组镜像、
   RAID5 parity 0/1/2/3 轮转与串行 parity_row。
 - 正常 data/parity 写不产生任何 RAID OOB program；
