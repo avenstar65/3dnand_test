@@ -84,6 +84,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(Q3NNandState, Q3N_NAND)
 #define Q3N_CAP_PERSISTENT_MEDIA        (1U << 1)
 #define Q3N_CAP_BAD_BLOCK_MARKER        (1U << 2)
 #define Q3N_CAP_MULTIPLANE              (1U << 3)
+#define Q3N_CAP_PSEUDO_SLC              (1U << 4)
 
 #define Q3N_MP_ALL_PLANES               0x0fU
 

@@ -78,6 +78,7 @@
 #define Q3N_CAP_PERSISTENT_MEDIA       BIT(1)
 #define Q3N_CAP_BAD_BLOCK_MARKER       BIT(2)
 #define Q3N_CAP_MULTIPLANE             BIT(3)
+#define Q3N_CAP_PSEUDO_SLC             BIT(4)
 
 #define Q3N_BLOCK_STATUS_BAD           BIT(0)
 

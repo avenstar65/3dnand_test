@@ -379,6 +379,10 @@ for symbol in \
 done
 assert_function_contains qemu/hw/mtd/q3n-nand.c q3n_mmio_read \
   'Q3N_CAP_MULTIPLANE'
+assert_function_contains qemu/hw/mtd/q3n-nand.c q3n_mmio_read \
+  'Q3N_CAP_PSEUDO_SLC'
+assert_contains qemu/hw/mtd/q3n-nand.c \
+  '0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44'
 for handler in \
   q3n_cmd_mp_read_page q3n_cmd_mp_program_page \
   q3n_cmd_mp_read_page_oob q3n_cmd_mp_program_page_oob \
@@ -387,6 +391,7 @@ for handler in \
 done
 for symbol in \
   Q3N_CAP_MULTIPLANE \
+  Q3N_CAP_PSEUDO_SLC \
   Q3N_REG_MP_DIE Q3N_REG_MP_PLANE_MASK Q3N_REG_MP_SLOT \
   Q3N_REG_MP_ADDR_LO Q3N_REG_MP_ADDR_HI \
   Q3N_REG_MP_SUCCESS_MASK Q3N_REG_MP_FAILURE_MASK \

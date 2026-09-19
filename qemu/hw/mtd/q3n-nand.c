@@ -1009,7 +1009,8 @@ static uint64_t q3n_mmio_read(void *opaque, hwaddr offset, unsigned size)
         return Q3N_ID_VALUE;
     case Q3N_REG_CAP:
         return Q3N_CAP_BASIC_FLASH | Q3N_CAP_PERSISTENT_MEDIA |
-               Q3N_CAP_BAD_BLOCK_MARKER | Q3N_CAP_MULTIPLANE;
+               Q3N_CAP_BAD_BLOCK_MARKER | Q3N_CAP_MULTIPLANE |
+               Q3N_CAP_PSEUDO_SLC;
     case Q3N_REG_STATUS:
         return s->status;
     case Q3N_REG_CMD:
