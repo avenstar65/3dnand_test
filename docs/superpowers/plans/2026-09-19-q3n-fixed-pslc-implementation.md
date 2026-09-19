@@ -25,8 +25,8 @@
 - A QEMU/driver ABI mismatch in the new capability bit must fail probe instead of silently registering TLC MTD.
 - The physical READID must remain byte-for-byte unchanged while operational `bits_per_cell` becomes 1.
 - The pSLC override must happen in `attach_chip()`, before `nand_scan_tail()`, so MTD becomes `MTD_NANDFLASH`.
-- Reduced block-pool input must reject zero, non-numeric, and pool-overflow values before QEMU launch; 82 data blocks/plane must expose a RAID1 MTD of exactly 8200 MiB.
-- The UBIFS smoke must use a dedicated 8200 MiB logical MTD image, never erase the default full-capacity image, and cleanly unmount/detach on success or failure.
+- The 8 GiB target must be rounded down by exact division to an eraseblock boundary; RAID1 and RAID5 must both produce an 8175 MiB test partition.
+- The UBIFS smoke must format only `qemu-3dnand-test`, never the master or `qemu-3dnand-data`, and cleanly unmount/detach on success or failure.
 
 ---
 
@@ -208,44 +208,81 @@ git add linux/drivers/mtd/nand/raw/qemu_3dnand_device.c \
 git commit -m "feat: expose q3n runtime geometry as pseudo-SLC"
 ```
 
-### Task 3: Add a safe reduced-capacity QEMU launch option
+### Task 3: Split the scanned pSLC master into test and data MTDs
 
 **Files:**
-- Modify: `scripts/run-qemu.sh`
+- Modify: `linux/drivers/mtd/nand/raw/qemu_3dnand_device.c`
+- Modify: `linux/drivers/mtd/nand/raw/qemu_3dnand_nand.c`
+- Modify: `linux/drivers/mtd/nand/raw/qemu_3dnand_internal.h`
+- Modify: `linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c`
 - Modify: `tests/test_scripts.sh`
 
 **Interfaces:**
-- Consumes: QEMU's existing `data-blocks-per-plane` property.
-- Produces: host option `--data-blocks-per-plane N`; default remains 208 and `N=82` yields an 8200 MiB RAID1 MTD.
+- Consumes: the fully scanned master `mtd->size` and `mtd->erasesize`.
+- Produces: `int q3n_device_test_partition_size(u64 size, u32 erasesize, u64 *test_size)` plus two persistent `struct mtd_partition` entries named `qemu-3dnand-test` and `qemu-3dnand-data`.
 
-- [ ] **Step 1: Add failing script assertions and argument tests**
+- [ ] **Step 1: Add failing KUnit and structural tests**
 
-Extend `tests/test_scripts.sh` to assert the option, property, numeric validation, and default:
+Add KUnit coverage for both multi-plane profiles:
 
-```sh
-assert_contains scripts/run-qemu.sh '--data-blocks-per-plane'
-assert_contains scripts/run-qemu.sh 'data-blocks-per-plane='
-assert_contains scripts/run-qemu.sh 'data_blocks_per_plane=208'
-assert_contains scripts/run-qemu.sh '\*\[\!0-9\]\*'
+```c
+KUNIT_ASSERT_EQ(test,
+	q3n_device_test_partition_size(SZ_16G, 25 * SZ_1M, &size), 0);
+KUNIT_EXPECT_EQ(test, size, 8175ULL * SZ_1M);
+KUNIT_ASSERT_EQ(test,
+	q3n_device_test_partition_size(SZ_16G, 75 * SZ_1M, &size), 0);
+KUNIT_EXPECT_EQ(test, size, 8175ULL * SZ_1M);
 ```
 
-Add a shell invocation with `--data-blocks-per-plane invalid` and assert it exits nonzero before trying to locate QEMU.
+Also require `-ENOSPC` when the aligned test partition is zero or consumes
+the whole master. Add structural assertions for both partition names and for
+`mtd_device_register` receiving the partition array.
 
-- [ ] **Step 2: Run the script test and verify RED**
+- [ ] **Step 2: Run tests and verify RED**
 
-Run: `./tests/test_scripts.sh`
+Run:
 
-Expected: FAIL because the new host option is absent.
-
-- [ ] **Step 3: Implement validated device argument construction**
-
-Initialize `data_blocks_per_plane=208`, parse `--data-blocks-per-plane N`, reject zero/non-numeric values, and reject values above 208 for the smoke-test interface. Build:
-
-```sh
-q3n_device="q3n-nand-pci,drive=q3n-media,data-blocks-per-plane=$data_blocks_per_plane"
+```bash
+./tests/test_scripts.sh
+./scripts/shell.sh ./scripts/build-kernel.sh
 ```
 
-Pass `-device "$q3n_device"`. Keep all existing options and defaults unchanged.
+Expected: FAIL because the size helper and partition descriptors are absent.
+
+- [ ] **Step 3: Implement exact partition sizing**
+
+Implement the helper without power-of-two alignment macros:
+
+```c
+u64 blocks;
+
+if (!erasesize || !test_size)
+	return -EINVAL;
+blocks = div64_u64(SZ_8G, erasesize);
+*test_size = blocks * erasesize;
+if (!*test_size || *test_size >= size)
+	return -ENOSPC;
+return 0;
+```
+
+Store `struct mtd_partition partitions[2]` in `struct qemu_3dnand`. After
+`nand_scan_with_ids()` and pSLC validation, initialize:
+
+```c
+q3n->partitions[0] = (struct mtd_partition) {
+	.name = "qemu-3dnand-test",
+	.offset = 0,
+	.size = test_size,
+};
+q3n->partitions[1] = (struct mtd_partition) {
+	.name = "qemu-3dnand-data",
+	.offset = MTDPART_OFS_APPEND,
+	.size = MTDPART_SIZ_FULL,
+};
+```
+
+Register both with `mtd_device_register(q3n->mtd, q3n->partitions, 2)`.
+The master remains the single NAND-core/BBT owner.
 
 - [ ] **Step 4: Run tests and verify GREEN**
 
@@ -253,25 +290,22 @@ Run:
 
 ```bash
 ./tests/test_scripts.sh
-./scripts/run-qemu.sh --help
+./scripts/shell.sh ./scripts/build-kernel.sh
+./scripts/shell.sh ./scripts/build-rootfs.sh
+./scripts/q3n-kunit-smoke.sh
 ```
 
-Expected: PASS; help lists the new option and states that it is intended for reduced-capacity tests.
+Expected: PASS; RAID1 and RAID5 boot logs expose non-overlapping test/data
+partitions and the test partition size is `8572108800` bytes.
 
-Run an interactive geometry check with `--data-blocks-per-plane 82`,
-load `qemu_3dnand raid_level=1`, and require:
-
-```sh
-test "$(cat /sys/class/mtd/mtd0/size)" = "8598323200"
-```
-
-The value is `82 × 4 × 1600 × 16384` bytes, or 8200 MiB.
-
-- [ ] **Step 5: Commit the launch option**
+- [ ] **Step 5: Commit partition registration**
 
 ```bash
-git add scripts/run-qemu.sh tests/test_scripts.sh
-git commit -m "test: support reduced q3n block pools"
+git add linux/drivers/mtd/nand/raw/qemu_3dnand_device.c \
+  linux/drivers/mtd/nand/raw/qemu_3dnand_nand.c \
+  linux/drivers/mtd/nand/raw/qemu_3dnand_internal.h \
+  linux/drivers/mtd/nand/raw/qemu_3dnand_kunit.c tests/test_scripts.sh
+git commit -m "feat: split q3n into test and data MTDs"
 ```
 
 ### Task 4: Prove RAID1 pSLC with UBI/UBIFS
@@ -283,7 +317,7 @@ git commit -m "test: support reduced q3n block pools"
 - Modify: `tests/test_scripts.sh`
 
 **Interfaces:**
-- Consumes: `--data-blocks-per-plane 82`, a dedicated `work/media/q3n-ubifs-smoke.raw` image, guest `raid_level=1`, compression modules, UBI and UBIFS.
+- Consumes: `qemu-3dnand-test`, a dedicated `work/media/q3n-ubifs-smoke.raw` image, guest `raid_level=1`, compression modules, UBI and UBIFS.
 - Produces: guest function `mtd_q3n_ubifs_smoke()`, boot selector `MTD_SMOKE=q3n-ubifs-smoke`, and success marker `q3n pSLC RAID1 UBIFS smoke passed`.
 
 - [ ] **Step 1: Add failing structure tests**
@@ -320,7 +354,8 @@ modprobe ubi
 modprobe ubifs
 ```
 
-Then locate only the `qemu-3dnand` MTD, verify writesize is 16384, and
+Then locate only the `qemu-3dnand-test` MTD, require size `8572108800`,
+verify writesize is 16384, and
 require `/sys/class/mtd/mtd${mtd_num}/type` to equal `nand`:
 
 ```sh
@@ -339,7 +374,6 @@ Create `scripts/q3n-ubifs-smoke.sh` following the existing smoke wrappers:
 ```sh
 if ! "$repo_root/scripts/run-qemu.sh" --fresh-nand \
      --nand-image work/media/q3n-ubifs-smoke.raw \
-     --data-blocks-per-plane 82 \
      --append "MTD_SMOKE=q3n-ubifs-smoke" >"$log" 2>&1; then
   cat "$log"
   die "q3n pSLC RAID1 UBIFS QEMU failed"
@@ -348,7 +382,8 @@ fi
 
 Require both the q3n UBIFS marker and generic MTD success marker.
 Before formatting, the guest must require the MTD size to be
-`8598323200` bytes. The wrapper must use a cleanup trap for only the exact
+`8572108800` bytes and confirm that `qemu-3dnand-data` also exists. The
+wrapper must use a cleanup trap for only the exact
 `work/media/q3n-ubifs-smoke.raw` test image so a failed run cannot leave a
 large allocation behind.
 

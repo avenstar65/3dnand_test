@@ -163,8 +163,27 @@ flowchart TD
 
 RAID1 的 16 KiB writesize 是二次幂，可以进入原生 UBI/UBIFS；RAID5 的
 48 KiB writesize 仍触发原生 UBI/UBIFS 的非二次幂限制，本轮不修改该限制。
-端到端 UBIFS 验收使用 QEMU 已有 block-pool 参数缩小测试容量，避免测试时
-对默认 20 GiB 级逻辑 MTD 执行全盘 `flash_erase`。默认产品几何不缩小。
+QEMU 物理 block pool 和 master MTD 容量保持不变；驱动在 NAND core 完成
+扫描和 BBT 创建后注册两个 MTD 分区：
+
+- `qemu-3dnand-test`：目标 8 GiB，按当前 profile 的 `erasesize` 向下
+  对齐。RAID1/RAID5 的对齐结果均为 8175 MiB。
+- `qemu-3dnand-data`：从 test 分区末尾开始，占用剩余全部容量。
+
+两个分区共享同一个已扫描 master 和 RAM BBT，不各自重新执行 `nand_scan`
+或维护独立坏块表。端到端 RAID1 UBIFS 验收只格式化 test 分区，禁止对 master
+或 data 分区执行全盘 `flash_erase` / `ubiformat`。
+
+```mermaid
+flowchart TD
+    S["nand_scan_with_ids<br/>完整 pSLC master"] --> B["nand_create_bbt<br/>统一 RAM BBT"]
+    B --> P["按 erasesize 对齐 8 GiB 边界"]
+    P --> T["qemu-3dnand-test<br/>RAID1/5：8175 MiB"]
+    P --> D["qemu-3dnand-data<br/>剩余全部容量"]
+    T --> U["RAID1：UBI / UBIFS 验收"]
+    T --> R["RAID5：仅 raw MTD"]
+    D --> N["正常数据区<br/>测试不得格式化"]
+```
 
 ## 3. 接口分层与初始化
 
@@ -910,8 +929,10 @@ PROTECTED 资格，否则无法检验恢复路径。raw 改写、erase、重新�
   时驱动 probe 失败，不存在 TLC/off 模式。
 - multi-plane RAID1/RAID5 均由 pSLC 物理几何派生；扫描后
   `nand_is_slc()` 为真且 MTD 类型为 `MTD_NANDFLASH`。
-- 缩小 block pool 的 RAID1 pSLC 验收能够 attach UBI、创建 volume、挂载
-  UBIFS、写回读、卸载并 detach；RAID5 明确不执行 UBIFS 验收。
+- master 扫描和统一 BBT 完成后注册 test/data 两个 MTD；test 目标 8 GiB
+  并按 profile 擦除块向下对齐，data 覆盖剩余容量且两者不重叠。
+- RAID1 pSLC 验收只在 `qemu-3dnand-test` 上 attach UBI、创建 volume、
+  挂载 UBIFS、写回读、卸载并 detach；RAID5 明确不执行 UBIFS 验收。
 - 固定公式覆盖首尾页、跨块、两 die 分布、RAID1 两组镜像、
   RAID5 parity 0/1/2/3 轮转与串行 parity_row。
 - 正常 data/parity 写不产生任何 RAID OOB program；
