@@ -80,6 +80,27 @@ static void q3n_device_id_supplies_runtime_geometry_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, q3n->ecc_strength, (u32)40);
 }
 
+static void q3n_device_pslc_requires_capability_test(struct kunit *test)
+{
+	struct qemu_3dnand *q3n = kunit_kzalloc(test, sizeof(*q3n), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, q3n);
+	nanddev_get_memorg(&q3n->chip.base)->bits_per_cell = 3;
+	KUNIT_EXPECT_EQ(test, q3n_device_apply_pslc(q3n), -ENODEV);
+	KUNIT_EXPECT_EQ(test, nanddev_bits_per_cell(&q3n->chip.base), 3U);
+}
+
+static void q3n_device_pslc_sets_runtime_cell_type_test(struct kunit *test)
+{
+	struct qemu_3dnand *q3n = kunit_kzalloc(test, sizeof(*q3n), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, q3n);
+	q3n->cap = Q3N_CAP_PSEUDO_SLC;
+	nanddev_get_memorg(&q3n->chip.base)->bits_per_cell = 3;
+	KUNIT_ASSERT_EQ(test, q3n_device_apply_pslc(q3n), 0);
+	KUNIT_EXPECT_TRUE(test, nand_is_slc(&q3n->chip));
+}
+
 static void q3n_device_rejects_missing_capability_test(struct kunit *test)
 {
 	static const u8 exact[] = {
@@ -738,6 +759,8 @@ static void q3n_ram_only_recovery_qualification_test(struct kunit *test)
 static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_device_full_id_match_test),
 	KUNIT_CASE(q3n_device_id_supplies_runtime_geometry_test),
+	KUNIT_CASE(q3n_device_pslc_requires_capability_test),
+	KUNIT_CASE(q3n_device_pslc_sets_runtime_cell_type_test),
 	KUNIT_CASE(q3n_device_rejects_missing_capability_test),
 	KUNIT_CASE(q3n_device_rejects_ecc_mismatch_test),
 	KUNIT_CASE(q3n_device_rejects_unaligned_geometry_test),

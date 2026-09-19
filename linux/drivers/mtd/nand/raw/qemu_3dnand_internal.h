@@ -215,6 +215,7 @@ void q3n_debugfs_remove(struct qemu_3dnand *q3n);
 void q3n_debugfs_unpause(struct qemu_3dnand *q3n);
 
 const struct q3n_device_desc *q3n_device_match(const u8 *id, size_t len);
+int q3n_device_apply_pslc(struct qemu_3dnand *q3n);
 int q3n_device_apply_geometry(struct qemu_3dnand *q3n,
 			      const struct q3n_device_desc *device);
 int q3n_device_validate_geometry(struct qemu_3dnand *q3n,

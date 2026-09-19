@@ -457,7 +457,11 @@ static int qemu_3dnand_attach_chip(struct nand_chip *chip)
 {
 	struct qemu_3dnand *q3n = qemu_3dnand_from_chip(chip);
 	struct mtd_info *mtd = nand_to_mtd(chip);
+	int ret;
 
+	ret = q3n_device_apply_pslc(q3n);
+	if (ret)
+		return ret;
 	mtd_set_ooblayout(mtd, &qemu_3dnand_ooblayout_ops);
 	chip->ecc.engine_type = NAND_ECC_ENGINE_TYPE_ON_HOST;
 	chip->ecc.placement = NAND_ECC_PLACEMENT_OOB;
@@ -534,7 +538,8 @@ static int q3n_nand_scan_and_register(struct qemu_3dnand *q3n, u64 size)
 	if (ret)
 		return ret;
 	q3n->scanned = true;
-	if (q3n->mtd->size != size) {
+	if (q3n->mtd->size != size || !nand_is_slc(&q3n->chip) ||
+	    q3n->mtd->type != MTD_NANDFLASH) {
 		ret = -EINVAL;
 		goto err_cleanup;
 	}

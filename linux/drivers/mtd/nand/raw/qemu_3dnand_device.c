@@ -45,7 +45,8 @@ static const struct q3n_device_desc q3n_devices[] = {
 		.id = { 0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44 },
 		.id_len = Q3N_NAND_ID_LEN,
 		.required_caps = Q3N_CAP_BASIC_FLASH |
-			Q3N_CAP_PERSISTENT_MEDIA | Q3N_CAP_BAD_BLOCK_MARKER,
+			Q3N_CAP_PERSISTENT_MEDIA | Q3N_CAP_BAD_BLOCK_MARKER |
+			Q3N_CAP_PSEUDO_SLC,
 		.page_size = YMTC_PAGE_SIZE,
 		.logical_oob_size = YMTC_LOGICAL_OOB_SIZE,
 		.physical_oob_size = YMTC_PHYSICAL_OOB_SIZE,
@@ -59,6 +60,17 @@ static const struct q3n_device_desc q3n_devices[] = {
 		.ldpc_steps = YMTC_LDPC_STEPS,
 	},
 };
+
+int q3n_device_apply_pslc(struct qemu_3dnand *q3n)
+{
+	struct nand_memory_organization *memorg;
+
+	if (!q3n || !(q3n->cap & Q3N_CAP_PSEUDO_SLC))
+		return -ENODEV;
+	memorg = nanddev_get_memorg(&q3n->chip.base);
+	memorg->bits_per_cell = 1;
+	return 0;
+}
 
 const struct q3n_device_desc *q3n_device_match(const u8 *id, size_t len)
 {
