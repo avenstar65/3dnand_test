@@ -530,6 +530,25 @@ static void q3n_nand_init_mtd(struct qemu_3dnand *q3n)
 	q3n->mtd->priv = q3n;
 }
 
+static int q3n_nand_init_partitions(struct qemu_3dnand *q3n)
+{
+	u64 test_size;
+	int ret;
+
+	ret = q3n_device_test_partition_size(q3n->mtd->size,
+		q3n->mtd->erasesize, &test_size);
+	if (ret)
+		return ret;
+	q3n->partitions[0] = (struct mtd_partition) {
+		.name = "qemu-3dnand-test", .offset = 0, .size = test_size,
+	};
+	q3n->partitions[1] = (struct mtd_partition) {
+		.name = "qemu-3dnand-data", .offset = MTDPART_OFS_APPEND,
+		.size = MTDPART_SIZ_FULL,
+	};
+	return 0;
+}
+
 static int q3n_nand_scan_and_register(struct qemu_3dnand *q3n, u64 size)
 {
 	int ret;
@@ -543,7 +562,11 @@ static int q3n_nand_scan_and_register(struct qemu_3dnand *q3n, u64 size)
 		ret = -EINVAL;
 		goto err_cleanup;
 	}
-	ret = mtd_device_register(q3n->mtd, NULL, 0);
+	ret = q3n_nand_init_partitions(q3n);
+	if (ret)
+		goto err_cleanup;
+	ret = mtd_device_register(q3n->mtd, q3n->partitions,
+		ARRAY_SIZE(q3n->partitions));
 	if (ret)
 		goto err_cleanup;
 	return 0;

@@ -4,6 +4,7 @@
 
 #include <linux/debugfs.h>
 #include <linux/mtd/mtd.h>
+#include <linux/mtd/partitions.h>
 #include <linux/mtd/rawnand.h>
 #include <linux/pci.h>
 #include <linux/workqueue.h>
@@ -58,6 +59,7 @@ struct qemu_3dnand {
 	struct nand_controller controller;
 	struct nand_chip chip;
 	struct mtd_info *mtd;
+	struct mtd_partition partitions[2];
 	struct nand_flash_dev scan_ids[2];
 	bool scanned;
 	bool core_markbad;
@@ -216,6 +218,7 @@ void q3n_debugfs_unpause(struct qemu_3dnand *q3n);
 
 const struct q3n_device_desc *q3n_device_match(const u8 *id, size_t len);
 int q3n_device_apply_pslc(struct qemu_3dnand *q3n);
+int q3n_device_test_partition_size(u64 size, u32 erasesize, u64 *test_size);
 int q3n_device_apply_geometry(struct qemu_3dnand *q3n,
 			      const struct q3n_device_desc *device);
 int q3n_device_validate_geometry(struct qemu_3dnand *q3n,

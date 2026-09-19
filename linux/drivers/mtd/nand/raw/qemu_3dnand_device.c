@@ -2,6 +2,7 @@
 /* NAND identification and per-device constraints. */
 
 #include <linux/kernel.h>
+#include <linux/math64.h>
 #include <linux/overflow.h>
 #include <linux/string.h>
 
@@ -69,6 +70,19 @@ int q3n_device_apply_pslc(struct qemu_3dnand *q3n)
 		return -ENODEV;
 	memorg = nanddev_get_memorg(&q3n->chip.base);
 	memorg->bits_per_cell = 1;
+	return 0;
+}
+
+int q3n_device_test_partition_size(u64 size, u32 erasesize, u64 *test_size)
+{
+	u64 blocks;
+
+	if (!erasesize || !test_size)
+		return -EINVAL;
+	blocks = div64_u64(SZ_8G, erasesize);
+	*test_size = blocks * erasesize;
+	if (!*test_size || *test_size >= size)
+		return -ENOSPC;
 	return 0;
 }
 

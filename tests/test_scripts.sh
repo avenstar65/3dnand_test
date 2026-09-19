@@ -383,6 +383,12 @@ assert_function_contains qemu/hw/mtd/q3n-nand.c q3n_mmio_read \
   'Q3N_CAP_PSEUDO_SLC'
 assert_function_contains linux/drivers/mtd/nand/raw/qemu_3dnand_nand.c \
   qemu_3dnand_attach_chip 'q3n_device_apply_pslc'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_nand.c \
+  'qemu-3dnand-test'
+assert_contains linux/drivers/mtd/nand/raw/qemu_3dnand_nand.c \
+  'qemu-3dnand-data'
+assert_function_contains linux/drivers/mtd/nand/raw/qemu_3dnand_nand.c \
+  q3n_nand_scan_and_register 'q3n->partitions'
 assert_contains qemu/hw/mtd/q3n-nand.c \
   '0x9c, 0xd7, 0x98, 0xa6, 0x51, 0x33, 0x4e, 0x44'
 for handler in \

@@ -101,6 +101,30 @@ static void q3n_device_pslc_sets_runtime_cell_type_test(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, nand_is_slc(&q3n->chip));
 }
 
+static void q3n_device_test_partition_aligns_profiles_test(struct kunit *test)
+{
+	u64 size;
+
+	KUNIT_ASSERT_EQ(test, q3n_device_test_partition_size(
+		SZ_16G, 25 * SZ_1M, &size), 0);
+	KUNIT_EXPECT_EQ(test, size, 8175ULL * SZ_1M);
+	KUNIT_ASSERT_EQ(test, q3n_device_test_partition_size(
+		SZ_16G, 75 * SZ_1M, &size), 0);
+	KUNIT_EXPECT_EQ(test, size, 8175ULL * SZ_1M);
+}
+
+static void q3n_device_test_partition_rejects_no_space_test(struct kunit *test)
+{
+	u64 size;
+
+	KUNIT_EXPECT_EQ(test,
+		q3n_device_test_partition_size(SZ_1M, 2 * SZ_1M, &size),
+		-ENOSPC);
+	KUNIT_EXPECT_EQ(test,
+		q3n_device_test_partition_size(SZ_8G, SZ_1M, &size),
+		-ENOSPC);
+}
+
 static void q3n_device_rejects_missing_capability_test(struct kunit *test)
 {
 	static const u8 exact[] = {
@@ -761,6 +785,8 @@ static struct kunit_case q3n_map_test_cases[] = {
 	KUNIT_CASE(q3n_device_id_supplies_runtime_geometry_test),
 	KUNIT_CASE(q3n_device_pslc_requires_capability_test),
 	KUNIT_CASE(q3n_device_pslc_sets_runtime_cell_type_test),
+	KUNIT_CASE(q3n_device_test_partition_aligns_profiles_test),
+	KUNIT_CASE(q3n_device_test_partition_rejects_no_space_test),
 	KUNIT_CASE(q3n_device_rejects_missing_capability_test),
 	KUNIT_CASE(q3n_device_rejects_ecc_mismatch_test),
 	KUNIT_CASE(q3n_device_rejects_unaligned_geometry_test),
